@@ -85,7 +85,7 @@ if [ "$WANT_SEAL" = 1 ]; then
   SEALRAW=https://raw.githubusercontent.com/yallacloud/yc-scripts/main/seal
   GOTGH=0; USEDLOCAL=0
   for t in AppX-Strip.ps1 Clean-Scripts.ps1 Enable-VirtioBoot.ps1 Fix-DiagTools.ps1 \
-           Fix-PreSeal.ps1 gi-settings.ps1 GoldenImage.ps1 Install-YcPayload.ps1 \
+           Fix-PreSeal.ps1 gi-settings.ps1 Install-YcPayload.ps1 \
            Install-YcTasks.ps1 PreSeal-Agents.ps1 Seal-Manual.ps1 yc-check.ps1 \
            yc-folders.ps1 yc-id.ps1 doseal.cmd; do
     if curl -fsSL --max-time 60 -o "$STAGE/.seal.tmp" "$SEALRAW/$t" && [ -s "$STAGE/.seal.tmp" ]; then

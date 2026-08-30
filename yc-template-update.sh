@@ -47,13 +47,27 @@ else
   SEALRAW=https://raw.githubusercontent.com/yallacloud/yc-scripts/main/seal
   CACHE=/root/.sealcache; mkdir -p "$CACHE"; SN=0; SF=0
   for t in AppX-Strip.ps1 Clean-Scripts.ps1 Enable-VirtioBoot.ps1 Fix-DiagTools.ps1 \
-           Fix-PreSeal.ps1 gi-settings.ps1 GoldenImage.ps1 Install-YcPayload.ps1 \
+           Fix-PreSeal.ps1 gi-settings.ps1 Install-YcPayload.ps1 \
            Install-YcTasks.ps1 PreSeal-Agents.ps1 Seal-Manual.ps1 yc-check.ps1 \
            yc-folders.ps1 yc-id.ps1 doseal.cmd; do
     curl -fsSL --max-time 90 -o "$CACHE/$t" "$SEALRAW/$t" 2>/dev/null || true
     if [ -s "$CACHE/$t" ] && $P "$CACHE/$t" Administrator@$IP:C:/Scripts/$t 2>/dev/null; then SN=$((SN+1)); else SF=$((SF+1)); fi
   done
   echo "    seal tooling restored: $SN file(s)$([ $SF -gt 0 ] && echo ", $SF FAILED")"
+
+  # 3b. the Bitdefender tenant installer. Same casualty as the seal tooling: it is a
+  #     vendor binary, not part of the payload, so the full overwrite removes it and
+  #     Bitdefender-Register - which finds it by glob - then has nothing to run.
+  BD=$(ls -1 /yc-primary/goldenstuff/agents/bitdefender/setupdownloader_*.exe 2>/dev/null | head -1)
+  if [ -n "$BD" ]; then
+    if $P "$BD" "Administrator@$IP:C:/Scripts/$(basename "$BD")" 2>/dev/null; then
+      echo "    bitdefender installer restored"
+    else
+      echo "    bitdefender installer FAILED to copy"
+    fi
+  else
+    echo "    bitdefender installer not in goldenstuff - skipped"
+  fi
 
   # 4. the self-update task
   $G "$PS -File C:\\Scripts\\Yc-AutoUpdate.ps1 -Install" 2>&1 | grep -viE 'warning|^$' | tail -3 | sed 's/^/    /'
@@ -71,6 +85,12 @@ $i=[array]::IndexOf($p,'NetworkConfigPlugin'); $u=[array]::IndexOf($p,'UserDataP
 'TASK '+$(if(Get-ScheduledTask -TaskName 'YC-AutoUpdate' -EA 0){'ok'}else{'MISSING'})
 $sm=@('Seal-Manual.ps1','AppX-Strip.ps1','doseal.cmd','Clean-Scripts.ps1','Unattend-Seal.xml') | Where-Object { -not (Test-Path (Join-Path 'C:\Scripts' $_)) }
 'SEALKIT '+$(if($sm.Count -eq 0){'ok'}else{'MISSING:'+($sm -join ',')})
+# Seal-Manual aborts on these by name. Anything here means the seal will refuse.
+$jk=@('GoldenImage.ps1','GoldenImage-v239-yc.ps1','Prep-Seal.ps1') | Where-Object { Test-Path (Join-Path 'C:\Scripts' $_) }
+$jk+=@(Get-ChildItem 'C:\Scripts' -Filter *.sh -File -EA 0 | ForEach-Object Name)
+$jk+=@(Get-ChildItem 'C:\Scripts' -Filter *.py -File -EA 0 | ForEach-Object Name)
+'JUNK '+$(if($jk.Count -eq 0){'none'}else{($jk -join ',')})
+'BITDEF '+$(if(@(Get-ChildItem 'C:\Scripts' -Filter 'setupdownloader_*' -File -EA 0).Count){'ok'}else{'MISSING'})
 'REARM '+(Get-CimInstance SoftwareLicensingService -EA 0).RemainingWindowsReArmCount
 'LIC '+((& cscript //nologo C:\Windows\System32\slmgr.vbs /xpr 2>&1) -join ' ').Trim()
 $e=0; foreach($f in Get-ChildItem C:\Scripts -Filter *.ps1 -File -EA 0){$er=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName,[ref]$t,[ref]$er); if($er -and $er.Count){$e++}}
@@ -86,6 +106,10 @@ GOT=$(echo "$R"   | awk '/^SHA /{print $2}')
 [ "$(echo "$R" | awk '/^TASK /{print $2}')"   = ok ] && ok "YC-AutoUpdate registered" || no "YC-AutoUpdate task"
 SK=$(echo "$R" | awk '/^SEALKIT /{print $2}')
 if [ "$SK" = ok ]; then ok "seal tooling present"; else no "seal tooling $SK"; fi
+JK=$(echo "$R" | awk '/^JUNK /{print $2}')
+if [ "$JK" = none ]; then ok "no seal-blocking junk in C:\\Scripts"; else no "Seal-Manual will ABORT on: $JK"; fi
+BD=$(echo "$R" | awk '/^BITDEF /{print $2}')
+if [ "$BD" = ok ]; then ok "bitdefender installer present"; else no "bitdefender installer missing - bitdefender-register would fail"; fi
 [ "$(echo "$R" | awk '/^PARSEERR /{print $2}')" = 0 ] && ok "every .ps1 parses under PowerShell 5.1" || no "$(echo "$R"|awk '/^PARSEERR /{print $2}') script(s) fail to parse"
 RE=$(echo "$R" | awk '/^REARM /{print $2}')
 case "$RE" in

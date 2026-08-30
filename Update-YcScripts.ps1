@@ -1,8 +1,16 @@
 param(
   [string]$Zip = 'C:/Windows/Temp/yc-update.zip',
-  [string]$Url = '',
+  # These DEFAULT to the canonical payload. They used to default to empty, and the
+  # consequences were both real and silent: run with no arguments the script either
+  # exited 3 because it had no idea where the payload lives, or - worse - found a stale
+  # yc-update.zip left in Temp by an earlier run and installed it with NO hash check at
+  # all. Two template VMs were put back onto a v264 payload that way on 2026-08-30.
+  # The one script whose whole job is "make C:\Scripts current" now knows where current is.
+  [string]$Url    = 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/YallaCloud-CScripts-latest.zip',
   [string]$Sha = '',
-  [string]$ShaUrl = '',
+  [string]$ShaUrl = 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/YallaCloud-CScripts-latest.sha256',
+  # Install a zip that nothing has verified. Offline use only, and it has to be asked for.
+  [switch]$AllowUnverified,
   # Directories under C:\Scripts that a FULL OVERWRITE must not touch. These hold
   # vendor binaries and drivers - roughly 1.7 GB - that the payload deliberately
   # does not ship, so deleting them is not recoverable from the zip. Pass -Keep @()
@@ -40,7 +48,10 @@ PARAMETERS:
                  of waiting for somebody to scp it. TLS 1.2 is forced before the download, because
                  on Windows Server 2016 .NET otherwise offers TLS 1.0 and the transfer fails with
                  "the underlying connection was closed" - which reads as "no internet".
-  -Sha           expected SHA256 of the zip        (skip the check if omitted - not advised)
+  -Sha           expected SHA256 of the zip. Omitted, the hash comes from -ShaUrl instead;
+                 if neither yields a hash the script REFUSES to install rather than
+                 overwrite C:\Scripts from something unverified.
+  -AllowUnverified  install anyway with no hash. Offline use only.
   -ShaUrl        HTTPS URL of the .sha256 sidecar next to the zip. Use this instead of -Sha so the
                  caller never has to change when a new payload is published: the guest fetches the
                  current hash itself. This is what the cloud-init user data uses.
@@ -279,8 +290,12 @@ if($Sha){
   $want = $Sha.Trim().ToUpper()
   if($got -ne $want){ Die 4 ('SHA256 mismatch. want=' + $want + ' got=' + $got) }
   Say ('SHA256 verified ' + $got) 'OK'
+}elseif($AllowUnverified){
+  Say ('No expected hash and -AllowUnverified was given; installing UNVERIFIED zip ' + $got) 'WARN'
 }else{
-  Say ('No -Sha given; zip hash is ' + $got) 'WARN'
+  Die 4 ('No expected SHA256 could be established for ' + $Zip + ' (hash ' + $got + '). ' +
+         'Refusing to overwrite C:\Scripts from a payload nothing has verified. ' +
+         'Pass -Sha / -ShaUrl, or -AllowUnverified if you really mean it.')
 }
 
 # --- 3 extract ---------------------------------------------------------------

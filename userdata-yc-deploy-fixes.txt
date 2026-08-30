@@ -1,0 +1,124 @@
+#ps1_sysnative
+# =============================================================================
+#  userdata-yc-deploy-fixes.txt  -  CloudStack / OpenStack DEPLOY-TIME User Data
+#  YallaCloud Windows templates. cloudbase-init runs this as SYSTEM on first boot.
+#
+#  WORKS ON EVERY TEMPLATE, 2016 THROUGH 2025. There is no separate 2016 file:
+#  the TLS 1.2 fix detects the build itself and is skipped on 2019 and later.
+#
+#  CONTAINS NO SECRET, AND NOTHING TO EDIT. The payload comes from a PUBLIC repo
+#  over HTTPS with no credential, and its hash from a sidecar - so this file is
+#  frozen and can be baked into every template as-is.
+#  User Data is served to the guest over plain HTTP by the virtual router and is
+#  readable by any local process for the life of the VM - never put a credential
+#  in it. (See userdata-deploy-example.txt for the secret-handling pattern.)
+#
+#  WHAT THIS DOES, AND WHY THE ORDER IS WHAT IT IS
+#  ----------------------------------------------------------------------------
+#  1. LOCKOUT, INLINE AND FIRST. Before anything else, and without depending on
+#     C:\Scripts existing or being intact. A template-inherited lockout policy
+#     locks the local Administrator on a brand new VM after a few failed logons -
+#     a monitoring probe, a stale saved credential, an automation retry. It also
+#     makes SSH fail: a locked account is refused before the key is considered,
+#     so sshd reports "Permission denied (publickey)" for something that has
+#     nothing to do with the key. Everything below needs this to have happened.
+#  2. TLS 1.2 IN THIS PROCESS. On Windows Server 2016, .NET defaults to TLS 1.0
+#     and the payload download in step 3 fails with "the underlying connection
+#     was closed", which reads as "no internet". The PERMANENT machine-wide
+#     registry fix is applied in step 4 - but step 3 has to survive first, so
+#     this process sets it for itself. This line is why step 4 can exist at all.
+#  3. SYNC C:\Scripts. Pull the current payload and swap it in, verified by
+#     SHA256. The template ships whatever it was sealed with; this is what makes
+#     a freshly deployed VM current.
+#  4. FIX-DEPLOY. The remaining fixes, from the payload just installed:
+#     the lockout policy (verified, not assumed), the isolated-network gateway,
+#     the permanent TLS 1.2 registry values, and the console logon account.
+#
+#  Every step is idempotent. Re-running this changes nothing that is already right.
+# =============================================================================
+$ErrorActionPreference = 'Continue'
+
+# --------- FROZEN. DO NOT EDIT. ---------
+# Both URLs are permanent. The payload hash is NOT here on purpose: it is fetched
+# from the .sha256 sidecar next to the zip, so publishing a new payload is two
+# files pushed to the repo and nothing else - no user data change, no template
+# reseal, no credential anywhere.
+$PayloadUrl    = 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/YallaCloud-CScripts-latest.zip'
+$PayloadShaUrl = 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/YallaCloud-CScripts-latest.sha256'
+# ----------------------------------------
+
+$Log = 'C:\Windows\Temp\yc-deploy-fixes.log'
+function Say([string]$m,[string]$lvl='INFO'){
+  $line = ('{0}  [YC-DEPLOY] [{1}] {2}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'),$lvl,$m)
+  Write-Host $line
+  try{ Add-Content -LiteralPath $Log -Value $line -Encoding ASCII -EA SilentlyContinue }catch{}
+}
+Say ('START host=' + $env:COMPUTERNAME + ' ps=' + $PSVersionTable.PSVersion + ' build=' + [Environment]::OSVersion.Version.Build)
+$fail = 0
+
+# --- 1. lockout, inline, before anything can depend on it --------------------
+try{
+  $out = (& net accounts /lockoutthreshold:0 2>&1 | Out-String).Trim()
+  Say ('net accounts /lockoutthreshold:0 -> ' + ($out -replace '\s+',' '))
+  $chk = (& net accounts 2>&1 | Out-String)
+  if($chk -match '(?im)^Lockout threshold:\s*(.+)$'){ Say ('Lockout threshold is now: ' + $Matches[1].Trim()) 'OK' }
+  # If the account is ALREADY locked from before this ran, clear it - otherwise the
+  # deployment hands out a password for an account nobody can use.
+  $u = Get-CimInstance Win32_UserAccount -Filter "Name='Administrator' AND LocalAccount=True" -EA SilentlyContinue
+  if($u -and $u.Lockout){
+    ([ADSI]("WinNT://" + $env:COMPUTERNAME + "/Administrator,user")).IsAccountLocked = $false
+    Say 'Administrator was locked out and has been unlocked.' 'OK'
+  } else {
+    Say 'Administrator is not locked out.' 'OK'
+  }
+}catch{
+  Say ('Lockout step failed: ' + $_.Exception.Message) 'ERROR'; $fail++
+}
+
+# --- 2. TLS 1.2 for THIS process, so step 3 can happen on Server 2016 --------
+try{
+  $want = [Net.SecurityProtocolType]::Tls12
+  if([enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13'){ try{ $want = $want -bor ([Net.SecurityProtocolType]'Tls13') }catch{} }
+  [Net.ServicePointManager]::SecurityProtocol = $want
+  Say ('TLS for this process: ' + [Net.ServicePointManager]::SecurityProtocol) 'OK'
+}catch{
+  Say ('Could not set TLS for this process: ' + $_.Exception.Message) 'WARN'
+}
+
+# --- 3. bring C:\Scripts up to date -----------------------------------------
+if(-not (Test-Path -LiteralPath 'C:\Scripts\Update-YcScripts.ps1')){
+  Say 'C:\Scripts\Update-YcScripts.ps1 is missing - this is not a YallaCloud image, or the template is damaged. Skipping the payload sync; the fixes below still run from whatever is on disk.' 'ERROR'
+  $fail++
+} else {
+  try{
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Scripts\Update-YcScripts.ps1' `
+        -Url $PayloadUrl -ShaUrl $PayloadShaUrl -Zip 'C:\Windows\Temp\yc-update.zip'
+    $rc = $LASTEXITCODE
+    if($rc -eq 0){ Say 'C:\Scripts updated from the payload and verified.' 'OK' }
+    else{ Say ('Update-YcScripts exited ' + $rc + ' - see C:\Windows\Temp\update-yc-scripts.log. It rolls itself back, so C:\Scripts is not half-updated.') 'ERROR'; $fail++ }
+  }catch{
+    Say ('Payload sync threw: ' + $_.Exception.Message) 'ERROR'; $fail++
+  }
+}
+
+# --- 4. the remaining deployment fixes --------------------------------------
+if(Test-Path -LiteralPath 'C:\Scripts\Fix-Deploy.ps1'){
+  try{
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Scripts\Fix-Deploy.ps1'
+    $rc = $LASTEXITCODE
+    if($rc -eq 0){ Say 'fix-deploy: all applicable fixes are in place.' 'OK' }
+    else{ Say ('fix-deploy exited ' + $rc + ' - see C:\Scripts\fix-deploy.log.') 'ERROR'; $fail++ }
+  }catch{
+    Say ('fix-deploy threw: ' + $_.Exception.Message) 'ERROR'; $fail++
+  }
+} else {
+  Say 'C:\Scripts\Fix-Deploy.ps1 is missing - the gateway, TLS registry and console fixes did NOT run.' 'ERROR'
+  $fail++
+}
+
+if($fail -gt 0){
+  Say ('END exit=1 - ' + $fail + ' step(s) failed. This VM is NOT fully prepared; read ' + $Log) 'ERROR'
+  exit 1
+}
+Say 'END exit=0 - every deployment fix is in place.' 'OK'
+exit 0

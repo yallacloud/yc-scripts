@@ -87,7 +87,17 @@ function Say([string]$m,[string]$lvl='INFO'){
   }
   try{ Add-Content -LiteralPath $Log -Value $line -Encoding ASCII -EA SilentlyContinue }catch{}
 }
-function Die([int]$code,[string]$m){ Say $m 'ERROR'; Say ('END exit=' + $code); exit $code }
+# Every exit path clears the temporary rollback copy. Nothing this script stages
+# may outlive the run: a leftover directory on a customer's VM is exactly what the
+# no-backup rule exists to prevent.
+function Remove-YcRollback{
+  if($Bak -and (Test-Path -LiteralPath $Bak)){
+    Remove-Item -LiteralPath $Bak -Recurse -Force -EA SilentlyContinue
+    if(Test-Path -LiteralPath $Bak){ Say ('Could not remove the temporary rollback copy at ' + $Bak + ' - delete it by hand.') 'WARN' }
+  }
+}
+function Die([int]$code,[string]$m){ Say $m 'ERROR'; Remove-YcRollback; Say ('END exit=' + $code); exit $code }
+trap { Say ('Unhandled: ' + $_.Exception.Message) 'ERROR'; Remove-YcRollback; Say 'END exit=1'; exit 1 }
 
 Say ('START host=' + $env:COMPUTERNAME + ' ps=' + $PSVersionTable.PSVersion)
 
@@ -288,8 +298,7 @@ try{ & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $S 'Ya
 # The rollback copy has done its job. Delete it: nothing is left on the VM, which
 # is the point - C:\Scripts.bak-* directories used to pile up on every host and
 # were never cleaned up by anything.
-Remove-Item -LiteralPath $Bak -Recurse -Force -EA SilentlyContinue
-if(Test-Path -LiteralPath $Bak){ Say ('Could not remove the temporary rollback copy at ' + $Bak + ' - delete it by hand.') 'WARN' }
+Remove-YcRollback
 Say ('Updated. C:\Scripts now holds this payload and nothing else' + $(if($Keep.Count){ ' (except ' + ($Keep -join ', ') + ')' }else{ '' }) + '. No backup was kept.') 'OK'
 Say 'END exit=0'
 exit 0

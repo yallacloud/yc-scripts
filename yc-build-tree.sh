@@ -109,6 +109,27 @@ else
   say "seal tooling    <- SKIPPED (--no-seal)"
 fi
 
+# MANIFEST.json is a real check now, not decoration. It sat stale for a whole payload
+# generation with 130 of 175 entries pointing at paths that no longer existed, and nothing
+# ever read it. Every entry marked shipped must be in the tree we just staged.
+if [ -f "$STAGE/MANIFEST.json" ]; then
+  MISSING=$(python3 - "$STAGE" <<'PYEOF'
+import json,os,sys
+stage=sys.argv[1]
+try: mem=json.load(open(os.path.join(stage,'MANIFEST.json')))['members']
+except Exception as e: print('MANIFEST-UNREADABLE:'+str(e)); raise SystemExit
+bad=[e['name'] for e in mem
+     if e.get('shipped',True) and not os.path.isfile(os.path.join(stage,os.path.basename(e.get('install_to','') or e.get('target',''))))]
+print(' '.join(bad))
+PYEOF
+)
+  if [ -n "$MISSING" ]; then
+    say "  MANIFEST: not in the tree -> $MISSING"
+  else
+    say "  MANIFEST: every shipped entry is present"
+  fi
+fi
+
 N=$(find "$STAGE" -type f | wc -l)
 SZ=$(du -sh "$STAGE" | cut -f1)
 [ "$N" -gt 100 ] || die "only $N files staged - a source is empty, refusing to build a broken tree"

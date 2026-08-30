@@ -39,6 +39,14 @@ PARAMETERS:
   -ShaUrl        HTTPS URL of the .sha256 sidecar next to the zip. Use this instead of -Sha so the
                  caller never has to change when a new payload is published: the guest fetches the
                  current hash itself. This is what the cloud-init user data uses.
+
+                 If either HTTPS fetch fails and the URL is on raw.githubusercontent.com, it falls
+                 back to a shallow git clone of the same repo - every YallaCloud server has git.
+                 The remote, branch and path are DERIVED from the URL, so nothing new is passed and
+                 the user data stays frozen. github.com and raw.githubusercontent.com are separate
+                 hosts that can fail independently, and git does its own TLS through schannel rather
+                 than .NET, so the fallback is unaffected by the Server 2016 TLS 1.0 default. The
+                 clone is temporary and deleted on every exit path.
   -Keep          directories under C:\Scripts a full overwrite must NOT delete.
                  Default: virtio, Sysinternals, DiagTools - roughly 1.7 GB of vendor binaries and
                  drivers the payload deliberately does not ship, so deleting them is not
@@ -75,6 +83,7 @@ $Stamp= (Get-Date).ToString('yyyyMMdd-HHmmss')
 # fail. Nothing named C:\Scripts.bak-* is ever created - those accumulated on
 # every VM and were never cleaned up.
 $Bak  = Join-Path $env:windir ('Temp\yc-rollback-' + $Stamp)
+$script:GitClone = $null   # set by the git fallback below; declared here so the cleanup can always read it
 $Log  = 'C:\Windows\Temp\update-yc-scripts.log'
 
 function Say([string]$m,[string]$lvl='INFO'){
@@ -95,6 +104,12 @@ function Remove-YcRollback{
     Remove-Item -LiteralPath $Bak -Recurse -Force -EA SilentlyContinue
     if(Test-Path -LiteralPath $Bak){ Say ('Could not remove the temporary rollback copy at ' + $Bak + ' - delete it by hand.') 'WARN' }
   }
+  # The git fallback clone is temporary too. Same rule: nothing this script stages
+  # may outlive the run.
+  if($script:GitClone -and (Test-Path -LiteralPath $script:GitClone)){
+    Remove-Item -LiteralPath $script:GitClone -Recurse -Force -EA SilentlyContinue
+    if(Test-Path -LiteralPath $script:GitClone){ Say ('Could not remove the temporary git clone at ' + $script:GitClone + ' - delete it by hand.') 'WARN' }
+  }
 }
 function Die([int]$code,[string]$m){ Say $m 'ERROR'; Remove-YcRollback; Say ('END exit=' + $code); exit $code }
 trap { Say ('Unhandled: ' + $_.Exception.Message) 'ERROR'; Remove-YcRollback; Say 'END exit=1'; exit 1 }
@@ -108,6 +123,65 @@ try{
   $isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }catch{}
 if(-not $isAdmin){ Die 5 'Must run as Administrator.' }
+
+# --- git fallback -------------------------------------------------------------
+# Every YallaCloud server has git installed, so when the direct HTTPS fetch fails
+# there is a second way to the same bytes. It is a FALLBACK, not the primary path:
+# a raw download is 744 KB and a shallow clone is a couple of MB, so the plain
+# download stays first.
+#
+# Two reasons it is worth having. github.com and raw.githubusercontent.com are
+# different hosts and can be filtered or fail independently. And git does its own
+# TLS through schannel rather than .NET, so it is unaffected by the Server 2016
+# TLS 1.0 default that breaks Invoke-WebRequest on exactly the machines that need
+# this script most.
+#
+# The repo, branch and path are DERIVED from the raw URL, so cloud-init user data
+# passes nothing new and stays frozen.
+$RawRx = '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$'
+
+function Get-YcGitClone{
+  param([string]$RawUrl)
+  if($script:GitClone -and (Test-Path -LiteralPath $script:GitClone)){ return $script:GitClone }
+  $m = [regex]::Match($RawUrl, $RawRx)
+  if(-not $m.Success){ Say ('Not a raw.githubusercontent.com URL, no git fallback: ' + $RawUrl) 'WARN'; return $null }
+  $git = Get-Command git.exe -EA SilentlyContinue
+  if(-not $git){ Say 'git is not on PATH - no fallback available.' 'WARN'; return $null }
+  $remote = 'https://github.com/' + $m.Groups[1].Value + '/' + $m.Groups[2].Value + '.git'
+  $branch = $m.Groups[3].Value
+  $dest   = Join-Path $env:windir ('Temp\yc-gitfetch-' + $Stamp)
+  if(Test-Path -LiteralPath $dest){ Remove-Item -LiteralPath $dest -Recurse -Force -EA SilentlyContinue }
+  Say ('Falling back to git: clone --depth 1 --branch ' + $branch + ' ' + $remote)
+  try{
+    & git.exe clone --depth 1 --branch $branch --quiet $remote $dest 2>&1 | Out-Null
+  }catch{
+    Say ('git clone threw: ' + $_.Exception.Message) 'WARN'; return $null
+  }
+  if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dest)){
+    Say ('git clone failed (exit ' + $LASTEXITCODE + ').') 'WARN'
+    if(Test-Path -LiteralPath $dest){ Remove-Item -LiteralPath $dest -Recurse -Force -EA SilentlyContinue }
+    return $null
+  }
+  $script:GitClone = $dest
+  Say ('git clone OK -> ' + $dest + ' (temporary, removed at the end)') 'OK'
+  return $dest
+}
+
+# Returns $true and writes $OutFile, or $false. Never throws - the caller decides
+# whether a miss is fatal.
+function Get-YcFileViaGit{
+  param([string]$RawUrl,[string]$OutFile)
+  $m = [regex]::Match($RawUrl, $RawRx)
+  if(-not $m.Success){ return $false }
+  $root = Get-YcGitClone -RawUrl $RawUrl
+  if(-not $root){ return $false }
+  $src = Join-Path $root ($m.Groups[4].Value -replace '/','\')
+  if(-not (Test-Path -LiteralPath $src)){ Say ('Not in the clone: ' + $m.Groups[4].Value) 'WARN'; return $false }
+  $dir = Split-Path -Parent $OutFile
+  if($dir -and -not (Test-Path -LiteralPath $dir)){ New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  try{ Copy-Item -LiteralPath $src -Destination $OutFile -Force -EA Stop }catch{ return $false }
+  return $true
+}
 
 # --- 1 fetch (cloud-init path) -----------------------------------------------
 # Download only when we do not already hold the right bytes. Re-fetching a payload
@@ -142,7 +216,17 @@ if($Url){
         Say ('Sidecar ' + $ShaUrl + ' held no SHA256 - continuing without a hash check.') 'WARN'
       }
     }catch{
-      Say ('Sidecar fetch failed: ' + $_.Exception.Message + ' - continuing without a hash check.') 'WARN'
+      Say ('Sidecar fetch failed: ' + $_.Exception.Message + ' - trying git.') 'WARN'
+      $tmpSha = Join-Path $env:windir ('Temp\yc-sha-' + $Stamp + '.txt')
+      if(Get-YcFileViaGit -RawUrl $ShaUrl -OutFile $tmpSha){
+        $txt = Get-Content -LiteralPath $tmpSha -Raw
+        Remove-Item -LiteralPath $tmpSha -Force -EA SilentlyContinue
+        $m2 = [regex]::Match($txt, '([0-9a-fA-F]{64})')
+        if($m2.Success){ $Sha = $m2.Groups[1].Value.ToUpper(); Say ('Expected SHA256 from sidecar (via git): ' + $Sha) 'OK' }
+        else{ Say 'Sidecar from git held no SHA256 - continuing without a hash check.' 'WARN' }
+      } else {
+        Say 'git fallback could not get the sidecar - continuing without a hash check.' 'WARN'
+      }
     }
   }
 
@@ -171,7 +255,12 @@ if($Url){
       Invoke-WebRequest -Uri $Url -OutFile $Zip -UseBasicParsing -TimeoutSec 900
       Say ('Downloaded ' + (Get-Item -LiteralPath $Zip).Length + ' bytes.') 'OK'
     }catch{
-      Die 3 ('Download failed: ' + $_.Exception.Message)
+      Say ('Download failed: ' + $_.Exception.Message + ' - trying git.') 'WARN'
+      if(Get-YcFileViaGit -RawUrl $Url -OutFile $Zip){
+        Say ('Fetched ' + (Get-Item -LiteralPath $Zip).Length + ' bytes via git.') 'OK'
+      } else {
+        Die 3 ('Download failed and the git fallback did not produce the payload either: ' + $_.Exception.Message)
+      }
     }
   }
 }

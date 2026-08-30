@@ -1,6 +1,6 @@
 # =============================================================
 # Fix-Deploy.ps1  v1.0  (2026-08-29)
-# YALLACLOUD - the four DEPLOYMENT-TIME defects that bite every VM built from a
+# YALLACLOUD - the five DEPLOYMENT-TIME defects that bite every VM built from a
 # template, applied in one idempotent pass so cloud-init can call ONE thing.
 #
 # These are not theoretical. Each one cost real time on the 2026-08 fleet:
@@ -62,7 +62,7 @@ param(
 Start-YcLog 'fix-deploy'
 $ErrorActionPreference = 'Continue'
 
-$AllFixes = @('lockout','gateway','tls','console')
+$AllFixes = @('lockout','gateway','tls','console','cbinit')
 
 if($Help){
 @"
@@ -89,6 +89,16 @@ THE FIXES:
   console   LogonUI LastLoggedOnUser / LastLoggedOnSAMUser = .\Administrator, so the console
             lands on the account whose password the deployment hands out. Mostly a vCenter
             problem. Applies to: every template.
+  cbinit    Adds the cloudbase-init NetworkConfigPlugin if the template shipped without it.
+            Without that plugin cloudbase-init NEVER applies the IP, netmask, gateway, routes
+            or DNS that CloudStack puts in the config drive. On a network with a virtual
+            router DHCP hides the problem; on an ISOLATED network there is no DHCP, so the
+            VM comes up with no usable network at all. This is the ROOT CAUSE that the
+            'gateway' fix above only papers over. Inserted in the documented position - before
+            UserDataPlugin and LocalScriptsPlugin, so user data runs with a working network.
+            The conf change alone does not re-run cloudbase-init; either reboot, or run
+            the command this fix prints in the log. Applies to: every template built before
+            2026-08-30.
 
 CLOUD-INIT: call this FIRST, before anything that needs the network or SSH:
   C:\Scripts\fix-deploy.cmd
@@ -319,6 +329,58 @@ if($run -contains 'console'){
   [void](Set-YcRegString -Path $lu -Name 'LastLoggedOnUser'        -Value '.\Administrator')
   [void](Set-YcRegString -Path $lu -Name 'LastLoggedOnSAMUser'     -Value '.\Administrator')
   [void](Set-YcRegString -Path $lu -Name 'LastLoggedOnDisplayName' -Value 'Administrator')
+}
+
+# ===========================================================================
+# FIX 5 - cloudbase-init NetworkConfigPlugin
+# The template's plugins= line was written without it, so cloudbase-init read the
+# config drive, saw the network details and applied NONE of them. Proven on 5 of 5
+# registered Windows templates on 2026-08-30.
+# ===========================================================================
+if($run -contains 'cbinit'){
+  Write-YcLog '--- cbinit: checking the cloudbase-init plugin list ---'
+  $ncp  = 'cloudbaseinit.plugins.common.networkconfig.NetworkConfigPlugin'
+  $conf = Join-Path $env:ProgramFiles 'Cloudbase Solutions\Cloudbase-Init\conf\cloudbase-init.conf'
+  if(-not (Test-Path -LiteralPath $conf)){
+    Write-YcLog '  cloudbase-init is not installed on this machine - nothing to do.' 'OK'
+  } else {
+    $lines = @(Get-Content -LiteralPath $conf -ErrorAction SilentlyContinue)
+    $idx   = -1
+    for($i=0; $i -lt $lines.Count; $i++){ if($lines[$i] -match '^\s*plugins\s*='){ $idx = $i; break } }
+    if($idx -lt 0){
+      Write-YcLog ('  no plugins= line in ' + $conf + ' - refusing to guess. Fix by hand.') 'WARN'
+      $script:Failed++
+    } elseif($lines[$idx] -like ('*' + $ncp + '*')){
+      Write-YcLog '  NetworkConfigPlugin already present - nothing to do.' 'OK'
+    } else {
+      # Documented order: after CreateUserPlugin, before SetUserPassword / UserData /
+      # LocalScripts. Appending it LAST would configure the network only after user data
+      # had already tried to use it.
+      $old = $lines[$idx]
+      $new = ''
+      foreach($a in 'cloudbaseinit.plugins.windows.createuser.CreateUserPlugin',
+                    'cloudbaseinit.plugins.common.sethostname.SetHostNamePlugin'){
+        if($old -like ('*' + $a + '*')){ $new = $old -replace [regex]::Escape($a), ($a + ',' + $ncp); break }
+      }
+      if(-not $new){ $new = $old.TrimEnd() + ',' + $ncp }
+      Write-YcLog ('  current: ' + $old)
+      if($Report){
+        Write-YcLog ('  WOULD write: ' + $new) 'WARN'; $script:Would++
+      } else {
+        try{
+          $lines[$idx] = $new
+          Set-Content -LiteralPath $conf -Value $lines -Encoding ascii -ErrorAction Stop
+          Write-YcLog ('  written : ' + $new) 'OK'
+          Write-YcLog '  the conf is fixed but cloudbase-init has already run. Reboot, or apply it now with:' 'WARN'
+          Write-YcLog ('    & "' + (Join-Path $env:ProgramFiles 'Cloudbase Solutions\Cloudbase-Init\Python\Scripts\cloudbase-init.exe') + '" --config-file "' + $conf + '"')
+          $script:Changed++
+        }catch{
+          Write-YcLog ('  FAILED to write ' + $conf + ': ' + $_.Exception.Message) 'ERROR'
+          $script:Failed++
+        }
+      }
+    }
+  }
 }
 
 # Report mode changed nothing, so it must not claim anything is "in place" - that is the

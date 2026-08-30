@@ -14,11 +14,41 @@ deployed VM current.
 | `YallaCloud-CScripts-latest.zip` | The payload. Filename is FIXED and must never change. |
 | `YallaCloud-CScripts-latest.sha256` | Its SHA256. Fetched at run time, so nothing else has to change. |
 | `Update-YcScripts.ps1` | Reference copy of the installer that consumes the two files above. Also ships inside the zip. |
+| `Extract-YcScripts.ps1` | The same payload, AES-256 encrypted, for handing to someone off this repo. Password-protected; see below. |
 
 **Zip layout is FLAT** - the scripts sit at the zip root, not under a `Scripts/`
 folder. `Update-YcScripts.ps1` copies the extract root into `C:\Scripts`, so a
 nested folder lands everything one level too deep. Manual restore is therefore
 `Expand-Archive -DestinationPath C:\Scripts`, not `C:\`.
+
+## The encrypted copy
+
+`Extract-YcScripts.ps1` carries the same payload AES-256 encrypted, for the times it has to
+travel by a route that is not this repo.
+
+**It is a script, not a zip, and that is deliberate.** Windows PowerShell 5.1 cannot open a
+password-protected zip: `Expand-Archive` has no password parameter and
+`System.IO.Compression.ZipFile` does not implement the decryption. A `.zip` encrypted with
+WinZip AES would need 7-Zip installed on the target, and a freshly deployed Server 2016 has
+nothing. So the archive carries its own decryptor:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Extract-YcScripts.ps1
+```
+
+It prompts for the password (masked), extracts to `C:\Scripts`, and needs nothing installed.
+`-Destination D:\Staging` extracts somewhere else to inspect first; `-SaveZipOnly` just writes
+the plain zip.
+
+Crypto: PBKDF2-HMAC-SHA1 200,000 rounds to a 64-byte key (AES-256-CBC + a separate
+HMAC-SHA256 key), 16-byte random salt. The MAC is checked **before** any decryption, so a wrong
+password or a tampered file fails cleanly instead of producing rubbish. PBKDF2-HMAC-SHA1 is not
+an upgrade oversight: Server 2016 ships .NET 4.6.2, where `Rfc2898DeriveBytes` has no SHA256
+overload.
+
+**The password is not in this repo and never will be.** It travels by a different route than
+the download. Rebuild with `build-selfextract.py`; `test-selfextract.py` round-trips it and
+proves a wrong password and a flipped bit are both rejected.
 
 ## Why this repo is public
 

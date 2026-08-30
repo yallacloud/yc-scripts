@@ -3,7 +3,15 @@
 $script:FakeBuild = 0
 function Get-CimInstance{ param($ClassName,$Filter,$ErrorAction) [pscustomobject]@{ BuildNumber = $script:FakeBuild } }
 $e=$null;$t=$null
-$ast=[System.Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot/Activate-Windows.ps1",[ref]$t,[ref]$e)
+$target = Join-Path $PSScriptRoot 'Activate-Windows.ps1'
+if(-not (Test-Path -LiteralPath $target)){
+  # ParseFile on a missing path reports "parse errors", which reads as a broken script
+  # rather than a missing one. Say what is actually wrong.
+  Write-Host ("[FAIL] Activate-Windows.ps1 was not found next to this test (" + $target + "). " +
+              "This test must run from the payload directory, normally C:\Scripts.") -ForegroundColor Red
+  exit 1
+}
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($target,[ref]$t,[ref]$e)
 if($e){ throw 'parse errors' }
 foreach($n in @('Get-YcGvlk','Test-YcRearmError','Get-YcEditionFromDism','Format-YcReArm','Get-YcTargetEdition')){
   $f=$ast.Find({param($x) ($x -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and $x.Name -eq $n},$true)

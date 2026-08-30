@@ -36,14 +36,27 @@ PARAMETERS:
                  on Windows Server 2016 .NET otherwise offers TLS 1.0 and the transfer fails with
                  "the underlying connection was closed" - which reads as "no internet".
   -Sha           expected SHA256 of the zip        (skip the check if omitted - not advised)
+  -ShaUrl        HTTPS URL of the .sha256 sidecar next to the zip. Use this instead of -Sha so the
+                 caller never has to change when a new payload is published: the guest fetches the
+                 current hash itself. This is what the cloud-init user data uses.
+  -Keep          directories under C:\Scripts a full overwrite must NOT delete.
+                 Default: virtio, Sysinternals, DiagTools - roughly 1.7 GB of vendor binaries and
+                 drivers the payload deliberately does not ship, so deleting them is not
+                 recoverable from the zip. Pass -Keep @() to wipe C:\Scripts completely and leave
+                 ONLY the payload.
   -NoCompliance  do not run yc-compliance after the swap
   -Help          show this help and exit
 
-WHAT IT DOES:
+WHAT IT DOES - FULL OVERWRITE, NO BACKUP KEPT:
   1 verify the zip hash          4 copy the payload over C:\Scripts
-  2 extract the payload          5 run C:\Scripts\Yc-Compliance.ps1
-  3 back up ONLY the files       6 roll the backup back if the gate fails
-    the payload will replace
+  2 extract the payload          5 DELETE every file in C:\Scripts that is not in the
+  3 stage a rollback copy in       payload, except the -Keep directories
+    %windir%\Temp for the       6 run C:\Scripts\Yc-Compliance.ps1
+    duration of this run only    7 roll back if the gate fails, then delete the copy
+
+  Nothing named C:\Scripts.bak-* is ever created, and the rollback copy is deleted at the
+  end of every run, pass or fail. A script dropped from the payload therefore disappears
+  from the VM instead of lingering as a stale command on the PATH.
 
 EXAMPLES:
   Update-YcScripts.ps1 -Sha 36320738570079C0E78EA4933B6C8A361BF9AB5BEF4BECF96DA6D19C4E8B3713

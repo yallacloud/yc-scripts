@@ -159,7 +159,11 @@ Say 'yc-keyguard.ps1 written' Green
 
 # ================================================================== tasks =====
 # Retire the nine. Deleting a task that is not there is harmless.
-$old = 'GIGrowDisk','GIDiskGuard','GINetwork','GIWatchdog','YCDEPLOY','YCGUARD','YCGUARD5','YCNET','YCNET5'
+# YC-Health-Chkdsk / -Session / -SQL joined this list on 2026-08-30: all three point at
+# Setup-HealthMonitors.ps1, which the v265 audit deleted, so they were registered in every
+# sealed image and failed on every clone forever. yc-health.ps1 covers what they did.
+$old = 'GIGrowDisk','GIDiskGuard','GINetwork','GIWatchdog','YCDEPLOY','YCGUARD','YCGUARD5','YCNET','YCNET5',
+       'YC-Health-Chkdsk','YC-Health-Session','YC-Health-SQL'
 $removed = @()
 foreach($t in $old){
   if(Get-ScheduledTask -TaskName $t -EA SilentlyContinue){

@@ -27,6 +27,14 @@ for dp, _, fns in os.walk(src):
 z.close()
 print(out, os.path.getsize(out), 'bytes')
 PY
+# MANIFEST.sha256 drifted off MANIFEST.json once and stayed wrong for a whole payload
+# generation. Regenerate it from the file every build; a hash nobody maintains is worse
+# than no hash, because it reads like a guarantee.
+if [ -f "$SRC/MANIFEST.json" ]; then
+  ( cd "$SRC" && sha256sum MANIFEST.json > MANIFEST.sha256 )
+  echo "regenerated MANIFEST.sha256"
+fi
+
 # Keep the standalone copies at the repo root identical to what is in the zip.
 # They drifted once and the stale root Update-YcScripts.ps1 would have installed an
 # UNVERIFIED payload and deleted .authorized_keys.baked - the last way back into a VM.

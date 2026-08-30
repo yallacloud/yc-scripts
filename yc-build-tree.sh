@@ -74,8 +74,34 @@ fi
 if [ "$WANT_SEAL" = 1 ]; then
   [ -d "$SEAL" ] || die "missing $SEAL"
   say "seal tooling    <- $SEAL  (doseal.cmd removes this at seal time)"
-  # -n so the GitHub copies always win over a stale local file of the same name.
-  cp -n "$SEAL"/*.ps1 "$SEAL"/*.cmd "$SEAL"/*.xml "$STAGE"/ 2>/dev/null || true
+  # An ALLOW-LIST, not *.ps1. A glob copied A-Z-Deploy.ps1, Setup-HealthMonitors.ps1 and
+  # Setup-YallaCloudExtras.ps1 straight back into C:\Scripts - three of the files the v265
+  # audit deleted from the payload. The glob silently undid the deletion on every build.
+  # -n so the GitHub copies still win over a stale local file of the same name.
+  # GitHub first, the local kit only as a fallback. Three local copies of these files
+  # drifted apart and produced most of the 2026-08-30 defects, so the repo owns them now.
+  # Unattend-Seal.xml is NOT in this list: it ships in the payload, and the payload copy
+  # is canonical. -n so the payload always wins over anything fetched here.
+  SEALRAW=https://raw.githubusercontent.com/yallacloud/yc-scripts/main/seal
+  GOTGH=0; USEDLOCAL=0
+  for t in AppX-Strip.ps1 Clean-Scripts.ps1 Enable-VirtioBoot.ps1 Fix-DiagTools.ps1 \
+           Fix-PreSeal.ps1 gi-settings.ps1 GoldenImage.ps1 Install-YcPayload.ps1 \
+           Install-YcTasks.ps1 PreSeal-Agents.ps1 Seal-Manual.ps1 yc-check.ps1 \
+           yc-folders.ps1 yc-id.ps1 doseal.cmd; do
+    if curl -fsSL --max-time 60 -o "$STAGE/.seal.tmp" "$SEALRAW/$t" && [ -s "$STAGE/.seal.tmp" ]; then
+      [ -e "$STAGE/$t" ] || mv "$STAGE/.seal.tmp" "$STAGE/$t"
+      rm -f "$STAGE/.seal.tmp"
+      GOTGH=$((GOTGH+1))
+    elif [ -f "$SEAL/$t" ]; then
+      rm -f "$STAGE/.seal.tmp"
+      cp -n "$SEAL/$t" "$STAGE"/ 2>/dev/null || true
+      USEDLOCAL=$((USEDLOCAL+1))
+    else
+      die "seal tooling $t is in neither GitHub nor $SEAL"
+    fi
+  done
+  say "  $GOTGH from github, $USEDLOCAL from the local kit"
+  [ "$USEDLOCAL" = 0 ] || say "  WARNING: $USEDLOCAL file(s) came from the local kit - GitHub was unreachable for those."
   G=$(grep -c "SkipRearm>0<" "$STAGE/Unattend-Seal.xml" 2>/dev/null || echo 0)
   [ "$G" = "1" ] || die "Unattend-Seal.xml does not have SkipRearm=0 - refusing to build. Fix $SEAL/Unattend-Seal.xml"
   say "  SkipRearm=0 confirmed"

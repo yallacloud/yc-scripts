@@ -96,9 +96,11 @@ THE FIXES:
             VM comes up with no usable network at all. This is the ROOT CAUSE that the
             'gateway' fix above only papers over. Inserted in the documented position - before
             UserDataPlugin and LocalScriptsPlugin, so user data runs with a working network.
-            The conf change alone does not re-run cloudbase-init; either reboot, or run
-            the command this fix prints in the log. Applies to: every template built before
-            2026-08-30.
+            The conf change alone does not re-run cloudbase-init. It also writes a
+            NETWORK-ONLY conf beside it and prints that command: re-running the MAIN conf
+            would re-run SetUserPasswordPlugin and RESET the Administrator password, which
+            is why cloudbase-init is stopped after the first deployment run. Never
+            re-enable the service. Applies to: every template built before 2026-08-30.
 
 CLOUD-INIT: call this FIRST, before anything that needs the network or SSH:
   C:\Scripts\fix-deploy.cmd
@@ -268,8 +270,24 @@ if($run -contains 'gateway'){
       continue
     }
     # Only act on PROOF: the configured gateway is dead and the candidate answers.
+    # ICMP alone is not proof of death. Plenty of gateways - and every firewall doing its
+    # job - drop ping while routing perfectly, and replacing that route breaks a VM that was
+    # working. Ask the neighbour table too: if the gateway answers ARP it is alive on the
+    # wire, whatever it does with ping, and it is NOT ours to replace.
     $gwUp = $false
-    if($gw){ $gwUp = [bool](Test-Connection -ComputerName $gw -Count 2 -Quiet -ErrorAction SilentlyContinue) }
+    if($gw){
+      $gwUp = [bool](Test-Connection -ComputerName $gw -Count 2 -Quiet -ErrorAction SilentlyContinue)
+      if(-not $gwUp){
+        try{
+          $nb = Get-NetNeighbor -IPAddress $gw -ErrorAction SilentlyContinue |
+                Where-Object { $_.State -in 'Reachable','Stale','Permanent','Delay','Probe' -and $_.LinkLayerAddress -and $_.LinkLayerAddress -notmatch '^(00-00-00-00-00-00)$' }
+          if($nb){
+            $gwUp = $true
+            Write-YcLog ('  ' + $cfg.InterfaceAlias + ' gateway ' + $gw + ' does not answer ICMP but IS in the neighbour table (' + ([string]($nb | Select-Object -First 1).State) + ') - it is alive and is NOT being changed.') 'OK'
+          }
+        }catch{}
+      }
+    }
     if($gwUp){
       Write-YcLog ('  ' + $cfg.InterfaceAlias + ' ' + $ip + ' gateway ' + $gw + ' answers - it is working, so it is NOT being changed.') 'OK'
       continue
@@ -371,9 +389,36 @@ if($run -contains 'cbinit'){
           $lines[$idx] = $new
           Set-Content -LiteralPath $conf -Value $lines -Encoding ascii -ErrorAction Stop
           Write-YcLog ('  written : ' + $new) 'OK'
-          Write-YcLog '  the conf is fixed but cloudbase-init has already run. Reboot, or apply it now with:' 'WARN'
-          Write-YcLog ('    & "' + (Join-Path $env:ProgramFiles 'Cloudbase Solutions\Cloudbase-Init\Python\Scripts\cloudbase-init.exe') + '" --config-file "' + $conf + '"')
           $script:Changed++
+
+          # DO NOT tell anyone to re-run cloudbase-init against the MAIN conf. That conf
+          # contains SetUserPasswordPlugin and CreateUserPlugin, so a re-run RESETS the
+          # Administrator password - which is the exact reason cloudbase-init is stopped
+          # after the first deployment run in the first place. Write a NETWORK-ONLY conf
+          # beside it instead: same metadata sources, two harmless plugins, nothing that
+          # can touch an account.
+          $netOnly = Join-Path (Split-Path $conf -Parent) 'cloudbase-init-networkonly.conf'
+          try{
+            $nl = @()
+            foreach($ln in $lines){
+              if($ln -match '^\s*plugins\s*='){
+                $nl += ('plugins=cloudbaseinit.plugins.common.mtu.MTUPlugin,' + $ncp)
+              } elseif($ln -match '^\s*(inject_user_password|allow_reboot|stop_service_on_exit)\s*='){
+                continue
+              } else { $nl += $ln }
+            }
+            $nl += 'inject_user_password=false'
+            $nl += 'allow_reboot=false'
+            $nl += 'stop_service_on_exit=false'
+            Set-Content -LiteralPath $netOnly -Value $nl -Encoding ascii -ErrorAction Stop
+            Write-YcLog ('  wrote a network-only conf: ' + $netOnly) 'OK'
+            Write-YcLog '  the main conf is fixed for the NEXT clone. To apply the network on THIS machine' 'WARN'
+            Write-YcLog '  without resetting the Administrator password, run:' 'WARN'
+            Write-YcLog ('    & "' + (Join-Path $env:ProgramFiles 'Cloudbase Solutions\Cloudbase-Init\Python\Scripts\cloudbase-init.exe') + '" --config-file "' + $netOnly + '"')
+            Write-YcLog '  Do NOT run it against cloudbase-init.conf and do NOT re-enable the service.' 'WARN'
+          }catch{
+            Write-YcLog ('  could not write the network-only conf: ' + $_.Exception.Message) 'WARN'
+          }
         }catch{
           Write-YcLog ('  FAILED to write ' + $conf + ': ' + $_.Exception.Message) 'ERROR'
           $script:Failed++

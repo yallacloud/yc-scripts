@@ -1,0 +1,2 @@
+# yc-scripts
+c:\scripts

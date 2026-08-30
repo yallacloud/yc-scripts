@@ -37,7 +37,25 @@ else
   #    gateway is deliberately NOT run here - it can move a route and this is a live SSH session.
   $G "$PS -File C:\\Scripts\\Fix-Deploy.ps1 -Only cbinit,lockout,console" 2>&1 | grep -E '\[OK\]|\[ERROR\]|Done\.' | sed 's/^/    /'
 
-  # 3. the self-update task
+  # 3. put the SEAL TOOLING back.
+  #    Update-YcScripts does a FULL overwrite from the payload, and the seal tooling is
+  #    deliberately not in the payload - so the update above deletes Seal-Manual.ps1,
+  #    AppX-Strip.ps1, doseal.cmd and the rest. Without this step the VM comes out of the
+  #    update "READY TO SEAL" with nothing left to seal it with. Same source as the build
+  #    tree: github seal/. doseal.cmd removes them again before sysprep, so none of this
+  #    reaches a customer image.
+  SEALRAW=https://raw.githubusercontent.com/yallacloud/yc-scripts/main/seal
+  CACHE=/root/.sealcache; mkdir -p "$CACHE"; SN=0; SF=0
+  for t in AppX-Strip.ps1 Clean-Scripts.ps1 Enable-VirtioBoot.ps1 Fix-DiagTools.ps1 \
+           Fix-PreSeal.ps1 gi-settings.ps1 GoldenImage.ps1 Install-YcPayload.ps1 \
+           Install-YcTasks.ps1 PreSeal-Agents.ps1 Seal-Manual.ps1 yc-check.ps1 \
+           yc-folders.ps1 yc-id.ps1 doseal.cmd; do
+    curl -fsSL --max-time 90 -o "$CACHE/$t" "$SEALRAW/$t" 2>/dev/null || true
+    if [ -s "$CACHE/$t" ] && $P "$CACHE/$t" Administrator@$IP:C:/Scripts/$t 2>/dev/null; then SN=$((SN+1)); else SF=$((SF+1)); fi
+  done
+  echo "    seal tooling restored: $SN file(s)$([ $SF -gt 0 ] && echo ", $SF FAILED")"
+
+  # 4. the self-update task
   $G "$PS -File C:\\Scripts\\Yc-AutoUpdate.ps1 -Install" 2>&1 | grep -viE 'warning|^$' | tail -3 | sed 's/^/    /'
 fi
 
@@ -51,6 +69,8 @@ $p=((Get-Content $c -EA 0 | Where-Object {$_ -match '^plugins='}) -replace '^plu
 $i=[array]::IndexOf($p,'NetworkConfigPlugin'); $u=[array]::IndexOf($p,'UserDataPlugin')
 'CBINIT '+$(if($i -ge 0 -and $i -lt $u){'ok'}else{'BAD'})
 'TASK '+$(if(Get-ScheduledTask -TaskName 'YC-AutoUpdate' -EA 0){'ok'}else{'MISSING'})
+$sm=@('Seal-Manual.ps1','AppX-Strip.ps1','doseal.cmd','Clean-Scripts.ps1','Unattend-Seal.xml') | Where-Object { -not (Test-Path (Join-Path 'C:\Scripts' $_)) }
+'SEALKIT '+$(if($sm.Count -eq 0){'ok'}else{'MISSING:'+($sm -join ',')})
 'REARM '+(Get-CimInstance SoftwareLicensingService -EA 0).RemainingWindowsReArmCount
 'LIC '+((& cscript //nologo C:\Windows\System32\slmgr.vbs /xpr 2>&1) -join ' ').Trim()
 $e=0; foreach($f in Get-ChildItem C:\Scripts -Filter *.ps1 -File -EA 0){$er=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName,[ref]$t,[ref]$er); if($er -and $er.Count){$e++}}
@@ -64,6 +84,8 @@ GOT=$(echo "$R"   | awk '/^SHA /{print $2}')
 [ "${GOT^^}" = "${WANT^^}" ] && ok "payload ${GOT:0:16}..." || no "payload is ${GOT:0:16}... want ${WANT:0:16}..."
 [ "$(echo "$R" | awk '/^CBINIT /{print $2}')" = ok ] && ok "cloudbase-init NetworkConfigPlugin before UserData" || no "cloudbase-init plugin order"
 [ "$(echo "$R" | awk '/^TASK /{print $2}')"   = ok ] && ok "YC-AutoUpdate registered" || no "YC-AutoUpdate task"
+SK=$(echo "$R" | awk '/^SEALKIT /{print $2}')
+if [ "$SK" = ok ]; then ok "seal tooling present"; else no "seal tooling $SK"; fi
 [ "$(echo "$R" | awk '/^PARSEERR /{print $2}')" = 0 ] && ok "every .ps1 parses under PowerShell 5.1" || no "$(echo "$R"|awk '/^PARSEERR /{print $2}') script(s) fail to parse"
 RE=$(echo "$R" | awk '/^REARM /{print $2}')
 case "$RE" in

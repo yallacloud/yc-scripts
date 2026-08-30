@@ -118,9 +118,17 @@ import json,os,sys
 stage=sys.argv[1]
 try: mem=json.load(open(os.path.join(stage,'MANIFEST.json')))['members']
 except Exception as e: print('MANIFEST-UNREADABLE:'+str(e)); raise SystemExit
-bad=[e['name'] for e in mem
-     if e.get('shipped',True) and not os.path.isfile(os.path.join(stage,os.path.basename(e.get('install_to','') or e.get('target',''))))]
-print(' '.join(bad))
+# The tree is flat apart from DiagTools\, and install_to carries Windows paths, so
+# normalise the separator and look the basename up anywhere under the stage.
+have=set()
+for dp,_,fns in os.walk(stage):
+    for fn in fns: have.add(fn.lower())
+def landed(e):
+    t=(e.get('install_to') or e.get('target') or '').replace('\\','/')
+    b=os.path.basename(t)
+    return bool(b) and b.lower() in have
+bad=[e['name'] for e in mem if e.get('shipped',True) and not landed(e)]
+print(' '.join(sorted(set(bad))))
 PYEOF
 )
   if [ -n "$MISSING" ]; then

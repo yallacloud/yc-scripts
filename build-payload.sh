@@ -27,6 +27,13 @@ for dp, _, fns in os.walk(src):
 z.close()
 print(out, os.path.getsize(out), 'bytes')
 PY
+# Keep the standalone copies at the repo root identical to what is in the zip.
+# They drifted once and the stale root Update-YcScripts.ps1 would have installed an
+# UNVERIFIED payload and deleted .authorized_keys.baked - the last way back into a VM.
+for m in Activate-Windows.ps1 Fix-Deploy.ps1 Update-YcScripts.ps1 test-activate.ps1; do
+  [ -f "$SRC/$m" ] && cp -f "$SRC/$m" "$HERE/$m" && echo "mirrored $m"
+done
+
 sha256sum "$ZIP" | awk '{print toupper($1)"  YallaCloud-CScripts-latest.zip"}' > "$HERE/YallaCloud-CScripts-latest.sha256"
 cat "$HERE/YallaCloud-CScripts-latest.sha256"
 echo "Now: git commit -am 'payload $(date +%F)' && git push"

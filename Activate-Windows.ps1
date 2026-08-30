@@ -132,6 +132,14 @@ EVALUATION IMAGES: the edition change is done with the PUBLISHED GVLK for this b
 SECURITY: -ProductKey / -KMS / -Edition are strictly validated. Values containing shell metacharacters are
       REJECTED, not executed. Only the last 5 characters of the key are ever logged. The staged startup task does
       carry -ProductKey so unattended deployments can finish; it is deleted as soon as the licence verifies.
+EXAMPLES:
+  activate-windows -ProductKey VDYBN-27WPP-V4HQT-9VMD4-VMK7H
+        Evaluation -> Standard using the PUBLISHED GVLK. One way. Reboots, then activates.
+  activate-windows -ProductKey <YOUR-MAK>
+        install a real MAK on a machine that is already the right edition, and activate online.
+  activate-windows -ProductKey <GVLK> -KMS kms.example.local
+        point at a KMS host and activate against it.
+  NEVER run a rearm after converting an edition - it destroys the licensing store.
 EXIT CODES:
   0  Windows is Licensed (SoftwareLicensingProduct LicenseStatus = 1)
   1  bad or missing -ProductKey / -KMS / -Edition, or help

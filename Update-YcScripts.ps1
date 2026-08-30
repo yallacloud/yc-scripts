@@ -8,6 +8,11 @@ param(
   # does not ship, so deleting them is not recoverable from the zip. Pass -Keep @()
   # to wipe C:\Scripts completely and leave ONLY the payload.
   [string[]]$Keep = @('virtio','Sysinternals','DiagTools'),
+  # Once-per-clone STATE FILES a full overwrite must not delete. .authorized_keys.baked is
+  # yc-keyguard's only copy of the tenant SSH key - the last way back in - and the rest are
+  # markers that gate destructive first-boot steps. None ship in the zip, so without this
+  # list every sync destroyed them.
+  [string[]]$KeepFile = @('.rearm-done','.sshhostkeys','.provisioned','.goldenimage','.authorized_keys.baked','.firstboot-runs','.payload-sha256'),
   [switch]$NoCompliance,
   [switch]$Help
 )
@@ -225,7 +230,9 @@ if($Url){
         if($m2.Success){ $Sha = $m2.Groups[1].Value.ToUpper(); Say ('Expected SHA256 from sidecar (via git): ' + $Sha) 'OK' }
         else{ Say 'Sidecar from git held no SHA256 - continuing without a hash check.' 'WARN' }
       } else {
-        Say 'git fallback could not get the sidecar - continuing without a hash check.' 'WARN'
+        # 2026-08-30: this used to continue and install an UNVERIFIED payload over all of
+        # C:\Scripts. A transient network fault must not silently turn integrity off.
+        Die 4 'Could not obtain the expected SHA256 from the sidecar over HTTPS or git. Refusing to install an unverified payload.'
       }
     }
   }
@@ -324,6 +331,7 @@ foreach($f in (Get-ChildItem -LiteralPath $S -Recurse -File -Force -EA SilentlyC
   $rel = $f.FullName.Substring($S.Length).TrimStart('\')
   $top = ($rel -split '\\')[0]
   if($Keep -contains $top){ continue }          # vendor payload, not ours to delete
+  if($KeepFile -contains $f.Name){ continue }   # once-per-clone state, never in the zip
   $doomed += [pscustomobject]@{ Full = $f.FullName; Rel = $rel }
 }
 
@@ -388,6 +396,12 @@ try{ & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $S 'Ya
 # is the point - C:\Scripts.bak-* directories used to pile up on every host and
 # were never cleaned up by anything.
 Remove-YcRollback
+# Record the hash we actually installed. yc-payload-version.txt is a BUILD artefact and
+# carries the hash of whatever the golden image was assembled from - it is not updated by a
+# payload sync, so it drifts immediately and cannot be used to answer 'am I current?'.
+# yc-autoupdate reads this file instead. Written last, after the gate, so a rolled-back run
+# never claims a payload it did not keep.
+try{ Set-Content -LiteralPath (Join-Path $S '.payload-sha256') -Value $got -Encoding ASCII -EA Stop }catch{}
 Say ('Updated. C:\Scripts now holds this payload and nothing else' + $(if($Keep.Count){ ' (except ' + ($Keep -join ', ') + ')' }else{ '' }) + '. No backup was kept.') 'OK'
 Say 'END exit=0'
 exit 0

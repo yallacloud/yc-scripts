@@ -133,12 +133,18 @@ SECURITY: -ProductKey / -KMS / -Edition are strictly validated. Values containin
       REJECTED, not executed. Only the last 5 characters of the key are ever logged. The staged startup task does
       carry -ProductKey so unattended deployments can finish; it is deleted as soon as the licence verifies.
 EXAMPLES:
+  activate-windows -ProductKey <YOUR-SPLA-MAK>
+        The normal case, and the same single command for both paths. On an Evaluation image the
+        edition change uses the PUBLISHED GVLK on its own, reboots, then installs THIS key for
+        real. On a machine already at the right edition it installs the key and activates online.
+  activate-windows -ProductKey <CUSTOMER-BYOL-KEY>
+        Identical. The customer's own MAK or retail key goes exactly where ours would.
   activate-windows -ProductKey VDYBN-27WPP-V4HQT-9VMD4-VMK7H
-        Evaluation -> Standard using the PUBLISHED GVLK. One way. Reboots, then activates.
-  activate-windows -ProductKey <YOUR-MAK>
-        install a real MAK on a machine that is already the right edition, and activate online.
+        Edition change ONLY, with the published GVLK as the key. The VM ends up converted but
+        UNLICENSED: /ato fails 0xC004F074 because there is no KMS host to answer. Use this only
+        when handing a VM over for the customer to key later. The script warns when you do.
   activate-windows -ProductKey <GVLK> -KMS kms.example.local
-        point at a KMS host and activate against it.
+        Only meaningful if a KMS host exists. YallaCloud has never had one.
   NEVER run a rearm after converting an edition - it destroys the licensing store.
 EXIT CODES:
   0  Windows is Licensed (SoftwareLicensingProduct LicenseStatus = 1)
@@ -216,6 +222,17 @@ function Get-YcGvlk{
   if("$TargetEdition" -match 'Datacenter'){ return $dc }
   if("$TargetEdition" -match 'Standard'){ return $std }
   return ''
+}
+
+# Is this key one of the published GVLKs for the running build? Used to catch a
+# "converted but unlicensed" VM before it happens, not to validate the key.
+function Test-YcIsGvlk{
+  param([string]$Key)
+  if(-not $Key){ return $false }
+  foreach($e in 'ServerStandard','ServerDatacenter'){
+    if((Get-YcGvlk $e) -eq $Key){ return $true }
+  }
+  return $false
 }
 
 # Invoke slmgr.vbs with the CALL OPERATOR and an argument ARRAY - no shell, no
@@ -462,6 +479,17 @@ function Maybe-Glpi {
 }
 
 $km = if($ProductKey.Length -gt 5){ ('*'*($ProductKey.Length-5))+$ProductKey.Substring($ProductKey.Length-5) } else { '*****' }
+
+# A published GVLK is an edition SELECTOR, not a licence: it activates only
+# against a KMS host or an ADBA object. YallaCloud has never had either, so a
+# GVLK left installed means /ato fails 0xC004F074 forever and the VM looks
+# converted while being unlicensed. The Evaluation path already picks the GVLK
+# for the DISM step on its own, so passing one in here is almost always a slip.
+# WARN, never refuse: handing a converted-but-unkeyed VM to a BYOL customer who
+# will key it themselves is a legitimate outcome.
+if((-not $KMS) -and (Test-YcIsGvlk $ProductKey)){
+  Write-YcLog ('-ProductKey is the Microsoft-published GVLK for this build. A GVLK is NOT a licence - it activates only against a KMS host or ADBA, and there is no KMS host in this estate, so slmgr /ato will fail 0xC004F074. Pass the REAL key instead (the SPLA MAK, or the customer BYOL key): the edition change uses the published GVLK by itself. Continuing anyway - correct ONLY if this VM is being handed over for the customer to key.') 'WARN'
+}
 Show-WinState 'BEFORE'
 Write-Host ("  Using key    : "+$km) -ForegroundColor DarkGray
 Write-YcLog ('Using product key ' + $km)

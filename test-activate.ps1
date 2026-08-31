@@ -13,7 +13,7 @@ if(-not (Test-Path -LiteralPath $target)){
 }
 $ast=[System.Management.Automation.Language.Parser]::ParseFile($target,[ref]$t,[ref]$e)
 if($e){ throw 'parse errors' }
-foreach($n in @('Get-YcGvlk','Test-YcRearmError','Get-YcEditionFromDism','Format-YcReArm','Get-YcTargetEdition')){
+foreach($n in @('Get-YcGvlk','Test-YcIsGvlk','Test-YcRearmError','Get-YcEditionFromDism','Format-YcReArm','Get-YcTargetEdition')){
   $f=$ast.Find({param($x) ($x -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and $x.Name -eq $n},$true)
   if(-not $f){ throw "function $n not found" }
   Invoke-Expression $f.Extent.Text
@@ -37,6 +37,20 @@ $script:FakeBuild=17763; Check 'unknown ed' (Get-YcGvlk 'ServerFoo')        ''
 foreach($b in 9600,14393,17763,20348,26100){ $script:FakeBuild=$b
   foreach($ed in 'ServerStandard','ServerDatacenter'){
     Check ("shape $b $ed") ((Get-YcGvlk $ed) -match '^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$') 'True' } }
+
+# --- Test-YcIsGvlk. YallaCloud has no KMS host, so a GVLK left installed as the
+# --- final key means the VM is converted but permanently unlicensed (0xC004F074).
+# --- The warning that catches that is only as good as this predicate.
+$script:FakeBuild=20348
+Check 'gvlk 2022 std'   (Test-YcIsGvlk 'VDYBN-27WPP-V4HQT-9VMD4-VMK7H') 'True'
+Check 'gvlk 2022 dc'    (Test-YcIsGvlk 'WX4NM-KYWYW-QJJR4-XV3QB-6VM33') 'True'
+Check 'gvlk wrong os'   (Test-YcIsGvlk 'N69G4-B89J2-4G8F4-WWYCC-J464C') 'False'
+Check 'gvlk not a gvlk' (Test-YcIsGvlk 'AAAAA-BBBBB-CCCCC-DDDDD-EEEEE') 'False'
+Check 'gvlk empty'      (Test-YcIsGvlk '') 'False'
+$script:FakeBuild=17763
+Check 'gvlk 2019 std'   (Test-YcIsGvlk 'N69G4-B89J2-4G8F4-WWYCC-J464C') 'True'
+$script:FakeBuild=7601
+Check 'gvlk unknown os' (Test-YcIsGvlk 'VDYBN-27WPP-V4HQT-9VMD4-VMK7H') 'False'
 
 Check 'D302 detected'  (Test-YcRearmError 'Error: 0xC004D302 The Security Processor reported that the trusted data store was rearmed') 'True'
 Check 'D302 lowercase' (Test-YcRearmError 'error 0xc004d302 blah') 'True'

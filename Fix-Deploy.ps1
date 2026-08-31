@@ -56,13 +56,16 @@
 param(
   [string]$Only,
   [switch]$Report,
+  [switch]$RestartSql,
+  [switch]$MergeOrphanBackups,
+  [switch]$SelfCheck,
   [switch]$Help
 )
 . 'C:\Scripts\_yc-lib.ps1'
 Start-YcLog 'fix-deploy'
 $ErrorActionPreference = 'Continue'
 
-$AllFixes = @('lockout','gateway','tls','console','cbinit')
+$AllFixes = @('lockout','gateway','tls','console','cbinit','sqlrename')
 
 if($Help){
 @"
@@ -72,6 +75,9 @@ USAGE:
   fix-deploy                          apply every fix that applies to this machine
   fix-deploy -Report                  report what WOULD be done, change nothing
   fix-deploy -Only lockout,gateway    apply just these
+  fix-deploy -Only sqlrename -RestartSql          repair SQL after a rename AND restart it now
+  fix-deploy -Only sqlrename -MergeOrphanBackups  also fold the stale backup folder back in
+  fix-deploy -SelfCheck               run the built-in assertions, touch nothing
   fix-deploy -Help
 
 THE FIXES:
@@ -101,6 +107,26 @@ THE FIXES:
             would re-run SetUserPasswordPlugin and RESET the Administrator password, which
             is why cloudbase-init is stopped after the first deployment run. Never
             re-enable the service. Applies to: every template built before 2026-08-30.
+  sqlrename Repairs SQL Server after the Windows computer name changed. A rename does NOT
+            break logins - Windows logins are stored by SID - but it leaves three things
+            wrong, silently:
+              a) @@SERVERNAME keeps the OLD name for ever, because it is read once at
+                 startup from a row this fix rewrites. Linked servers, replication and any
+                 tool that reads @@SERVERNAME see a machine that no longer exists.
+              b) sys.server_principals still shows OLDHOST\chadmin. Cosmetic - the SID is
+                 what authenticates - but confusing, so the login is renamed too.
+              c) Ola Hallengren writes to <BackupDir>\<hostname>\..., so backups fork to a
+                 new folder and @CleanupTime never prunes the old one again. It grows for
+                 ever. This fix REPORTS the orphan; -MergeOrphanBackups moves it back under
+                 the current name so retention applies to it again.
+            REFUSES to touch a clustered instance, an AlwaysOn instance, or one that is a
+            replication publisher / subscriber / distributor - renaming those is not a
+            supported operation and Microsoft says so.
+            @@SERVERNAME only picks up the change when SQL Server restarts. This fix does
+            NOT restart it by default, because fix-deploy must never take a production
+            database down as a side effect. It writes the metadata, then either restarts on
+            -RestartSql or prints the one command that finishes the job.
+            Applies to: any host where the computer name no longer matches @@SERVERNAME.
 
 CLOUD-INIT: call this FIRST, before anything that needs the network or SSH:
   C:\Scripts\fix-deploy.cmd
@@ -113,6 +139,52 @@ EXIT CODES:
 Log: C:\Scripts\fix-deploy.log
 "@ | Write-Host -ForegroundColor Cyan
   Stop-YcLog 0; exit 0
+}
+
+# Escape a value for a T-SQL string literal. Pure.
+function Get-YcSqlLiteral{
+  param([string]$Value)
+  return ("$Value" -replace "'","''")
+}
+# Escape a value for a T-SQL bracketed identifier. Pure.
+function Get-YcSqlBracket{
+  param([string]$Value)
+  return ("$Value" -replace '\]',']]')
+}
+# What @@SERVERNAME SHOULD say on this machine for this instance. Pure.
+function Get-YcExpectedSqlServerName{
+  param([string]$MachineName,[string]$InstanceName)
+  if([string]::IsNullOrEmpty($InstanceName) -or $InstanceName -eq 'MSSQLSERVER'){ return "$MachineName" }
+  return ("$MachineName" + '\' + "$InstanceName")
+}
+
+# ---------------------------------------------------------------------------
+# -SelfCheck. The only logic in this script that builds T-SQL from a machine name is
+# the rename repair, so that is what is asserted: the escaping, and the name it expects.
+# Needs no admin rights, touches nothing, exits non-zero on the first bad assertion.
+# ---------------------------------------------------------------------------
+if($SelfCheck){
+  $n = 0; $bad = 0
+  function T{
+    param([string]$What,[bool]$Ok)
+    $script:n++
+    if($Ok){ Write-Host ('  ok   ' + $What) -ForegroundColor Green }
+    else   { Write-Host ('  FAIL ' + $What) -ForegroundColor Red; $script:bad++ }
+  }
+  $script:n = 0; $script:bad = 0
+  T 'a plain name survives the literal escape'      ((Get-YcSqlLiteral 'WIN-ABC123') -eq 'WIN-ABC123')
+  T 'a single quote is doubled in a literal'        ((Get-YcSqlLiteral "O'Brien") -eq "O''Brien")
+  T 'two single quotes both double'                 ((Get-YcSqlLiteral "a'b'c") -eq "a''b''c")
+  T 'a plain name survives the bracket escape'      ((Get-YcSqlBracket 'HOST\chadmin') -eq 'HOST\chadmin')
+  T 'a closing bracket is doubled'                  ((Get-YcSqlBracket 'HOST\ad]min') -eq 'HOST\ad]]min')
+  T 'the default instance expects the bare name'    ((Get-YcExpectedSqlServerName -MachineName 'NEWHOST' -InstanceName '') -eq 'NEWHOST')
+  T 'MSSQLSERVER also expects the bare name'        ((Get-YcExpectedSqlServerName -MachineName 'NEWHOST' -InstanceName 'MSSQLSERVER') -eq 'NEWHOST')
+  T 'a named instance expects HOST\INSTANCE'        ((Get-YcExpectedSqlServerName -MachineName 'NEWHOST' -InstanceName 'SQLW') -eq 'NEWHOST\SQLW')
+  T 'a matching name is detected as no-op'          ((Get-YcExpectedSqlServerName -MachineName 'H' -InstanceName 'I') -eq 'H\I')
+  Write-Host ''
+  if($script:bad -eq 0){ Write-Host ('SELF-CHECK PASSED: ' + $script:n + ' assertions') -ForegroundColor Green; Stop-YcLog 0; exit 0 }
+  Write-Host ('SELF-CHECK FAILED: ' + $script:bad + ' of ' + $script:n + ' assertions') -ForegroundColor Red
+  Stop-YcLog 1; exit 1
 }
 
 Assert-YcPrereqs -NeedAdmin
@@ -423,6 +495,296 @@ if($run -contains 'cbinit'){
           Write-YcLog ('  FAILED to write ' + $conf + ': ' + $_.Exception.Message) 'ERROR'
           $script:Failed++
         }
+      }
+    }
+  }
+}
+
+# ===========================================================================
+# FIX 6 - SQL Server after a Windows computer rename
+# Renaming a Windows box does NOT lock anyone out of SQL Server: Windows logins are
+# stored by SID and a local account's SID does not change. Proved on 2026-08-31 by
+# renaming a live 2025 Datacenter clone - chadmin still authenticated as sysadmin and
+# all six YC-Sql* scheduled tasks still returned 0.
+#
+# What it DOES leave behind, silently, is three things:
+#   a) @@SERVERNAME still reports the old name. It is read once at startup from a row
+#      in sys.servers that a rename never touches. Microsoft's documented repair is
+#      sp_dropserver / sp_addserver 'local', then a restart.
+#   b) sys.server_principals still shows OLDHOST\chadmin. Cosmetic only.
+#   c) Ola Hallengren writes to <BackupDir>\<hostname>\..., so backups fork into a new
+#      folder and @CleanupTime = 168 only ever prunes the new one. The old folder is
+#      orphaned and grows for ever. Observed live: 7 files stranded, 11 live.
+#
+# The guards matter more than the repair. Renaming is NOT supported on a clustered
+# instance, on an AlwaysOn instance, or on a replication publisher / subscriber /
+# distributor, so this refuses all three rather than "fixing" them into a broken state.
+# ===========================================================================
+$script:YcSqlErr = ''
+
+function Invoke-YcSqlRows{
+  param([string]$Target,[string]$Query,[int]$TimeoutSec = 20)
+  $rows = @(); $cn = $null
+  try{
+    Add-Type -AssemblyName 'System.Data' -ErrorAction SilentlyContinue
+    $cs = 'Server=' + $Target + ';Database=master;Integrated Security=SSPI;Connect Timeout=' +
+          $TimeoutSec + ';Application Name=YallaCloud-fix-deploy'
+    $cn = New-Object System.Data.SqlClient.SqlConnection $cs
+    $cn.Open()
+    $cmd = $cn.CreateCommand(); $cmd.CommandText = $Query; $cmd.CommandTimeout = $TimeoutSec
+    $rd = $cmd.ExecuteReader()
+    while($rd.Read()){
+      $h = @{}
+      for($i = 0; $i -lt $rd.FieldCount; $i++){ $h[$rd.GetName($i)] = $rd.GetValue($i) }
+      $rows += ,$h
+    }
+    $rd.Close()
+    $script:YcSqlErr = ''
+  }catch{
+    $script:YcSqlErr = $_.Exception.Message
+    return $null
+  }finally{
+    if($null -ne $cn){ try{ $cn.Close() }catch{}; try{ $cn.Dispose() }catch{} }
+  }
+  return ,$rows
+}
+function Invoke-YcSqlExec{
+  param([string]$Target,[string]$Query,[int]$TimeoutSec = 60)
+  $cn = $null
+  try{
+    Add-Type -AssemblyName 'System.Data' -ErrorAction SilentlyContinue
+    $cs = 'Server=' + $Target + ';Database=master;Integrated Security=SSPI;Connect Timeout=20' +
+          ';Application Name=YallaCloud-fix-deploy'
+    $cn = New-Object System.Data.SqlClient.SqlConnection $cs
+    $cn.Open()
+    $cmd = $cn.CreateCommand(); $cmd.CommandText = $Query; $cmd.CommandTimeout = $TimeoutSec
+    [void]$cmd.ExecuteNonQuery()
+    $script:YcSqlErr = ''
+    return $true
+  }catch{
+    $script:YcSqlErr = $_.Exception.Message
+    return $false
+  }finally{
+    if($null -ne $cn){ try{ $cn.Close() }catch{}; try{ $cn.Dispose() }catch{} }
+  }
+}
+
+if($run -contains 'sqlrename'){
+  Write-YcLog '--- sqlrename: SQL Server after a Windows computer rename ---'
+
+  $instances = @()
+  foreach($regRoot in 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SQL Server'){
+    $p = Join-Path $regRoot 'Instance Names\SQL'
+    if(-not (Test-Path -LiteralPath $p)){ continue }
+    $props = Get-ItemProperty -LiteralPath $p -ErrorAction SilentlyContinue
+    if($null -eq $props){ continue }
+    foreach($pr in $props.PSObject.Properties){
+      if($pr.Name -like 'PS*'){ continue }
+      if($instances -notcontains $pr.Name){ $instances += $pr.Name }
+    }
+  }
+
+  if($instances.Count -eq 0){
+    Write-YcLog '  no SQL Server instance on this machine - nothing to repair.' 'OK'
+  }
+
+  foreach($instName in $instances){
+    $isDefault = ($instName -eq 'MSSQLSERVER')
+    $target    = if($isDefault){ '.' } else { '.\' + $instName }
+    $svcName   = if($isDefault){ 'MSSQLSERVER' } else { 'MSSQL$' + $instName }
+    $agtName   = if($isDefault){ 'SQLSERVERAGENT' } else { 'SQLAgent$' + $instName }
+
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if($null -eq $svc){
+      Write-YcLog ('  ' + $instName + ': the service ' + $svcName + ' does not exist - skipped.') 'WARN'
+      continue
+    }
+    if($svc.Status -ne 'Running'){
+      Write-YcLog ('  ' + $instName + ': ' + $svcName + ' is ' + $svc.Status + ', not Running. This fix reads and writes ' +
+                   'sys.servers, so it needs the engine up. Start it and re-run.') 'WARN'
+      continue
+    }
+
+    $q = "SET NOCOUNT ON; SELECT CONVERT(nvarchar(128),@@SERVERNAME) AS ServerName," +
+         "CONVERT(nvarchar(128),SERVERPROPERTY('MachineName')) AS MachineName," +
+         "CONVERT(nvarchar(128),ISNULL(SERVERPROPERTY('InstanceName'),'')) AS InstanceName," +
+         "CONVERT(int,ISNULL(SERVERPROPERTY('IsClustered'),0)) AS IsClustered," +
+         "CONVERT(int,ISNULL(SERVERPROPERTY('IsHadrEnabled'),0)) AS IsHadrEnabled"
+    $rows = Invoke-YcSqlRows -Target $target -Query $q
+    if($null -eq $rows -or $rows.Count -eq 0){
+      Write-YcLog ('  ' + $instName + ': could not query the instance (' + $script:YcSqlErr + ') - skipped.') 'WARN'
+      continue
+    }
+    $cur      = [string]$rows[0]['ServerName']
+    $machine  = [string]$rows[0]['MachineName']
+    $instProp = [string]$rows[0]['InstanceName']
+    $expected = Get-YcExpectedSqlServerName -MachineName $machine -InstanceName $instProp
+
+    if($cur -eq $expected){
+      Write-YcLog ('  ' + $instName + ': @@SERVERNAME is "' + $cur + '", which matches the machine. Nothing to repair.') 'OK'
+    } else {
+      Write-YcLog ('  ' + $instName + ': @@SERVERNAME is "' + $cur + '" but this machine is "' + $expected +
+                   '". A Windows rename happened and SQL Server was never told.') 'WARN'
+
+      $blocked = ''
+      if([int]$rows[0]['IsClustered'] -eq 1){ $blocked = 'this is a CLUSTERED instance' }
+      elseif([int]$rows[0]['IsHadrEnabled'] -eq 1){ $blocked = 'AlwaysOn Availability Groups are enabled on this instance' }
+      else{
+        $rq = "SET NOCOUNT ON; SELECT CONVERT(int,(SELECT COUNT(*) FROM sys.servers WHERE is_publisher=1 OR is_subscriber=1 OR is_distributor=1)) AS ReplServers," +
+              "CONVERT(int,(SELECT COUNT(*) FROM sys.databases WHERE is_published=1 OR is_subscribed=1 OR is_merge_published=1 OR is_distributor=1)) AS ReplDbs"
+        $rr = Invoke-YcSqlRows -Target $target -Query $rq
+        if($null -eq $rr){
+          $blocked = 'the replication check could not be run (' + $script:YcSqlErr + '), so this refuses to guess'
+        } elseif([int]$rr[0]['ReplServers'] -gt 0 -or [int]$rr[0]['ReplDbs'] -gt 0){
+          $blocked = 'this instance takes part in REPLICATION (' + [int]$rr[0]['ReplServers'] + ' server role(s), ' +
+                     [int]$rr[0]['ReplDbs'] + ' database(s))'
+        }
+      }
+
+      if($blocked){
+        Write-YcLog ('  ' + $instName + ': REFUSING to run sp_dropserver / sp_addserver, because ' + $blocked + '. ' +
+                     'Microsoft does not support renaming a host in this configuration. Tear the configuration down, ' +
+                     'rename, then rebuild it - by hand, deliberately.') 'ERROR'
+        $script:Failed++
+      } elseif($Report){
+        Write-YcLog ('  WOULD run: EXEC sp_dropserver ''' + $cur + '''; EXEC sp_addserver ''' + $expected + ''', ''local'';') 'WARN'
+        $script:Would++
+      } else {
+        $lo = Get-YcSqlLiteral $cur
+        $ln = Get-YcSqlLiteral $expected
+        $sql = "EXEC sp_dropserver '" + $lo + "'; EXEC sp_addserver '" + $ln + "', 'local';"
+        if(Invoke-YcSqlExec -Target $target -Query $sql){
+          Write-YcLog ('  ' + $instName + ': sp_dropserver / sp_addserver done - sys.servers now names "' + $expected + '".') 'OK'
+          $script:Changed++
+          # @@SERVERNAME is cached from startup. Until the engine restarts it still reports the
+          # old name, and saying otherwise here would be a lie.
+          if($RestartSql){
+            $agtWasRunning = $false
+            $agt = Get-Service -Name $agtName -ErrorAction SilentlyContinue
+            if($null -ne $agt -and $agt.Status -eq 'Running'){ $agtWasRunning = $true }
+            Write-YcLog ('  ' + $instName + ': -RestartSql was supplied - restarting ' + $svcName + ' now. Connections will drop.') 'WARN'
+            try{
+              Restart-Service -Name $svcName -Force -ErrorAction Stop
+              Start-Sleep -Seconds 5
+              if($agtWasRunning){ Start-Service -Name $agtName -ErrorAction SilentlyContinue }
+              $after = Invoke-YcSqlRows -Target $target -Query "SET NOCOUNT ON; SELECT CONVERT(nvarchar(128),@@SERVERNAME) AS ServerName"
+              if($null -ne $after -and $after.Count -gt 0 -and [string]$after[0]['ServerName'] -eq $expected){
+                Write-YcLog ('  ' + $instName + ': VERIFIED - @@SERVERNAME now reads "' + $expected + '".') 'OK'
+              } else {
+                Write-YcLog ('  ' + $instName + ': restarted, but @@SERVERNAME still does not read "' + $expected +
+                             '". Check the SQL Server error log.') 'ERROR'
+                $script:Failed++
+              }
+            }catch{
+              Write-YcLog ('  ' + $instName + ': the restart FAILED: ' + $_.Exception.Message +
+                           '. The metadata change is already written and takes effect on the next restart.') 'ERROR'
+              $script:Failed++
+            }
+          } else {
+            Write-YcLog ('  ' + $instName + ': @@SERVERNAME is cached at startup, so it still reads "' + $cur +
+                         '" until SQL Server restarts. This run did NOT restart it - fix-deploy does not take a ' +
+                         'database down as a side effect. Finish it with either:') 'WARN'
+            Write-YcLog ('      C:\Scripts\fix-deploy.cmd -Only sqlrename -RestartSql')
+            Write-YcLog ('      Restart-Service -Name "' + $svcName + '" -Force')
+          }
+        } else {
+          Write-YcLog ('  ' + $instName + ': sp_dropserver / sp_addserver FAILED: ' + $script:YcSqlErr) 'ERROR'
+          $script:Failed++
+        }
+      }
+    }
+
+    # ---- stale login names. Cosmetic: the SID is what authenticates, so this can never
+    # ---- lock anyone out. Skipped silently when there is nothing stale.
+    $oldHost = ($cur -split '\\')[0]
+    if($oldHost -and $oldHost -ne $machine){
+      $lq = "SET NOCOUNT ON; SELECT name FROM sys.server_principals WHERE type IN ('U','G') AND name LIKE '" +
+            (Get-YcSqlLiteral $oldHost) + "\%'"
+      $lr = Invoke-YcSqlRows -Target $target -Query $lq
+      if($null -ne $lr){
+        foreach($lrow in $lr){
+          $oldLogin = [string]$lrow['name']
+          $suffix   = $oldLogin.Substring($oldHost.Length + 1)
+          $newLogin = $machine + '\' + $suffix
+          if($Report){
+            Write-YcLog ('  WOULD rename login [' + $oldLogin + '] to [' + $newLogin + ']') 'WARN'
+            $script:Would++
+            continue
+          }
+          $al = "ALTER LOGIN [" + (Get-YcSqlBracket $oldLogin) + "] WITH NAME = [" + (Get-YcSqlBracket $newLogin) + "]"
+          if(Invoke-YcSqlExec -Target $target -Query $al){
+            Write-YcLog ('  ' + $instName + ': login [' + $oldLogin + '] renamed to [' + $newLogin + '] (same SID, same access).') 'OK'
+            $script:Changed++
+          } else {
+            Write-YcLog ('  ' + $instName + ': could not rename login [' + $oldLogin + ']: ' + $script:YcSqlErr +
+                         '. This is cosmetic - the login still works, because Windows logins authenticate by SID.') 'WARN'
+          }
+        }
+      }
+    }
+  }
+
+  # ---- orphaned Ola backup folders -------------------------------------------------
+  # Ola's @Directory layout is <root>\<hostname>\<db>\<TYPE>. After a rename the new
+  # hostname gets a new folder and @CleanupTime only ever prunes that one, so the old
+  # folder is stranded and grows for ever. Read the roots out of the tasks that actually
+  # run the backups rather than assuming the default.
+  $backupRoots = @()
+  foreach($bt in (Get-ScheduledTask -TaskName 'YC-SqlBackup*' -ErrorAction SilentlyContinue)){
+    foreach($act in $bt.Actions){
+      if("$($act.Arguments)" -match "@Directory\s*=\s*N'([^']+)'"){
+        if($backupRoots -notcontains $Matches[1]){ $backupRoots += $Matches[1] }
+      }
+    }
+  }
+  if($backupRoots.Count -eq 0 -and (Test-Path -LiteralPath 'C:\dbbackupdaily')){ $backupRoots += 'C:\dbbackupdaily' }
+
+  foreach($broot in $backupRoots){
+    if(-not (Test-Path -LiteralPath $broot)){ continue }
+    $live = Join-Path $broot $env:COMPUTERNAME
+    foreach($od in (Get-ChildItem -LiteralPath $broot -Directory -ErrorAction SilentlyContinue)){
+      if($od.Name -eq $env:COMPUTERNAME){ continue }
+      $files = @(Get-ChildItem -LiteralPath $od.FullName -Recurse -File -ErrorAction SilentlyContinue)
+      $mb    = if($files.Count -gt 0){ [math]::Round((($files | Measure-Object Length -Sum).Sum)/1MB,1) } else { 0 }
+      Write-YcLog ('  ORPHANED backup folder: ' + $od.FullName + ' - ' + $files.Count + ' file(s), ' + $mb +
+                   ' MB. This machine is now "' + $env:COMPUTERNAME + '", so Ola Hallengren writes to ' + $live +
+                   ' and @CleanupTime will never prune the folder above. It grows for ever.') 'WARN'
+      if(-not $MergeOrphanBackups){
+        Write-YcLog ('  Not moving backup files without being asked. Re-run with -MergeOrphanBackups to fold them ' +
+                     'under the current name so retention applies to them again, or delete the folder yourself.')
+        continue
+      }
+      if($Report){
+        Write-YcLog ('  WOULD move ' + $files.Count + ' file(s) from ' + $od.FullName + ' into ' + $live) 'WARN'
+        $script:Would++
+        continue
+      }
+      $moved = 0; $skipped = 0
+      foreach($f in $files){
+        $rel  = $f.FullName.Substring($od.FullName.Length).TrimStart('\')
+        $dest = Join-Path $live $rel
+        try{
+          $dd = Split-Path -Parent $dest
+          if(-not (Test-Path -LiteralPath $dd)){ New-Item -ItemType Directory -Path $dd -Force -ErrorAction Stop | Out-Null }
+          if(Test-Path -LiteralPath $dest){
+            Write-YcLog ('    already present at the destination, left where it is: ' + $f.FullName) 'WARN'
+            $skipped++
+            continue
+          }
+          Move-Item -LiteralPath $f.FullName -Destination $dest -ErrorAction Stop
+          $moved++
+        }catch{
+          Write-YcLog ('    could not move ' + $f.FullName + ': ' + $_.Exception.Message) 'ERROR'
+          $script:Failed++
+        }
+      }
+      Write-YcLog ('  moved ' + $moved + ' file(s) into ' + $live + ($(if($skipped -gt 0){ ', ' + $skipped + ' left in place' }else{ '' }))) 'OK'
+      if($moved -gt 0){ $script:Changed++ }
+      # Only remove the old tree when it is genuinely empty. Never recursive-delete backups.
+      if(@(Get-ChildItem -LiteralPath $od.FullName -Recurse -File -ErrorAction SilentlyContinue).Count -eq 0){
+        try{ Remove-Item -LiteralPath $od.FullName -Recurse -Force -ErrorAction Stop
+             Write-YcLog ('  removed the now-empty ' + $od.FullName) 'OK' }
+        catch{ Write-YcLog ('  could not remove the empty ' + $od.FullName + ': ' + $_.Exception.Message) 'WARN' }
       }
     }
   }

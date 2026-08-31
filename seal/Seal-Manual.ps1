@@ -429,8 +429,14 @@ foreach($x in $secrets){ Remove-Item $x -Force -EA SilentlyContinue }
 $still = @($secrets | Where-Object { Test-Path $_ })
 if($still.Count){ Say ('WARNING: could not delete ' + ($still -join ', ')) Red } else { Say 'secrets wiped' Green }
 
-Get-ScheduledTask -TaskName 'GIBuild'   -EA SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -EA SilentlyContinue
-Get-ScheduledTask -TaskName 'YCSYSPREP' -EA SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -EA SilentlyContinue
+# GIBuild is a STALE task FILE with no valid registration: Get-ScheduledTask cannot see it
+# (proved on .5 and .6 on 2026-08-31 - Get-ScheduledTask returns nothing, schtasks deletes it
+# fine), so this cleanup was a silent no-op for as long as it has existed and GIBuild shipped
+# in every image. schtasks reaches it. Same treatment for YCSYSPREP, which may be equally stale.
+foreach($t in 'GIBuild','YCSYSPREP'){
+  Get-ScheduledTask -TaskName $t -EA SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -EA SilentlyContinue
+  & schtasks.exe /delete /tn $t /f 2>&1 | Out-Null
+}
 Remove-Item 'C:\Scripts\.phase','C:\Scripts\.reboot-pending','C:\Scripts\.prereboot-done' -Force -EA SilentlyContinue
 
 # build progress marker(s) on the Public Desktop - must NEVER ship (see check 16 above). This is the

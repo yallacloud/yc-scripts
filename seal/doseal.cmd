@@ -65,6 +65,18 @@ del /f /q "C:\Scripts\.rearm-done"      2>nul
 rem YCSEAL is created by the seal POA and was never unregistered - it shipped in the image
 rem pointing at a doseal.cmd this script deletes.
 schtasks /delete /tn YCSEAL /f            2>nul
+rem YC-Health-Chkdsk / -Session / -SQL all point at Setup-HealthMonitors.ps1, which the
+rem v265 audit deleted. They were baked into every image and failed on every clone
+rem forever. Install-YcTasks retires them, but Install-YcTasks does not run in the
+rem RESEAL path - only this file is guaranteed to run - so they are removed here too.
+rem yc-health.ps1 already covers what they were meant to do.
+schtasks /delete /tn YC-Health-Chkdsk /f  2>nul
+schtasks /delete /tn YC-Health-Session /f 2>nul
+schtasks /delete /tn YC-Health-SQL /f     2>nul
+rem GIBuild points at GoldenImage.ps1, which is build tooling and is deliberately not
+rem in C:\Scripts at seal time. Found by the new orphan-task check on 2026-08-31 - it
+rem had been shipping in every image too.
+schtasks /delete /tn GIBuild /f           2>nul
 
 echo [doseal] launching sysprep
 C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:C:\Scripts\Unattend-Seal.xml

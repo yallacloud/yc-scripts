@@ -317,6 +317,22 @@ if($legacy.Count){
          $fail += 'tasks' }
 }
 
+# Any scheduled task pointing at a .ps1 that is not there. This check did not exist, which
+# is how YC-Health-Chkdsk / -Session / -SQL - all three aimed at the deleted
+# Setup-HealthMonitors.ps1 - sat in every sealed image and failed on every clone without
+# anyone noticing. doseal.cmd removes those three; this catches the next one.
+$orphan = @()
+foreach($t in @(Get-ScheduledTask -EA SilentlyContinue | Where-Object { $_.TaskName -match '^(YC-|YC|GI)' })){
+  foreach($act in @($t.Actions)){
+    $arg = [string]$act.Arguments
+    if($arg -match '-File\s+"?([A-Za-z]:\\[^"]+\.ps1)"?'){
+      if(-not (Test-Path -LiteralPath $Matches[1])){ $orphan += ($t.TaskName + ' -> ' + (Split-Path $Matches[1] -Leaf)) }
+    }
+  }
+}
+if($orphan.Count){ Say ('orphan task  : ' + ($orphan -join '; ') + ' - target script missing, will fail on every clone') Yellow }
+else { Say 'orphan task  : none - every scheduled task points at a file that exists' Green }
+
 # ---- 15. C:\Scripts must not ship build/debug junk -------------------------
 # v259 shipped 1,180 files / 2 GB here: 230 Linux .sh, 16 .py, GoldenImage.ps1,
 # the seal tooling, _stage\, .done\ and a stale 305 MB copy of the Chocolatey

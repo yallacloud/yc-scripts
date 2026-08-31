@@ -532,6 +532,41 @@ if("$cur" -match 'Eval'){
     Write-YcLog ('No published GVLK is known for build ' + $before.Build + ' - falling back to -ProductKey for the edition change. If this fails with 0x8a010101 the key is not a GVLK.') 'WARN'
   }
 
+  # ---- COMPATIBILITY GUARD -----------------------------------------------------------
+  # dism /Set-Edition only ever goes UP the edition ladder, and only to an edition this
+  # build actually offers. Ask DISM itself rather than hard-coding a table that goes stale:
+  # /Get-TargetEditions is the authoritative list for THIS image. Without this the run
+  # spends a minute in DISM and comes back with a bare error code, and the operator is left
+  # deciding whether the key, the edition or the image is at fault.
+  $targets = @()
+  try{
+    foreach($line in ((dism /online /Get-TargetEditions) 2>$null | Out-String -Stream)){
+      if($line -match '(?i)Target\s+Edition\s*:\s*(\S+)'){ $targets += $Matches[1].Trim() }
+    }
+  }catch{ }
+  if($targets.Count -gt 0){
+    Write-YcLog ('dism /Get-TargetEditions offers: ' + ($targets -join ', '))
+    if($targets -notcontains $Edition){
+      Write-YcLog ('REFUSED: "' + $Edition + '" is not an edition this image can be changed to. ' +
+        'The current edition is ' + $cur + ' and dism /online /Get-TargetEditions offers only: ' +
+        ($targets -join ', ') + '. An edition change only ever goes UP - Datacenter can never be ' +
+        'turned back into Standard, and no key changes that. To go down, redeploy from a template ' +
+        'of the edition you want. Nothing was changed and the product key was not used.') 'ERROR'
+      Stop-YcLog 6; exit 6
+    }
+  } else {
+    # A Datacenter image offers no targets at all, which is the single most common way this
+    # goes wrong, so name it rather than pressing on into a bare DISM failure.
+    if("$cur" -match 'Datacenter' -and "$Edition" -notmatch 'Datacenter'){
+      Write-YcLog ('REFUSED: this machine is already ' + $cur + ' and -Edition asks for ' + $Edition +
+        '. An edition change only ever goes UP: Windows Server cannot be downgraded from Datacenter ' +
+        'to Standard by DISM or by any key. Redeploy from a Standard template instead. Nothing was ' +
+        'changed and the product key was not used.') 'ERROR'
+      Stop-YcLog 6; exit 6
+    }
+    Write-YcLog 'dism /Get-TargetEditions returned no usable list - continuing, and DISM will be the judge.' 'WARN'
+  }
+
   # Apply the KMS host NOW. It persists in HKLM SoftwareProtectionPlatform
   # across the reboot.
   if($KMS){ Invoke-YcSlmgr -SlmgrArgs @('/skms',$KMS) -What 'slmgr /skms' | Out-Null }

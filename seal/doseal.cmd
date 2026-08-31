@@ -13,6 +13,21 @@ rem  Unattend-Seal.xml is NOT deleted - sysprep reads it seconds later, and
 rem  sysprep copies it to C:\Windows\Panther itself.
 rem ============================================================================
 setlocal
+rem ---------------------------------------------------------------------------
+rem RE-EXEC FROM %TEMP% FIRST.
+rem cmd.exe re-reads a batch file from disk after every command. The old version
+rem scheduled "del doseal.cmd" 30 seconds out and then ran sysprep, which takes
+rem minutes - so the file vanished while cmd still had more of it to read and the
+rem seal ended with "The batch file cannot be found." Sysprep had already run and
+rem SUCCEEDED, but the message reads like a failure. Copy ourselves to %TEMP%, run
+rem from there, and delete the C:\Scripts copy immediately - no race at all.
+rem ---------------------------------------------------------------------------
+if /i not "%~dp0"=="%TEMP%\" (
+  copy /y "%~f0" "%TEMP%\yc-doseal.cmd" >nul
+  del /f /q "%~f0" 2>nul
+  call "%TEMP%\yc-doseal.cmd"
+  exit /b %ERRORLEVEL%
+)
 
 echo [doseal] removing build/seal tooling from C:\Scripts
 del /f /q "C:\Scripts\Seal-Manual.ps1"       2>nul
@@ -41,7 +56,7 @@ rem Delete this file too. A running .cmd cannot delete itself inline - the handl
 rem open - so a detached cmd waits 30s and removes it while sysprep is generalizing.
 rem Without this, doseal.cmd was the ONE item still shipping inside the 2026-08-12
 rem sealed images.
-start "" /b cmd /c "ping -n 31 127.0.0.1 >nul & del /f /q C:\Scripts\doseal.cmd"
+rem (the delayed self-delete lived here; the re-exec above replaces it)
 
 rem 2026-08-30: .rearm-done is a DOT-file, so the *.log wildcard above never removed it.
 rem It shipped inside every sealed image, and every VM from that template then SKIPPED the

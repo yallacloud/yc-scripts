@@ -8,6 +8,29 @@ SRC="${1:?usage: build-payload.sh /path/to/Scripts}"
 [ -d "$SRC" ] || { echo "not a directory: $SRC" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 ZIP="$HERE/YallaCloud-CScripts-latest.zip"
+
+# THE CATALOGUE VERSION MUST MOVE WHEN THE PAYLOAD MOVES.
+# Yallacloud.ps1 is what an operator reads to find out what a machine can do. If the commands
+# change and its version does not, every host reports a catalogue version that no longer
+# describes it, and two different payloads cannot be told apart from the console. Remembering
+# to bump it by hand did not work - it sat at 2.8.0 across a dozen payloads.
+# This does NOT bump it automatically; a version number chosen by a script means nothing. It
+# refuses to be silent about the omission.
+# Read the OLD version BEFORE the zip below is overwritten - reading it afterwards compares the
+# new payload with itself and can never report anything, which is what the first version of this
+# check did.
+OLDCAT=$(python3 - "$ZIP" <<'PYEOF' 2>/dev/null || echo ''
+import sys, zipfile, re
+try:
+    with zipfile.ZipFile(sys.argv[1]) as z:
+        t = z.read('Yallacloud.ps1').decode('ascii', 'replace')
+    m = re.search(r"^\$YcCatalogVersion\s*=\s*'([^']+)'", t, re.M)
+    print(m.group(1) if m else '')
+except Exception:
+    print('')
+PYEOF
+)
+NEWCAT=$(grep -m1 -oP "^\\\$YcCatalogVersion\s*=\s*'\K[^']+" "$SRC/Yallacloud.ps1" 2>/dev/null || echo '')
 python3 - "$SRC" "$ZIP" <<'PY'
 import sys, os, zipfile, hashlib
 src, out = sys.argv[1], sys.argv[2]
@@ -41,6 +64,16 @@ fi
 for m in Activate-Windows.ps1 Fix-Deploy.ps1 Update-YcScripts.ps1 test-activate.ps1; do
   [ -f "$SRC/$m" ] && cp -f "$SRC/$m" "$HERE/$m" && echo "mirrored $m"
 done
+
+if [ -n "$OLDCAT" ] && [ -n "$NEWCAT" ] && [ "$OLDCAT" = "$NEWCAT" ]; then
+  echo ""
+  echo "  WARNING: the catalogue version is still $NEWCAT, unchanged from the payload you are replacing."
+  echo "           Bump \$YcCatalogVersion and \$YcCatalogDate in Yallacloud.ps1 unless this build"
+  echo "           genuinely changes nothing an operator would see."
+  echo ""
+elif [ -n "$OLDCAT" ] && [ -n "$NEWCAT" ]; then
+  echo "catalogue version $OLDCAT -> $NEWCAT"
+fi
 
 sha256sum "$ZIP" | awk '{print toupper($1)"  YallaCloud-CScripts-latest.zip"}' > "$HERE/YallaCloud-CScripts-latest.sha256"
 cat "$HERE/YallaCloud-CScripts-latest.sha256"

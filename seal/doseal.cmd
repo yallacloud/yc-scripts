@@ -62,6 +62,12 @@ rem 2026-08-30: .rearm-done is a DOT-file, so the *.log wildcard above never rem
 rem It shipped inside every sealed image, and every VM from that template then SKIPPED the
 rem first-boot rearm it was built to perform. Delete it here.
 del /f /q "C:\Scripts\.rearm-done"      2>nul
+rem The autoupdate STATE is a conversation with GitHub - an ETag and the hash it stood for. It is
+rem per-MACHINE, and sealing it into the template hands one build VM's conversation to every clone
+rem that will ever come off this image. .payload-sha256 is deliberately NOT removed: that is the
+rem honest record of which payload is baked in, and the updater compares against it.
+del /f /q "C:\Scripts\.autoupdate-state"     2>nul
+del /f /q "C:\Scripts\.autoupdate-lastcheck" 2>nul
 rem YCSEAL is created by the seal POA and was never unregistered - it shipped in the image
 rem pointing at a doseal.cmd this script deletes.
 schtasks /delete /tn YCSEAL /f            2>nul

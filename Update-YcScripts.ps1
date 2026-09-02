@@ -338,6 +338,38 @@ Say ('Extracted ' + $rels.Count + ' files')
 #
 # The rollback copy covers everything about to be removed OR replaced, lives in
 # TEMP, and is deleted at the end either way. No .bak directory is left behind.
+# Copy a tree file by file, never all-or-nothing.
+#
+# This used to be two bare 'Copy-Item -Path <dir>\* -Destination C:\Scripts -Recurse -Force'
+# calls under $ErrorActionPreference='Stop'. A single locked file aborts the whole call
+# part-way through, and on the ROLLBACK path that is unrecoverable: the payload's files have
+# already been deleted, so C:\Scripts is left gutted and the script dies unhandled.
+#
+# MEASURED 2026-09-01 on 100.64.20.8: install-sql was running, so C:\Scripts\install-sql.log
+# was open. The gate failed, rollback deleted the new payload, and the restore threw
+# "The process cannot access the file ... because it is being used by another process" on
+# that one log. Exit 1, no rollback, 53 of ~150 files left in C:\Scripts, and every command
+# on the box gone. A rollback that can leave the machine worse than either state is not a
+# rollback.
+#
+# So: per file, count what fails, and let the caller report it. A log we cannot overwrite is
+# a nuisance; a C:\Scripts we cannot restore is an outage.
+function Copy-YcTree{
+  param([string]$From,[string]$To)
+  $ok = 0; $bad = @()
+  foreach($f in (Get-ChildItem -LiteralPath $From -Recurse -File -Force -EA SilentlyContinue)){
+    $rel = $f.FullName.Substring($From.Length).TrimStart('\')
+    $dst = Join-Path $To $rel
+    $dir = Split-Path -Parent $dst
+    try{
+      if(-not (Test-Path -LiteralPath $dir)){ New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+      Copy-Item -LiteralPath $f.FullName -Destination $dst -Force -EA Stop
+      $ok++
+    }catch{ $bad += $rel }
+  }
+  [pscustomobject]@{ Copied = $ok; Failed = $bad }
+}
+
 $relSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 foreach($r in $rels){ [void]$relSet.Add($r) }
 
@@ -371,7 +403,9 @@ Say ('Full overwrite: removed ' + $removed + ' file(s) not in this payload. Kept
 
 # --- 4 copy over --------------------------------------------------------------
 Say ('Copying payload over ' + $S)
-Copy-Item -Path (Join-Path $tmp '*') -Destination $S -Recurse -Force
+$cp = Copy-YcTree -From $tmp -To $S
+if($cp.Failed.Count){ Say ('Could not write ' + $cp.Failed.Count + ' payload file(s) (locked): ' + ($cp.Failed -join ', ')) 'WARN' }
+Say ('Copied ' + $cp.Copied + ' file(s) into ' + $S)
 Remove-Item -LiteralPath $tmp -Recurse -Force -EA SilentlyContinue
 
 # --- 5 gate ------------------------------------------------------------------
@@ -396,7 +430,13 @@ if($NoCompliance){
         if($Keep -contains $top){ continue }
         try{ Remove-Item -LiteralPath $f.FullName -Force -EA Stop }catch{}
       }
-      Copy-Item -Path (Join-Path $Bak '*') -Destination $S -Recurse -Force
+      $rb = Copy-YcTree -From $Bak -To $S
+      if($rb.Failed.Count){
+        # Say it out loud and KEEP the copy. A half restore that deletes its own evidence
+        # leaves nobody a way back.
+        Say ('Rollback restored ' + $rb.Copied + ' file(s) but could NOT restore ' + $rb.Failed.Count + ': ' + ($rb.Failed -join ', ')) 'ERROR'
+        Die 7 ('C:\Scripts is INCOMPLETE. The rollback copy has been KEPT at ' + $Bak + ' - copy it back by hand once nothing is holding those files.')
+      }
       Remove-Item -LiteralPath $Bak -Recurse -Force -EA SilentlyContinue
       Die 7 'Rolled back. C:\Scripts is as it was before this run.'
     }

@@ -32,8 +32,11 @@ Run the self-check that ships with it:
 powershell -ExecutionPolicy Bypass -File .\test-activate.ps1
 ```
 
-It must print `RESULT: PASS`. A payload that fails the gate must not be pushed -
-every VM built after the push pulls it on first boot.
+It must end with `all checks passed` and no `FAIL` line. A payload that fails the
+gate must not be pushed - every VM built after the push pulls it on first boot.
+
+Run it on a Windows guest, not on the build host: the script exercises PowerShell
+5.1 behaviour and the licensing shapes, so a Linux checkout cannot execute it.
 
 ## After pushing
 

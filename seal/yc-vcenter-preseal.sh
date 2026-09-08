@@ -44,23 +44,39 @@ wait_up(){   # $1 = ip
   return 1
 }
 
-# The guest pulls yc-preseal.ps1 itself. Nothing is scp'd, so this driver works from any
-# machine that can reach port 3222 and does not have to carry a copy that drifts.
+# STAGING: ycnode01 fetches yc-preseal.ps1 ONCE and scp's it to every guest.
 #
-# TWO THINGS THIS LEARNED THE HARD WAY:
-#   raw.githubusercontent is behind a CDN, and minutes after a push an edge still served
-#   the previous file. The guest downloaded it, reported success, and ran the old script -
-#   which is the worst kind of failure, because everything looks like it worked. A
-#   cache-buster query string is appended, and the downloaded file is then CHECKED for the
-#   sentinel it must contain. A stage that cannot prove it got the new file is a failure.
-stage(){     # $1 = ip
-  local url="$RAW/seal/yc-preseal.ps1?cb=$(date +%s)$RANDOM"
-  ssh $O -p "$PORT" "Administrator@$1" \
-    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '$url' -OutFile 'C:\\Windows\\Temp\\yc-preseal.ps1' -UseBasicParsing\"" >/dev/null 2>&1 || return 1
-  ssh $O -p "$PORT" "Administrator@$1" \
-    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (@(Select-String -Path 'C:\\Windows\\Temp\\yc-preseal.ps1' -Pattern 'YC-PRESEAL-RESULT').Count -lt 1) { exit 1 }\"" >/dev/null 2>&1 || return 1
-  return 0
+# It used to be the guest that downloaded it, and that was wrong twice over.
+# raw.githubusercontent is behind a CDN, and for several minutes after a push an edge
+# still serves the previous file: the guest reported a successful download and ran the
+# OLD script. Checking the downloaded file for a feature string does not catch that
+# either, once the feature has been there a while. And raw returns intermittent 503s -
+# six of eight seal-kit files failed in one second on the first real run.
+# Fetching once, here, with retries, and pushing the same bytes to every host removes
+# the CDN from the per-guest path entirely and guarantees all eight run the same script.
+LOCAL="/root/.yc-preseal.ps1"
+
+fetch_local(){
+  local url="$RAW/seal/yc-preseal.ps1"
+  local n
+  for n in 1 2 3 4 5 6; do
+    if curl -fsSL --max-time 60 "$url?cb=$(date +%s)$RANDOM$n" -o "$LOCAL.new" && [ -s "$LOCAL.new" ] \
+       && grep -q 'YC-PRESEAL-RESULT' "$LOCAL.new"; then
+      mv -f "$LOCAL.new" "$LOCAL"
+      say "fetched yc-preseal.ps1  $(wc -c < "$LOCAL") bytes  sha $(sha256sum "$LOCAL" | cut -c1-16)"
+      return 0
+    fi
+    sleep $((3*n))
+  done
+  rm -f "$LOCAL.new"
+  return 1
 }
+
+stage(){     # $1 = ip
+  scp $O -P "$PORT" -q "$LOCAL" "Administrator@$1:C:/Windows/Temp/yc-preseal.ps1" >/dev/null 2>&1
+}
+
+fetch_local || { echo "could not fetch yc-preseal.ps1 from $RAW - nothing staged, nothing run"; exit 1; }
 
 declare -A VERDICT
 for oct in "$@"; do

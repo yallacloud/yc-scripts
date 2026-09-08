@@ -55,6 +55,27 @@ function L([string]$m, [string]$lvl = 'INFO') {
 # again" from "this failed", which is the one distinction the loop is built on.
 # The sentinel is the last line of output and says which it is.
 # -------------------------------------------------------------------------------------
+# raw.githubusercontent returns intermittent 503s. Measured during the first real run:
+# six of the eight seal-kit files failed in the same second, on three separate guests. One
+# attempt per file is not a download, it is a coin toss - and the cost of losing is a
+# template that gets all the way to the seal gate before anyone finds out the tooling is
+# not there. Retries, a cache-buster so a CDN edge cannot serve yesterday's copy, and a
+# hard stop the moment a file really cannot be fetched.
+function Get-YcFile {
+  param([string]$Url, [string]$Path, [int]$Tries = 5)
+  for ($n = 1; $n -le $Tries; $n++) {
+    try {
+      $u = $Url + '?cb=' + [guid]::NewGuid().ToString('N')
+      Invoke-WebRequest -Uri $u -OutFile $Path -UseBasicParsing -ErrorAction Stop
+      if ((Get-Item $Path -ErrorAction SilentlyContinue).Length -gt 0) { return $true }
+    } catch {
+      if ($n -eq $Tries) { L ('   fetch failed after ' + $Tries + ' tries: ' + $Url + ' - ' + $_.Exception.Message) 'ERROR' }
+      else { Start-Sleep -Seconds (3 * $n) }
+    }
+  }
+  return $false
+}
+
 function End-YcPreseal([string]$verdict, [int]$code) {
   L ('YC-PRESEAL-RESULT: ' + $verdict)
   exit $code
@@ -156,7 +177,7 @@ if ($Report -or $SkipPayload) {
   if (-not (Test-Path $u)) {
     L ('1 payload  : ' + $u + ' is missing - fetching it') 'WARN'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri ($Raw + '/Update-YcScripts.ps1') -OutFile $u -UseBasicParsing
+    if (-not (Get-YcFile ($Raw + '/Update-YcScripts.ps1') $u)) { L 'could not fetch Update-YcScripts.ps1' 'ERROR'; End-YcPreseal 'FAILED' 1 }
   }
   L '1 payload  : Update-YcScripts (sha256 verified, NO backup kept)'
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $u *>> $Log
@@ -168,14 +189,17 @@ if ($Report -or $SkipPayload) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   $kit = 'Seal-Manual.ps1','Fix-PreSeal.ps1','AppX-Strip.ps1','Clean-Scripts.ps1',
          'Install-YcTasks.ps1','PreSeal-Agents.ps1','yc-check.ps1','doseal.cmd'
+  $kitBad = @()
   foreach ($k in $kit) {
-    try {
-      Invoke-WebRequest -Uri ($Raw + '/seal/' + $k) -OutFile (Join-Path $S $k) -UseBasicParsing
-      L ('1 payload  : seal kit restored - ' + $k)
-    } catch {
-      L ('1 payload  : COULD NOT restore ' + $k + ' - ' + $_.Exception.Message) 'ERROR'
-      $fail += ('sealkit:' + $k)
-    }
+    if (Get-YcFile ($Raw + '/seal/' + $k) (Join-Path $S $k)) { L ('1 payload  : seal kit restored - ' + $k) }
+    else { L ('1 payload  : COULD NOT restore ' + $k) 'ERROR'; $kitBad += $k }
+  }
+  # Stop HERE, not at the gate. A template with a missing seal kit will run every other
+  # step, take its reboots, and only fail twenty minutes later on a row that does not say
+  # what actually went wrong.
+  if ($kitBad.Count) {
+    L ('1 payload  : the seal kit is incomplete (' + ($kitBad -join ', ') + '). Re-run - these are 503s from raw.githubusercontent, not a real absence.') 'ERROR'
+    End-YcPreseal 'FAILED' 1
   }
 }
 

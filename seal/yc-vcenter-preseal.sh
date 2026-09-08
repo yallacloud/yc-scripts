@@ -62,16 +62,26 @@ for oct in "$@"; do
     round=$((round+1))
     if ! stage "$IP"; then say "$IP: could not stage yc-preseal.ps1"; verdict="STAGE-FAILED"; break; fi
     say "$IP: round $round"
+    # THE SENTINEL, NOT $?, IS THE ANSWER.
+    # The guests' OpenSSH DefaultShell is pwsh 7, and pwsh collapses every non-zero child
+    # exit code to 1 when it is the login shell - 'ssh host powershell -Command "exit 8"'
+    # comes back as 1. Measured on these very templates. So the loop could never tell
+    # "reboot and run me again" from "this failed", which is the one distinction it is
+    # built on. yc-preseal.ps1 prints YC-PRESEAL-RESULT: <verdict> as its last line.
+    OUT=$(mktemp)
     ssh $O -p "$PORT" "Administrator@$IP" \
-      'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1'
-    rc=$?
-    case $rc in
-      0) say "$IP: READY TO SEAL"; verdict="READY"; break ;;
-      8) say "$IP: reboot requested - restarting"
+      'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1' 2>&1 | tee "$OUT"
+    rc=${PIPESTATUS[0]}
+    verd=$(grep -o 'YC-PRESEAL-RESULT: [A-Z]*' "$OUT" | tail -1 | awk '{print $2}')
+    rm -f "$OUT"
+    [ -n "$verd" ] || { say "$IP: no result line from yc-preseal (ssh rc=$rc) - stopping this host"; verdict="NO-RESULT"; break; }
+    case "$verd" in
+      READY) say "$IP: READY TO SEAL"; verdict="READY"; break ;;
+      REBOOT) say "$IP: reboot requested - restarting"
          ssh $O -p "$PORT" "Administrator@$IP" 'shutdown /r /t 5 /f' >/dev/null 2>&1
          sleep 30
          if wait_up "$IP"; then sleep 30; say "$IP: back up"; else say "$IP: did NOT come back within ${BOOTWAIT}s"; verdict="NO-BOOT"; break; fi ;;
-      *) say "$IP: yc-preseal exited $rc - stopping this host"; verdict="FAILED($rc)"; break ;;
+      *) say "$IP: yc-preseal says $verd (ssh rc=$rc) - stopping this host"; verdict="$verd"; break ;;
     esac
   done
   [ "$verdict" = "INCOMPLETE" ] && say "$IP: hit MAXROUNDS=$MAXROUNDS without finishing"

@@ -47,6 +47,19 @@ function L([string]$m, [string]$lvl = 'INFO') {
   try { Add-Content -Path $Log -Value $line -Encoding ascii } catch { }
 }
 
+# -------------------------------------------------------------------------------------
+# THE EXIT CODE IS NOT ENOUGH, so every ending also prints a sentinel line.
+# The guests' OpenSSH DefaultShell is pwsh 7, and pwsh collapses ANY non-zero child exit
+# code to 1 when it is the login shell: 'ssh host powershell -Command "exit 8"' comes back
+# as 1. Measured, not assumed. A driver that reads only $? cannot tell "reboot and run me
+# again" from "this failed", which is the one distinction the loop is built on.
+# The sentinel is the last line of output and says which it is.
+# -------------------------------------------------------------------------------------
+function End-YcPreseal([string]$verdict, [int]$code) {
+  L ('YC-PRESEAL-RESULT: ' + $verdict)
+  exit $code
+}
+
 if ($Help) {
 @"
 yc-preseal.ps1 - update a template VM and prove it is ready to seal.
@@ -83,7 +96,7 @@ AFTER exit 0: reboot once, then run the seal sequence by hand.
 
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  L 'not elevated' 'ERROR'; exit 5
+  L 'not elevated' 'ERROR'; End-YcPreseal 'NOTADMIN' 5
 }
 
 $os    = (Get-CimInstance Win32_OperatingSystem).Caption
@@ -130,7 +143,7 @@ function Get-YcChocoVersion {
 # -------------------------------------------------------------------------------------
 if (-not $Report -and (Test-YcRebootPending)) {
   L 'a restart is already pending. Reboot, then run this again.' 'WARN'
-  exit 8
+  End-YcPreseal 'REBOOT' 8
 }
 
 $fail = @()
@@ -149,7 +162,7 @@ if ($Report -or $SkipPayload) {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $u *>> $Log
   $rc = $LASTEXITCODE
   L ('1 payload  : Update-YcScripts rc=' + $rc)
-  if ($rc -ne 0) { L 'payload update failed' 'ERROR'; exit 1 }
+  if ($rc -ne 0) { L 'payload update failed' 'ERROR'; End-YcPreseal 'FAILED' 1 }
 
   # The seal kit is not in the payload, so the line above just deleted it.
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -203,8 +216,8 @@ if ($Report) {
   & cmd /c 'C:\Scripts\install-dotnet.cmd -UpgradeChocolatey' *>> $Log
   $rc = $LASTEXITCODE
   L ('3 dotnet   : install-dotnet rc=' + $rc)
-  if ($rc -eq 8) { L '3 dotnet   : .NET installed - REBOOT and run this again' 'WARN'; exit 8 }
-  if ($rc -ne 0) { L ('install-dotnet failed rc=' + $rc) 'ERROR'; exit 1 }
+  if ($rc -eq 8) { L '3 dotnet   : .NET installed - REBOOT and run this again' 'WARN'; End-YcPreseal 'REBOOT' 8 }
+  if ($rc -ne 0) { L ('install-dotnet failed rc=' + $rc) 'ERROR'; End-YcPreseal 'FAILED' 1 }
 }
 
 # ---- 4 MSMQ -------------------------------------------------------------------------
@@ -216,8 +229,8 @@ if (Get-YcMsmq) {
       $r = Uninstall-WindowsFeature MSMQ -Remove -ErrorAction Stop
       L ('4 msmq     : removed, restart needed = ' + $r.RestartNeeded)
       L '4 msmq     : REBOOT and run this again' 'WARN'
-      exit 8
-    } catch { L ('4 msmq     : removal failed - ' + $_.Exception.Message) 'ERROR'; exit 1 }
+      End-YcPreseal 'REBOOT' 8
+    } catch { L ('4 msmq     : removal failed - ' + $_.Exception.Message) 'ERROR'; End-YcPreseal 'FAILED' 1 }
   }
 } else { L '4 msmq     : absent' }
 
@@ -236,7 +249,7 @@ if ($Report -or $SkipUpdates) {
     # is wanted rather than reading it out of an exit code that winupdate never sets.
     & cmd /c 'C:\Scripts\winupdate.cmd -All -Install' *>> $Log
     L ('5 updates  : winupdate rc=' + $LASTEXITCODE)
-    if (Test-YcRebootPending) { L '5 updates  : restart pending - REBOOT and run this again' 'WARN'; exit 8 }
+    if (Test-YcRebootPending) { L '5 updates  : restart pending - REBOOT and run this again' 'WARN'; End-YcPreseal 'REBOOT' 8 }
     L '5 updates  : no restart wanted'
   }
 }
@@ -363,7 +376,7 @@ if (Test-Path $chk) {
 L '7 verify   : ---------------------------------------------------------------'
 if ($fail.Count) {
   L ('NOT READY TO SEAL - ' + $fail.Count + ' problem(s): ' + ($fail -join ', ')) 'ERROR'
-  exit 1
+  End-YcPreseal 'FAILED' 1
 }
 L 'READY TO SEAL. Reboot once, then run the seal sequence.' 'OK'
-exit 0
+End-YcPreseal 'READY' 0

@@ -53,8 +53,13 @@ for oct in "$@"; do
 
   say "$IP: gate - yc-preseal must exit 0"
   R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1 -Report' | tail -40
-  R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1 -SkipPayload -SkipUpdates' >/dev/null
-  if [ $? -ne 0 ]; then say "$IP: NOT ready - refusing to seal"; VERDICT[$IP]="NOT-READY"; continue; fi
+  # pwsh 7 is the guests' OpenSSH DefaultShell and flattens every non-zero exit to 1, so
+  # the verdict is read from yc-preseal's own last line rather than from $?.
+  OUT=$(mktemp)
+  R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1 -SkipPayload -SkipUpdates' > "$OUT" 2>&1
+  verd=$(grep -o 'YC-PRESEAL-RESULT: [A-Z]*' "$OUT" | tail -1 | awk '{print $2}')
+  rm -f "$OUT"
+  if [ "$verd" != "READY" ]; then say "$IP: NOT ready (verdict=${verd:-none}) - refusing to seal"; VERDICT[$IP]="NOT-READY"; continue; fi
 
   say "$IP: 1 Fix-PreSeal"
   R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Fix-PreSeal.ps1' | tail -30

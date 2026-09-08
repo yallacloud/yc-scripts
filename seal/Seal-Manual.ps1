@@ -313,6 +313,19 @@ if($legacy.Count){
   # YC-NetFix joined this set: the gateway repair has to fire when the network becomes
   # usable, not at -AtStartup, which on a clone is routinely before DHCP has handed out an
   # address. Four now, not three.
+  # yc-boot.ps1 MUST still be the payload's copy. Install-YcTasks used to write its own
+  # inline version over it during Fix-PreSeal - which runs after yc-preseal has verified the
+  # payload, so the good file was replaced seconds before sysprep and nothing downstream
+  # looked again. This check is here, and not in yc-preseal, precisely because this is the
+  # only gate that runs AFTER Fix-PreSeal.
+  $ycb = "$S\yc-boot.ps1"
+  if ((Test-Path $ycb) -and (Select-String -Path $ycb -Pattern 'lockoutthreshold' -Quiet)) {
+    Say 'yc-boot      : payload copy intact (re-asserts the lockout threshold every boot)' Green
+  } else {
+    Say 'yc-boot      : yc-boot.ps1 is NOT the payload copy - the lockout enforcement is missing' Red
+    Say '               Install-YcTasks overwrote it. Re-run the payload update and Fix-PreSeal.' Red
+    $fail += 'ycboot'
+  }
   $want4 = @('YC-Boot','YC-Health','YC-KeyGuard','YC-NetFix')
   $four = @($want4 | Where-Object { Get-ScheduledTask -TaskName $_ -EA SilentlyContinue })
   if($four.Count -eq 4){ Say ('tasks        : ' + ($want4 -join ', ')) Green }

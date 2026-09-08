@@ -41,6 +41,19 @@ function Say($m,$c='Gray'){ $t = "[{0}] {1}" -f (Get-Date -f 'HH:mm:ss'), $m
 Say '===== Install-YcTasks =====' Cyan
 
 # =============================================================== yc-boot.ps1 ==
+# ONLY IF ABSENT. This inline copy is a fallback for an image that has no payload yet; the
+# PAYLOAD is the source of truth for yc-boot.ps1 and this must not overwrite it.
+#
+# It did, and it cost a whole generation of images. yc-boot.ps1 in payload 2.18.2 re-asserts
+# the Administrator lockout threshold on every boot. Fix-PreSeal calls this script during the
+# seal, AFTER yc-preseal has verified the payload - so the good file was replaced by this
+# stale one seconds before sysprep, and the check that would have caught it had already run.
+# Measured on the v265 clone VC2019V265 2026-09-09: yc-boot.ps1 3093 bytes, zero
+# 'lockoutthreshold' hits, while the payload's version has it.
+# Two sources of truth for one file is how a fix disappears without anyone editing it out.
+if (Test-Path "$S\yc-boot.ps1") {
+  Say "  yc-boot.ps1 already present from the payload - LEAVING IT ALONE" Green
+} else {
 Set-Content "$S\yc-boot.ps1" @'
 # yc-boot.ps1 - one boot task replacing GIGrowDisk + GINetwork + YCDEPLOY + YCGUARD.
 # Creates access rules ONCE if absent. Never re-enables anything an admin turned off.
@@ -95,7 +108,8 @@ $xpr=(& cscript //nologo C:\Windows\System32\slmgr.vbs /xpr 2>&1) -join ' '
 L ("host=$env:COMPUTERNAME ip=$ip os=$os lic=$xpr")
 L '--- yc-boot end ---'
 '@ -Encoding ascii
-Say 'yc-boot.ps1 written' Green
+Say 'yc-boot.ps1 written from the inline fallback (no payload copy was present)' Yellow
+}
 
 # ============================================================= yc-health.ps1 ==
 Set-Content "$S\yc-health.ps1" @'

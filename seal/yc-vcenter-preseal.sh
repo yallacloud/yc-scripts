@@ -44,6 +44,11 @@ wait_up(){   # $1 = ip
   return 1
 }
 
+# Wait for the guest to STOP answering. Going straight from "shutdown /r" to wait_up hits the
+# sshd that is still alive during the shutdown, so the next command is cut off mid-flight and
+# the caller reads an empty result from a host that is perfectly healthy.
+wait_down(){ local t=0; while [ $t -lt 300 ]; do up "$1" || return 0; sleep 5; t=$((t+5)); done; return 1; }
+
 # STAGING: ycnode01 fetches yc-preseal.ps1 ONCE and scp's it to every guest.
 #
 # It used to be the guest that downloaded it, and that was wrong twice over.
@@ -112,8 +117,8 @@ for oct in "$@"; do
       READY) say "$IP: READY TO SEAL"; verdict="READY"; break ;;
       REBOOT) say "$IP: reboot requested - restarting"
          ssh $O -p "$PORT" "Administrator@$IP" 'shutdown /r /t 5 /f' >/dev/null 2>&1
-         sleep 30
-         if wait_up "$IP"; then sleep 30; say "$IP: back up"; else say "$IP: did NOT come back within ${BOOTWAIT}s"; verdict="NO-BOOT"; break; fi ;;
+         wait_down "$IP" || say "$IP: never stopped answering - carrying on"
+         if wait_up "$IP"; then sleep 45; say "$IP: back up"; else say "$IP: did NOT come back within ${BOOTWAIT}s"; verdict="NO-BOOT"; break; fi ;;
       *) say "$IP: yc-preseal says $verd (ssh rc=$rc) - stopping this host"; verdict="$verd"; break ;;
     esac
   done

@@ -68,12 +68,18 @@ for oct in "$@"; do
     verd=$(grep -o 'YC-PRESEAL-RESULT: [A-Z]*' "$OUT" | tail -1 | awk '{print $2}')
     rm -f "$OUT"
     [ "$verd" = "READY" ] && break
-    [ "$verd" = "REBOOT" ] && [ $attempt -eq 1 ] || break
+    # An EMPTY verdict is retryable for the same reason REBOOT is: it means the ssh session
+    # died before yc-preseal printed its sentinel, which is what happens when the guest is
+    # still finishing a restart. A real defect always prints FAILED.
+    { [ "$verd" = "REBOOT" ] || [ -z "$verd" ]; } && [ $attempt -eq 1 ] || break
     say "$IP: gate wants a reboot - restarting once, then re-checking"
     R "$IP" 'shutdown /r /t 5 /f' >/dev/null 2>&1
-    sleep 30
+    # Wait for the guest to actually GO DOWN before waiting for it to come up. Without this,
+    # wait_up connects to the sshd that is still running during the shutdown, the command is
+    # cut off mid-flight, and the gate reads an empty verdict on a perfectly healthy host.
+    wait_down "$IP" || say "$IP: never stopped answering - carrying on"
     if ! wait_up "$IP"; then say "$IP: did not come back from the gate reboot"; verd='NO-BOOT'; break; fi
-    sleep 30
+    sleep 45
   done
   if [ "$verd" != "READY" ]; then say "$IP: NOT ready (verdict=${verd:-none}) - refusing to seal"; VERDICT[$IP]="NOT-READY"; continue; fi
 
@@ -82,9 +88,9 @@ for oct in "$@"; do
 
   say "$IP: 2 reboot"
   R "$IP" 'shutdown /r /t 5 /f' >/dev/null 2>&1
-  sleep 30
+  wait_down "$IP" || say "$IP: never stopped answering - carrying on"
   if ! wait_up "$IP"; then say "$IP: did not come back"; VERDICT[$IP]="NO-BOOT"; continue; fi
-  sleep 30
+  sleep 45
 
   say "$IP: 3 Seal-Manual -WhatIf (preflight)"
   R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Seal-Manual.ps1 -WhatIf'

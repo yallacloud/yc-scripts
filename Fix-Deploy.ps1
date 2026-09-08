@@ -419,6 +419,16 @@ if($run -contains 'console'){
   [void](Set-YcRegString -Path $lu -Name 'LastLoggedOnUser'        -Value '.\Administrator')
   [void](Set-YcRegString -Path $lu -Name 'LastLoggedOnSAMUser'     -Value '.\Administrator')
   [void](Set-YcRegString -Path $lu -Name 'LastLoggedOnDisplayName' -Value 'Administrator')
+  # The tile the console actually preselects comes from SelectedUserSID, not from the
+  # three strings above - a clone with SelectedUserSID pointing at chadmin shows chadmin
+  # no matter what LastLoggedOnUser says. The SID is per-machine, so resolve the local
+  # -500 account rather than carrying a value from anywhere else.
+  $adm = Get-CimInstance Win32_UserAccount -Filter "LocalAccount=true" -ErrorAction SilentlyContinue |
+         Where-Object { $_.SID -like '*-500' } | Select-Object -First 1
+  if($adm){
+    [void](Set-YcRegString -Path $lu -Name 'SelectedUserSID' -Value $adm.SID)
+    Write-YcLog ('console: SelectedUserSID -> ' + $adm.Name + ' ' + $adm.SID)
+  } else { Write-YcLog 'console: no -500 account found - SelectedUserSID left alone' 'WARN' }
 }
 
 # ===========================================================================

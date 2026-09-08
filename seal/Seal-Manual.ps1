@@ -318,7 +318,9 @@ if($legacy.Count){
   # payload, so the good file was replaced seconds before sysprep and nothing downstream
   # looked again. This check is here, and not in yc-preseal, precisely because this is the
   # only gate that runs AFTER Fix-PreSeal.
-  $ycb = "$S\yc-boot.ps1"
+  # Literal path on purpose: Seal-Manual has no $S - the first cut of this gate borrowed
+  # that variable from Install-YcTasks, and an empty $S made every -WhatIf abort on ycboot.
+  $ycb = 'C:\Scripts\yc-boot.ps1'
   if ((Test-Path $ycb) -and (Select-String -Path $ycb -Pattern 'lockoutthreshold' -Quiet)) {
     Say 'yc-boot      : payload copy intact (re-asserts the lockout threshold every boot)' Green
   } else {

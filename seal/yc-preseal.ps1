@@ -98,6 +98,9 @@ WHAT IT DOES, in order
   2 path      C:\Scripts is put on the MACHINE Path if it is missing, and dead entries
               are pruned. Nothing verified this before - yc-check only looked for dead
               entries, and 'yallacloud resolves' can pass off an inherited session Path.
+  2b tls      Server 2016 only: machine-wide TLS 1.2 for .NET. Its default is Ssl3+Tls,
+              which makes every HTTPS call to GitHub or chocolatey.org look like a dead
+              network. Baked into the image here instead of forced per script forever.
   3 dotnet    install-dotnet -UpgradeChocolatey. 2016 and 2019 need it; 2022 and 2025
               are already above the bar and it is a no-op. This uses the choco netfx-4.8
               package, which touches NO Windows feature - so it cannot pull in MSMQ.
@@ -225,6 +228,38 @@ if ($Report) {
   }
 }
 
+# ---- 2b TLS 1.2 (Server 2016 only) --------------------------------------------------
+# Server 2016's .NET default SecurityProtocol is "Ssl3, Tls". GitHub and chocolatey.org
+# both require TLS 1.2, so every .NET HTTPS call on a stock 2016 box fails with
+#   The underlying connection was closed: An unexpected error occurred on a send.
+# which reads exactly like a dead network. Measured on 100.64.20.11 and .12: gateway
+# reachable, DNS fine, ping fine, and raw.githubusercontent returns 200 the moment
+# TLS 1.2 is forced in-process.
+#
+# Individual scripts already force it per-process, and that is what has been carrying
+# 2016 so far. It is the wrong place: choco 1.4.0, any installer, and anything a customer
+# later runs on a clone of this template all get the 2010 default. Setting it MACHINE-WIDE
+# here bakes the fix into the image instead of re-applying it per script forever.
+# Both the 64-bit and 32-bit keys - a 32-bit process reads the WOW6432Node one.
+if ($build -le 14393) {
+  $tlsKeys = 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319',
+             'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319'
+  $before = (Get-ItemProperty $tlsKeys[0] -Name SchUseStrongCrypto -ErrorAction SilentlyContinue).SchUseStrongCrypto
+  if ($Report) {
+    L ('2b tls     : Server 2016 - SchUseStrongCrypto = ' + $(if ($null -eq $before) { 'NOT SET' } else { $before }))
+    if ($before -ne 1) { $fail += 'tls12' }
+  } else {
+    foreach ($k in $tlsKeys) {
+      if (-not (Test-Path $k)) { New-Item -Path $k -Force | Out-Null }
+      New-ItemProperty -Path $k -Name 'SchUseStrongCrypto'       -PropertyType DWord -Value 1 -Force | Out-Null
+      New-ItemProperty -Path $k -Name 'SystemDefaultTlsVersions' -PropertyType DWord -Value 1 -Force | Out-Null
+    }
+    L ('2b tls     : machine-wide TLS 1.2 for .NET set (was ' + $(if ($null -eq $before) { 'not set' } else { $before }) + ')')
+  }
+} else {
+  L '2b tls     : not 2016 - .NET already negotiates TLS 1.2'
+}
+
 # ---- 3 DOTNET + CHOCOLATEY ----------------------------------------------------------
 $rel = Get-YcDotNetRelease
 if ($Report) {
@@ -307,6 +342,8 @@ $cat = Get-YcCatalogVersion
 V 'catalogue' ($cat -eq $ExpectCatalog) ($cat + ' (want ' + $ExpectCatalog + ')')
 $rel = Get-YcDotNetRelease
 V 'dotnet 4.8+' ($rel -ge 528040) ('Release ' + $rel)
+$sc = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319' -Name SchUseStrongCrypto -ErrorAction SilentlyContinue).SchUseStrongCrypto
+V 'tls 1.2 machine-wide' ($build -gt 14393 -or $sc -eq 1) $(if ($build -gt 14393) { 'n/a above 2016' } else { 'SchUseStrongCrypto=' + $sc })
 $cv = Get-YcChocoVersion
 V 'chocolatey 2.x' ($cv -match '^[2-9]\.') $cv
 V 'msmq absent' (-not (Get-YcMsmq)) 'not installed'

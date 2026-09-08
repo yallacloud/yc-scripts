@@ -254,10 +254,44 @@ if ($build -le 14393) {
       New-ItemProperty -Path $k -Name 'SchUseStrongCrypto'       -PropertyType DWord -Value 1 -Force | Out-Null
       New-ItemProperty -Path $k -Name 'SystemDefaultTlsVersions' -PropertyType DWord -Value 1 -Force | Out-Null
     }
+    # The .NET half only tells managed code to ASK for TLS 1.2. SCHANNEL still has to be
+    # willing to offer it, and on 2016 the TLS 1.2 Client key does not exist at all, which
+    # leaves the protocol at whatever the OS default happens to be. Both halves or neither.
+    $sch = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client'
+    if (-not (Test-Path $sch)) { New-Item -Path $sch -Force | Out-Null }
+    New-ItemProperty -Path $sch -Name 'Enabled'           -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty -Path $sch -Name 'DisabledByDefault' -PropertyType DWord -Value 0 -Force | Out-Null
     L ('2b tls     : machine-wide TLS 1.2 for .NET set (was ' + $(if ($null -eq $before) { 'not set' } else { $before }) + ')')
   }
 } else {
   L '2b tls     : not 2016 - .NET already negotiates TLS 1.2'
+}
+
+# ---- 2c ADMINISTRATOR LOCKOUT ------------------------------------------------------
+# net accounts /lockoutthreshold:0, in the IMAGE.
+# A public IP takes roughly 3000 brute-force logons an hour and the stock threshold is 10,
+# so the Administrator account locks within seconds of the VM becoming reachable and SSH,
+# WinRM and RDP all refuse a password that is perfectly correct. It reads as a broken image
+# every single time. Measured on the v264 clone vc2019test 2026-09-08: threshold 10,
+# straight out of a freshly sealed template - nothing in the seal path had ever set it.
+# yc-boot re-asserts it every boot; this is the baked value so a clone is correct from its
+# very first second, before any task has run.
+function Get-YcLockoutThreshold {
+  $l = @(& net accounts) | Where-Object { $_ -match 'Lockout threshold' }
+  if (-not $l) { return '?' }
+  return (($l | Select-Object -First 1) -replace '[^0-9]','')
+}
+$lt = Get-YcLockoutThreshold
+if ($Report) {
+  L ('2c lockout  : threshold = ' + $lt)
+  if ($lt -ne '0') { $fail += 'lockout' }
+} elseif ($lt -eq '0') {
+  L '2c lockout  : threshold already 0'
+} else {
+  & net accounts /lockoutthreshold:0 *>> $Log
+  $now = Get-YcLockoutThreshold
+  if ($now -eq '0') { L ('2c lockout  : threshold ' + $lt + ' -> 0') }
+  else { L ('2c lockout  : FAILED - threshold still reads ' + $now) 'ERROR'; End-YcPreseal 'FAILED' 1 }
 }
 
 # ---- 3 DOTNET + CHOCOLATEY ----------------------------------------------------------
@@ -338,6 +372,20 @@ function V([string]$n, [bool]$ok, [string]$v) {
   if (-not $ok) { $script:fail += $n }
 }
 
+$schK = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client'
+# Fix 5 is not "Update-YcScripts exists", it is "the payload on this image is the published
+# one". Compare the sha the updater recorded against the sha GitHub is serving right now.
+$script:payloadCurrent = $false
+$script:payloadNote = 'not checked'
+try {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $pub = ((Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/YallaCloud-CScripts-latest.sha256' -UseBasicParsing -TimeoutSec 30).Content -split '\s+')[0].ToUpper()
+  $loc = ''
+  if (Test-Path (Join-Path $S '.payload-sha256')) { $loc = ((Get-Content (Join-Path $S '.payload-sha256') -TotalCount 1) -replace '\s','').ToUpper() }
+  $script:payloadCurrent = ($loc -and $loc -eq $pub)
+  $script:payloadNote = 'local ' + $(if ($loc) { $loc.Substring(0,12) } else { 'none' }) + ' vs published ' + $pub.Substring(0,12)
+} catch { $script:payloadNote = 'could not reach GitHub: ' + $_.Exception.Message }
+
 $cat = Get-YcCatalogVersion
 V 'catalogue' ($cat -eq $ExpectCatalog) ($cat + ' (want ' + $ExpectCatalog + ')')
 $rel = Get-YcDotNetRelease
@@ -417,6 +465,21 @@ $vt = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstal
       Where-Object { $_.DisplayName -like '*Virtio-win*' -or $_.DisplayName -like '*virtio*guest*tools*' } |
       Select-Object -First 1
 if ($vt) { I 'virtio guest tools' ($vt.DisplayName + ' ' + $vt.DisplayVersion) } else { I 'virtio guest tools' 'not installed' }
+
+# ---- THE FIVE KNOWN DEPLOYMENT FIXES, GATED --------------------------------------
+# These are the recurring issues every template generation has shipped with. They are
+# checked HERE, at seal time, because "the user data will handle it" is what let four of
+# the five survive into the v264 images: user data is per-deploy and per-cloud, so a VM
+# built without exactly the right user data got none of them. An image that cannot pass
+# these five does not get sealed.
+V 'fix1 tls (2016 only)' ($build -gt 14393 -or ($sc -eq 1 -and (Get-ItemProperty $schK -Name Enabled -ErrorAction SilentlyContinue).Enabled -eq 1)) $(if ($build -gt 14393) { 'n/a above 2016' } else { 'NET+SCHANNEL both set' })
+V 'fix2 lockout = 0' ((Get-YcLockoutThreshold) -eq '0') ('threshold ' + (Get-YcLockoutThreshold))
+V 'fix2 enforced at boot' ((Select-String -Path (Join-Path $S 'yc-boot.ps1') -Pattern 'lockoutthreshold' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'yc-boot.ps1'
+V 'fix3 fix-gateway shipped' (Test-Path (Join-Path $S 'fix-gateway.cmd')) 'fix-gateway.cmd'
+V 'fix3 run at boot' ((Select-String -Path (Join-Path $S 'yc-boot.ps1') -Pattern 'fix-gateway' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'yc-boot.ps1'
+V 'fix4 focus at firstboot' ((Select-String -Path (Join-Path $S 'yc-firstboot.ps1') -Pattern 'SelectedUserSID' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'yc-firstboot.ps1'
+V 'fix5 Update-YcScripts' (Test-Path (Join-Path $S 'Update-YcScripts.ps1')) 'baked in, required by the sync step'
+V 'fix5 payload is current' ($script:payloadCurrent) $script:payloadNote
 
 $yc = Get-Command yallacloud -ErrorAction SilentlyContinue
 V 'yallacloud runs' ([bool]$yc) $(if ($yc) { $yc.Source } else { 'not resolvable' })

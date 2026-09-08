@@ -1,0 +1,369 @@
+param(
+  [switch]$Report,
+  [switch]$SkipPayload,
+  [switch]$SkipUpdates,
+  [int]$MaxUpdatePasses = 3,
+  [string]$ExpectCatalog = '2.17.0',
+  [string]$Branch = 'main',
+  [switch]$Help
+)
+# =====================================================================================
+# yc-preseal.ps1 - bring a TEMPLATE VM up to date and prove it is ready to be sealed.
+# PowerShell 5.1 only. ASCII only. Runs from C:\Windows\Temp, NOT from C:\Scripts.
+#
+# WHY IT LIVES IN TEMP
+#   Step 1 replaces the whole of C:\Scripts with the published payload and deletes
+#   anything that is not in it. A script that runs from there is deleting itself while
+#   it still has work to do. Temp is outside the blast radius.
+#
+# WHY THE SEAL KIT IS RE-FETCHED
+#   Seal-Manual.ps1, Fix-PreSeal.ps1, AppX-Strip.ps1, Clean-Scripts.ps1, doseal.cmd and
+#   yc-check.ps1 are seal TOOLING. They are deliberately not in the customer payload, so
+#   Update-YcScripts deletes them - which would leave a template that cannot be sealed.
+#   They live in the repo under seal/ and are pulled back after the payload update.
+#
+# WHY IT IS NOT A STATE MACHINE
+#   Every step reads the real machine - the .NET Release value, the MSMQ feature, the
+#   Windows Update reboot flags - and does nothing if the machine is already there. So
+#   it is safe to run it again after every reboot, and there is no state file to go
+#   stale, be sealed into an image, or disagree with the box it describes.
+#
+# EXIT CODES
+#   0  every step done - the VM is ready for the seal sequence
+#   8  a reboot is required. Reboot, then run this again. NOT an error.
+#   1  a step failed, or the final verification failed
+#   5  not elevated
+# Log: C:\Windows\Temp\yc-preseal.log
+# =====================================================================================
+$ErrorActionPreference = 'Continue'
+$Log  = 'C:\Windows\Temp\yc-preseal.log'
+$Pass = 'C:\Windows\Temp\yc-preseal-updpass.txt'
+$S    = 'C:\Scripts'
+$Raw  = 'https://raw.githubusercontent.com/yallacloud/yc-scripts/' + $Branch
+
+function L([string]$m, [string]$lvl = 'INFO') {
+  $line = ((Get-Date).ToString('yyyy-MM-ddTHH:mm:ss') + '  [' + $lvl + '] ' + $m)
+  Write-Output $line
+  try { Add-Content -Path $Log -Value $line -Encoding ascii } catch { }
+}
+
+if ($Help) {
+@"
+yc-preseal.ps1 - update a template VM and prove it is ready to seal.
+
+  yc-preseal.ps1                  do the work. Exit 8 means reboot and run it again.
+  yc-preseal.ps1 -Report          verify only. Changes NOTHING.
+  yc-preseal.ps1 -SkipUpdates     everything except the Windows Update pass
+  yc-preseal.ps1 -SkipPayload     leave C:\Scripts alone (it is already current)
+  yc-preseal.ps1 -MaxUpdatePasses 5
+  yc-preseal.ps1 -ExpectCatalog 2.17.0
+
+WHAT IT DOES, in order
+  1 payload   C:\Scripts <- the published payload, NO backup kept, then the seal kit
+              is pulled back from the repo because the payload does not carry it.
+  2 path      C:\Scripts is put on the MACHINE Path if it is missing, and dead entries
+              are pruned. Nothing verified this before - yc-check only looked for dead
+              entries, and 'yallacloud resolves' can pass off an inherited session Path.
+  3 dotnet    install-dotnet -UpgradeChocolatey. 2016 and 2019 need it; 2022 and 2025
+              are already above the bar and it is a no-op. This uses the choco netfx-4.8
+              package, which touches NO Windows feature - so it cannot pull in MSMQ.
+  4 msmq      MSMQ must not be on the box. Install-WindowsFeature NET-Framework-45-Features
+              drags in NET-WCF-MSMQ-Activation45 -> MSMQ-Server, and Seal-Manual refuses
+              to seal an image that has it. Removed here if present.
+  5 updates   winupdate -All -Install, repeated across reboots until Windows stops asking
+              for one, up to -MaxUpdatePasses.
+  6 focus     LogonUI points at .\Administrator so the console lands on the right account.
+  7 verify    catalogue version, .NET, Chocolatey, MSMQ, Path, every .cmd resolvable,
+              the function-name/alias collision check, and yc-check.
+
+AFTER exit 0: reboot once, then run the seal sequence by hand.
+"@ | Write-Output
+  exit 0
+}
+
+$id = [Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  L 'not elevated' 'ERROR'; exit 5
+}
+
+$os    = (Get-CimInstance Win32_OperatingSystem).Caption
+$build = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
+L ('=== yc-preseal on ' + $env:COMPUTERNAME + ' - ' + $os + ' build ' + $build)
+
+function Test-YcRebootPending {
+  $a = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+  $b = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+  $c = $false
+  try {
+    $v = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction Stop
+    if ($v.PendingFileRenameOperations) { $c = $true }
+  } catch { }
+  return ($a -or $b -or $c)
+}
+function Get-YcDotNetRelease {
+  $r = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -Name Release -ErrorAction SilentlyContinue
+  if ($r) { return [int]$r.Release } else { return 0 }
+}
+function Get-YcMsmq {
+  $svc = Get-Service MSMQ -ErrorAction SilentlyContinue
+  $f = $null
+  try { $f = Get-WindowsFeature MSMQ -ErrorAction SilentlyContinue } catch { }
+  return ([bool]$svc -or ($f -and $f.Installed))
+}
+function Get-YcCatalogVersion {
+  $p = Join-Path $S 'Yallacloud.ps1'
+  if (-not (Test-Path $p)) { return '' }
+  $m = Select-String -Path $p -Pattern "^\`$YcCatalogVersion\s*=\s*'([^']+)'" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($m) { return $m.Matches[0].Groups[1].Value }
+  return ''
+}
+function Get-YcChocoVersion {
+  $c = Get-Command choco.exe -ErrorAction SilentlyContinue
+  if (-not $c) { return '' }
+  return (& $c.Source --version 2>&1 | Select-Object -First 1)
+}
+
+# -------------------------------------------------------------------------------------
+# A reboot that is already pending poisons everything after it: the .NET install refuses,
+# Windows Update stacks a second pending state on top of the first, and Seal-Manual
+# aborts on 'pendingreboot' at the end anyway. Take it first, before doing any work.
+# -------------------------------------------------------------------------------------
+if (-not $Report -and (Test-YcRebootPending)) {
+  L 'a restart is already pending. Reboot, then run this again.' 'WARN'
+  exit 8
+}
+
+$fail = @()
+
+# ---- 1 PAYLOAD ----------------------------------------------------------------------
+if ($Report -or $SkipPayload) {
+  L '1 payload  : skipped'
+} else {
+  $u = Join-Path $S 'Update-YcScripts.ps1'
+  if (-not (Test-Path $u)) {
+    L ('1 payload  : ' + $u + ' is missing - fetching it') 'WARN'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri ($Raw + '/Update-YcScripts.ps1') -OutFile $u -UseBasicParsing
+  }
+  L '1 payload  : Update-YcScripts (sha256 verified, NO backup kept)'
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $u *>> $Log
+  $rc = $LASTEXITCODE
+  L ('1 payload  : Update-YcScripts rc=' + $rc)
+  if ($rc -ne 0) { L 'payload update failed' 'ERROR'; exit 1 }
+
+  # The seal kit is not in the payload, so the line above just deleted it.
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $kit = 'Seal-Manual.ps1','Fix-PreSeal.ps1','AppX-Strip.ps1','Clean-Scripts.ps1',
+         'Install-YcTasks.ps1','PreSeal-Agents.ps1','yc-check.ps1','doseal.cmd'
+  foreach ($k in $kit) {
+    try {
+      Invoke-WebRequest -Uri ($Raw + '/seal/' + $k) -OutFile (Join-Path $S $k) -UseBasicParsing
+      L ('1 payload  : seal kit restored - ' + $k)
+    } catch {
+      L ('1 payload  : COULD NOT restore ' + $k + ' - ' + $_.Exception.Message) 'ERROR'
+      $fail += ('sealkit:' + $k)
+    }
+  }
+}
+
+# ---- 2 PATH -------------------------------------------------------------------------
+$mp    = [Environment]::GetEnvironmentVariable('Path','Machine')
+$parts = @($mp -split ';' | Where-Object { $_ -and $_.Trim() })
+$hasS  = @($parts | Where-Object { $_.TrimEnd('\') -ieq $S }).Count -gt 0
+$dead  = @($parts | Where-Object { -not (Test-Path $_) })
+if ($Report) {
+  L ('2 path     : C:\Scripts on machine Path = ' + $hasS + ', dead entries = ' + $dead.Count)
+  if (-not $hasS) { $fail += 'path:missing' }
+  if ($dead.Count) { $fail += 'path:dead' }
+} else {
+  $keep = @($parts | Where-Object { Test-Path $_ })
+  if (-not $hasS) { $keep = @($S) + $keep; L '2 path     : adding C:\Scripts to the machine Path' }
+  if ($dead.Count) { L ('2 path     : pruning ' + $dead.Count + ' dead entries: ' + ($dead -join ' ; ')) }
+  if ((-not $hasS) -or $dead.Count) {
+    [Environment]::SetEnvironmentVariable('Path', ($keep -join ';'), 'Machine')
+    $env:Path = ($keep -join ';') + ';' + $env:Path
+    L '2 path     : machine Path rewritten'
+  } else {
+    L '2 path     : already correct'
+  }
+}
+
+# ---- 3 DOTNET + CHOCOLATEY ----------------------------------------------------------
+$rel = Get-YcDotNetRelease
+if ($Report) {
+  L ('3 dotnet   : Release ' + $rel + ', choco ' + (Get-YcChocoVersion))
+} elseif ($rel -ge 528040) {
+  L ('3 dotnet   : Release ' + $rel + ' is already 4.8 or better')
+  # 2022/2025 ship 4.8+ but can still be on choco 1.x. Ask for the upgrade anyway; the
+  # script no-ops when choco is already 2.x.
+  & cmd /c 'C:\Scripts\install-dotnet.cmd -UpgradeChocolatey' *>> $Log
+  L ('3 dotnet   : install-dotnet -UpgradeChocolatey rc=' + $LASTEXITCODE)
+} else {
+  L ('3 dotnet   : Release ' + $rel + ' is below 4.8 - installing (choco netfx-4.8, no Windows feature is touched)')
+  & cmd /c 'C:\Scripts\install-dotnet.cmd -UpgradeChocolatey' *>> $Log
+  $rc = $LASTEXITCODE
+  L ('3 dotnet   : install-dotnet rc=' + $rc)
+  if ($rc -eq 8) { L '3 dotnet   : .NET installed - REBOOT and run this again' 'WARN'; exit 8 }
+  if ($rc -ne 0) { L ('install-dotnet failed rc=' + $rc) 'ERROR'; exit 1 }
+}
+
+# ---- 4 MSMQ -------------------------------------------------------------------------
+if (Get-YcMsmq) {
+  if ($Report) { L '4 msmq     : PRESENT - Seal-Manual will refuse to seal this image' 'ERROR'; $fail += 'msmq' }
+  else {
+    L '4 msmq     : present - removing (Uninstall-WindowsFeature MSMQ -Remove)' 'WARN'
+    try {
+      $r = Uninstall-WindowsFeature MSMQ -Remove -ErrorAction Stop
+      L ('4 msmq     : removed, restart needed = ' + $r.RestartNeeded)
+      L '4 msmq     : REBOOT and run this again' 'WARN'
+      exit 8
+    } catch { L ('4 msmq     : removal failed - ' + $_.Exception.Message) 'ERROR'; exit 1 }
+  }
+} else { L '4 msmq     : absent' }
+
+# ---- 5 WINDOWS UPDATE ---------------------------------------------------------------
+if ($Report -or $SkipUpdates) {
+  L '5 updates  : skipped'
+} else {
+  $p = 0
+  if (Test-Path $Pass) { $p = [int]((Get-Content $Pass -TotalCount 1) -replace '\D','') }
+  if ($p -ge $MaxUpdatePasses) {
+    L ('5 updates  : ' + $p + ' passes already done - moving on')
+  } else {
+    Set-Content -Path $Pass -Value ([string]($p + 1)) -Encoding ascii
+    L ('5 updates  : winupdate -All -Install, pass ' + ($p + 1) + ' of ' + $MaxUpdatePasses)
+    # No -Reboot. This script owns the reboot decision, and it asks WINDOWS whether one
+    # is wanted rather than reading it out of an exit code that winupdate never sets.
+    & cmd /c 'C:\Scripts\winupdate.cmd -All -Install' *>> $Log
+    L ('5 updates  : winupdate rc=' + $LASTEXITCODE)
+    if (Test-YcRebootPending) { L '5 updates  : restart pending - REBOOT and run this again' 'WARN'; exit 8 }
+    L '5 updates  : no restart wanted'
+  }
+}
+
+# ---- 6 LOGON FOCUS ------------------------------------------------------------------
+$lu = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI'
+$cur = (Get-ItemProperty $lu -Name LastLoggedOnSAMUser -ErrorAction SilentlyContinue).LastLoggedOnSAMUser
+if ($Report) {
+  L ('6 focus    : LastLoggedOnSAMUser = ' + $cur)
+  if ($cur -ne '.\Administrator') { $fail += 'focus' }
+} else {
+  # Set every time, not once behind a sentinel. Fix-PreSeal guards this with
+  # C:\Scripts\.ycfocus-done, and Update-YcScripts does not keep that file - so on a
+  # refreshed template the sentinel is gone but the value may also have been changed by
+  # a console logon since. Writing it is idempotent and costs nothing.
+  Set-ItemProperty $lu LastLoggedOnUser        '.\Administrator' -ErrorAction SilentlyContinue
+  Set-ItemProperty $lu LastLoggedOnSAMUser     '.\Administrator' -ErrorAction SilentlyContinue
+  Set-ItemProperty $lu LastLoggedOnDisplayName 'Administrator'   -ErrorAction SilentlyContinue
+  New-Item 'C:\Scripts\.ycfocus-done' -ItemType File -Force -ErrorAction SilentlyContinue | Out-Null
+  L '6 focus    : console logon focused on .\Administrator'
+}
+
+# ---- 7 VERIFY -----------------------------------------------------------------------
+L '7 verify   : ---------------------------------------------------------------'
+function V([string]$n, [bool]$ok, [string]$v) {
+  L ('7 verify   : {0,-22} {1,-4} {2}' -f $n, $(if ($ok) { 'PASS' } else { 'FAIL' }), $v)
+  if (-not $ok) { $script:fail += $n }
+}
+
+$cat = Get-YcCatalogVersion
+V 'catalogue' ($cat -eq $ExpectCatalog) ($cat + ' (want ' + $ExpectCatalog + ')')
+$rel = Get-YcDotNetRelease
+V 'dotnet 4.8+' ($rel -ge 528040) ('Release ' + $rel)
+$cv = Get-YcChocoVersion
+V 'chocolatey 2.x' ($cv -match '^[2-9]\.') $cv
+V 'msmq absent' (-not (Get-YcMsmq)) 'not installed'
+$mp2   = [Environment]::GetEnvironmentVariable('Path','Machine')
+$parts = @($mp2 -split ';' | Where-Object { $_ -and $_.Trim() })
+V 'C:\Scripts on Path' (@($parts | Where-Object { $_.TrimEnd('\') -ieq $S }).Count -gt 0) 'machine Path'
+V 'no dead Path entries' (@($parts | Where-Object { -not (Test-Path $_) }).Count -eq 0) ($parts.Count.ToString() + ' entries')
+V 'reboot not pending' (-not (Test-YcRebootPending)) 'CBS / WU / FileRename'
+
+# every .cmd wrapper must be reachable BY NAME - that is what 'the commands work' means,
+# and it is the thing a missing C:\Scripts on the Path silently breaks.
+$cmds = @(Get-ChildItem $S -Filter '*.cmd' -File -ErrorAction SilentlyContinue)
+$unres = @($cmds | Where-Object { -not (Get-Command $_.BaseName -ErrorAction SilentlyContinue) })
+V 'cmd wrappers resolve' ($cmds.Count -ge 30 -and $unres.Count -eq 0) ($cmds.Count.ToString() + ' wrappers, ' + $unres.Count + ' unresolvable' + $(if ($unres.Count) { ': ' + (($unres | Select-Object -First 5).BaseName -join ' ') } else { '' }))
+
+# PowerShell resolves an ALIAS before a FUNCTION. A payload function called R ran
+# Invoke-History on every call and returned nothing. Every function name the payload
+# defines is checked against the built-in aliases here so that cannot ship again.
+$fn = @()
+foreach ($f in Get-ChildItem $S -Filter '*.ps1' -File -ErrorAction SilentlyContinue) {
+  $fn += @(Select-String -Path $f.FullName -Pattern '^\s*function\s+([A-Za-z0-9_-]+)' -AllMatches -ErrorAction SilentlyContinue |
+           ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value })
+}
+$fn = @($fn | Sort-Object -Unique)
+$clash = @($fn | Where-Object { Get-Alias $_ -ErrorAction SilentlyContinue })
+V 'no alias collisions' ($clash.Count -eq 0) ($fn.Count.ToString() + ' function names, ' + $clash.Count + ' clash' + $(if ($clash.Count) { ': ' + ($clash -join ' ') } else { '' }))
+
+# ---- guest tooling: REPORTED, never a gate --------------------------------------
+# A template can be perfectly sealable with none of this, and the two hypervisors want
+# different halves of it, so nothing here is allowed to fail the run. It is here because
+# "which VMware Tools / virtio build is baked into this image" is the question asked
+# every time a clone misbehaves, and nobody could answer it from the machine.
+function I([string]$n, [string]$v) { L ('7 verify   : {0,-22} {1,-4} {2}' -f $n, 'INFO', $v) }
+
+$vmtVer = ''
+foreach ($k in 'HKLM:\SOFTWARE\VMware, Inc.\VMware Tools','HKLM:\SOFTWARE\WOW6432Node\VMware, Inc.\VMware Tools') {
+  if (-not $vmtVer) {
+    $r = Get-ItemProperty $k -ErrorAction SilentlyContinue
+    if ($r -and $r.ProductVersion) { $vmtVer = [string]$r.ProductVersion }
+  }
+}
+$vmtExe = 'C:\Program Files\VMware\VMware Tools\vmtoolsd.exe'
+if (-not $vmtVer -and (Test-Path $vmtExe)) { $vmtVer = (Get-Item $vmtExe).VersionInfo.FileVersion }
+$vmtSvc = Get-Service VMTools -ErrorAction SilentlyContinue
+if ($vmtVer -or $vmtSvc) {
+  I 'vmware tools' (('version ' + $(if ($vmtVer) { $vmtVer } else { 'unknown' })) +
+                    ', service ' + $(if ($vmtSvc) { $vmtSvc.Status.ToString() + '/' + $vmtSvc.StartType } else { 'not present' }))
+} else { I 'vmware tools' 'not installed' }
+
+$gaSvc = Get-Service -Name 'QEMU-GA' -ErrorAction SilentlyContinue
+if (-not $gaSvc) { $gaSvc = Get-Service -Name 'qemu-ga' -ErrorAction SilentlyContinue }
+$gaVer = ''
+foreach ($e in 'C:\Program Files\Qemu-ga\qemu-ga.exe','C:\Program Files (x86)\Qemu-ga\qemu-ga.exe') {
+  if (-not $gaVer -and (Test-Path $e)) { $gaVer = (Get-Item $e).VersionInfo.FileVersion }
+}
+if ($gaSvc -or $gaVer) {
+  I 'qemu guest agent' (('version ' + $(if ($gaVer) { $gaVer } else { 'unknown' })) +
+                        ', service ' + $(if ($gaSvc) { $gaSvc.Status.ToString() + '/' + $gaSvc.StartType } else { 'not present' }))
+} else { I 'qemu guest agent' 'not installed' }
+
+# The driver FILES are the truth. A virtio package can be "installed" in Programs and
+# Features while the driver bound to the disk is an older one, and it is the bound
+# driver that decides whether this image boots on KVM.
+$vio = @()
+foreach ($d in 'viostor','vioscsi','netkvm','balloon','vioser','viorng','vioinput') {
+  $f = Join-Path $env:SystemRoot ('System32\drivers\' + $d + '.sys')
+  if (Test-Path $f) { $vio += ($d + ' ' + (Get-Item $f).VersionInfo.FileVersion) }
+}
+if ($vio.Count) { I 'virtio drivers' (($vio -join ' | ')) } else { I 'virtio drivers' 'none present (normal on ESXi)' }
+$vt = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+      Where-Object { $_.DisplayName -like '*Virtio-win*' -or $_.DisplayName -like '*virtio*guest*tools*' } |
+      Select-Object -First 1
+if ($vt) { I 'virtio guest tools' ($vt.DisplayName + ' ' + $vt.DisplayVersion) } else { I 'virtio guest tools' 'not installed' }
+
+$yc = Get-Command yallacloud -ErrorAction SilentlyContinue
+V 'yallacloud runs' ([bool]$yc) $(if ($yc) { $yc.Source } else { 'not resolvable' })
+
+# yc-check never exits non-zero - it prints '==== N checks, M FAIL ===='. Read the M.
+$chk = Join-Path $S 'yc-check.ps1'
+if (Test-Path $chk) {
+  $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $chk 2>&1
+  $out | ForEach-Object { Add-Content -Path $Log -Value ('    yc-check: ' + $_) -Encoding ascii }
+  $sum = @($out | Where-Object { $_ -match '==== .* FAIL' }) | Select-Object -Last 1
+  $n = 99
+  if ($sum -match '(\d+)\s+FAIL') { $n = [int]$Matches[1] }
+  V 'yc-check' ($n -eq 0) ([string]$sum)
+} elseif ($Report) {
+  L '7 verify   : yc-check               INFO absent - seal tooling, expected outside a template'
+} else { V 'yc-check' $false 'yc-check.ps1 missing - the seal kit was not restored' }
+
+L '7 verify   : ---------------------------------------------------------------'
+if ($fail.Count) {
+  L ('NOT READY TO SEAL - ' + $fail.Count + ' problem(s): ' + ($fail -join ', ')) 'ERROR'
+  exit 1
+}
+L 'READY TO SEAL. Reboot once, then run the seal sequence.' 'OK'
+exit 0

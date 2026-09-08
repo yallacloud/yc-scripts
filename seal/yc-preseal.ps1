@@ -277,9 +277,16 @@ if ($build -le 14393) {
 # yc-boot re-asserts it every boot; this is the baked value so a clone is correct from its
 # very first second, before any task has run.
 function Get-YcLockoutThreshold {
-  $l = @(& net accounts) | Where-Object { $_ -match 'Lockout threshold' }
+  # 'net accounts' prints the DISABLED threshold as the word Never, not as 0. Stripping
+  # non-digits from that line therefore returns an empty string, which is what made the
+  # first run of this gate report FAILED on a machine it had just correctly set to 0.
+  $l = @(& net accounts) | Where-Object { $_ -match 'Lockout threshold' } | Select-Object -First 1
   if (-not $l) { return '?' }
-  return (($l | Select-Object -First 1) -replace '[^0-9]','')
+  $v = ($l -split ':')[-1].Trim()
+  if ($v -match '^(Never|Nunca|Jamais|Nie)$') { return '0' }
+  $d = $v -replace '[^0-9]',''
+  if ($d -eq '') { return '?' }
+  return $d
 }
 $lt = Get-YcLockoutThreshold
 if ($Report) {
@@ -476,7 +483,12 @@ V 'fix1 tls (2016 only)' ($build -gt 14393 -or ($sc -eq 1 -and (Get-ItemProperty
 V 'fix2 lockout = 0' ((Get-YcLockoutThreshold) -eq '0') ('threshold ' + (Get-YcLockoutThreshold))
 V 'fix2 enforced at boot' ((Select-String -Path (Join-Path $S 'yc-boot.ps1') -Pattern 'lockoutthreshold' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'yc-boot.ps1'
 V 'fix3 fix-gateway shipped' (Test-Path (Join-Path $S 'fix-gateway.cmd')) 'fix-gateway.cmd'
-V 'fix3 run at boot' ((Select-String -Path (Join-Path $S 'yc-boot.ps1') -Pattern 'fix-gateway' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'yc-boot.ps1'
+# Not "is it in yc-boot" - it deliberately is not. -AtStartup fires before DHCP on a clone,
+# so the repair runs with no gateway to look at and passes by doing nothing. Install-YcTasks
+# registers YC-NetFix against NetworkProfile event 10000, which is raised AFTER the address
+# is assigned. Seal-Manual then gates that the task actually exists on the sealed image.
+V 'fix3 YC-NetFix registered by Install-YcTasks' ((Select-String -Path (Join-Path $S 'Install-YcTasks.ps1') -Pattern 'YC-NetFix' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'Install-YcTasks.ps1'
+V 'fix3 private-only refusal intact' ((Select-String -Path (Join-Path $S 'Yc-FixGateway.ps1') -Pattern 'public address - never touched' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'Yc-FixGateway.ps1 refuses public IPs'
 V 'fix4 focus at firstboot' ((Select-String -Path (Join-Path $S 'yc-firstboot.ps1') -Pattern 'SelectedUserSID' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) 'yc-firstboot.ps1'
 V 'fix5 Update-YcScripts' (Test-Path (Join-Path $S 'Update-YcScripts.ps1')) 'baked in, required by the sync step'
 V 'fix5 payload is current' ($script:payloadCurrent) $script:payloadNote

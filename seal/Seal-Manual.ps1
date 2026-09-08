@@ -310,10 +310,13 @@ if($legacy.Count){
   Say '               which retires these nine and installs YC-Boot/YC-Health/YC-KeyGuard.' Red
   $fail += 'legacytasks'
 } else {
-  $three = @('YC-Boot','YC-Health','YC-KeyGuard' |
-             Where-Object { Get-ScheduledTask -TaskName $_ -EA SilentlyContinue })
-  if($three.Count -eq 3){ Say 'tasks        : YC-Boot, YC-Health, YC-KeyGuard' Green }
-  else { Say ('tasks        : expected 3, found ' + $three.Count + ' (' + ($three -join ', ') + ')') Red
+  # YC-NetFix joined this set: the gateway repair has to fire when the network becomes
+  # usable, not at -AtStartup, which on a clone is routinely before DHCP has handed out an
+  # address. Four now, not three.
+  $want4 = @('YC-Boot','YC-Health','YC-KeyGuard','YC-NetFix')
+  $four = @($want4 | Where-Object { Get-ScheduledTask -TaskName $_ -EA SilentlyContinue })
+  if($four.Count -eq 4){ Say ('tasks        : ' + ($want4 -join ', ')) Green }
+  else { Say ('tasks        : expected 4, found ' + $four.Count + ' (' + ($four -join ', ') + ') - missing ' + ((Compare-Object $want4 $four | Where-Object { $_.SideIndicator -eq '<=' }).InputObject -join ', ')) Red
          $fail += 'tasks' }
 }
 

@@ -198,6 +198,42 @@ $kt2 = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(5) `
         -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration ([TimeSpan]::FromDays(3650))
 Reg-YcTask 'YC-KeyGuard' 'yc-keyguard.ps1' @($kt,$kt2)
 
+# YC-NetFix - the gateway repair, fired WHEN THE NETWORK IS READY, not merely at boot.
+#
+# fix-gateway has shipped in the payload for a while and nothing in the image ever ran it;
+# the user data was carrying it, so a VM deployed without exactly that user data got no
+# gateway repair at all. Putting it in YC-Boot was not enough either: YC-Boot fires -AtStartup,
+# which on a clone is routinely BEFORE DHCP has handed out an address, and a gateway check
+# with no gateway yet is a no-op that looks like a pass.
+#
+# So the real trigger is the event Windows raises when a network becomes usable:
+# Microsoft-Windows-NetworkProfile/Operational, EventID 10000 "Network connected". That fires
+# after the address is assigned, every time an interface comes up, including after a DHCP
+# renewal re-applies the bad gateway. -AtStartup is kept only as a backstop for the case
+# where the event was raised before the task engine was ready to receive it.
+#
+# Yc-FixGateway.ps1 is unchanged and does the deciding: private RFC1918 only, the last octet
+# must be exactly 254, .1 has to answer a ping first, and it rolls back if the new route does
+# not work. This registers WHEN it runs; it does not second-guess WHAT it does.
+$netXml = @"
+<QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational">
+<Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name='Microsoft-Windows-NetworkProfile'] and EventID=10000]]</Select>
+</Query></QueryList>
+"@
+$netTriggers = @(New-ScheduledTaskTrigger -AtStartup)
+try{
+  $cls = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler -ErrorAction Stop
+  $evt = New-CimInstance -CimClass $cls -ClientOnly
+  $evt.Subscription = $netXml
+  $evt.Enabled = $true
+  $netTriggers += $evt
+  Say '  YC-NetFix: network-connected event trigger built (NetworkProfile 10000)' Green
+}catch{
+  Say ('  YC-NetFix: could NOT build the event trigger - ' + $_.Exception.Message + ' - falling back to -AtStartup only') Yellow
+}
+Reg-YcTask 'YC-NetFix' 'Yc-FixGateway.ps1' $netTriggers
+
+
 Say '---------------------------' Cyan
 Get-ScheduledTask | Where-Object { $_.TaskName -match '^(YC-|YCFIRSTBOOT|GISSHInit)' } |
   Sort-Object TaskName | ForEach-Object { Say ("  {0,-14} {1}" -f $_.TaskName, $_.State) }

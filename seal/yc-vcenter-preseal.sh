@@ -46,9 +46,20 @@ wait_up(){   # $1 = ip
 
 # The guest pulls yc-preseal.ps1 itself. Nothing is scp'd, so this driver works from any
 # machine that can reach port 3222 and does not have to carry a copy that drifts.
+#
+# TWO THINGS THIS LEARNED THE HARD WAY:
+#   raw.githubusercontent is behind a CDN, and minutes after a push an edge still served
+#   the previous file. The guest downloaded it, reported success, and ran the old script -
+#   which is the worst kind of failure, because everything looks like it worked. A
+#   cache-buster query string is appended, and the downloaded file is then CHECKED for the
+#   sentinel it must contain. A stage that cannot prove it got the new file is a failure.
 stage(){     # $1 = ip
+  local url="$RAW/seal/yc-preseal.ps1?cb=$(date +%s)$RANDOM"
   ssh $O -p "$PORT" "Administrator@$1" \
-    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '$RAW/seal/yc-preseal.ps1' -OutFile 'C:\\Windows\\Temp\\yc-preseal.ps1' -UseBasicParsing\"" >/dev/null 2>&1
+    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '$url' -OutFile 'C:\\Windows\\Temp\\yc-preseal.ps1' -UseBasicParsing\"" >/dev/null 2>&1 || return 1
+  ssh $O -p "$PORT" "Administrator@$1" \
+    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (@(Select-String -Path 'C:\\Windows\\Temp\\yc-preseal.ps1' -Pattern 'YC-PRESEAL-RESULT').Count -lt 1) { exit 1 }\"" >/dev/null 2>&1 || return 1
+  return 0
 }
 
 declare -A VERDICT

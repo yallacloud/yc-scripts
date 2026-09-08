@@ -387,7 +387,8 @@ V 'yallacloud runs' ([bool]$yc) $(if ($yc) { $yc.Source } else { 'not resolvable
 # yc-check never exits non-zero - it prints '==== N checks, M FAIL ===='. Read the M.
 $chk = Join-Path $S 'yc-check.ps1'
 if (Test-Path $chk) {
-  $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $chk 2>&1
+  # -Template: hostname and qemu-ga are DEPLOYMENT checks and cannot pass on a golden image.
+  $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $chk -Template 2>&1
   $out | ForEach-Object { Add-Content -Path $Log -Value ('    yc-check: ' + $_) -Encoding ascii }
   $sum = @($out | Where-Object { $_ -match '==== .* FAIL' }) | Select-Object -Last 1
   $n = 99

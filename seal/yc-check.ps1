@@ -1,6 +1,16 @@
+param([switch]$Template)
 # yc-check.ps1 - read-only post-deploy verification of a YallaCloud clone.
 #   powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\yc-check.ps1
+#   powershell ... -File C:\Scripts\yc-check.ps1 -Template
 # Changes nothing.
+#
+# -Template: this is a golden image being prepared, not a deployed clone. Two checks are
+# about DEPLOYMENT and are meaningless before one has happened, and failing them on a
+# template trains people to ignore the output:
+#   hostname  a template is SUPPOSED to still be called WIN2019EFI - that is the whole
+#             point of it. The check exists to catch a CLONE that never got renamed.
+#   qemu-ga   a vCenter template has no QEMU guest agent and never will.
+# Under -Template both become INFO. Nothing else changes.
 #
 # NOTE: every value is computed into a variable FIRST and only then emitted.
 # The earlier version called  R 'os' $null (Get-CimInstance ...).Caption  and
@@ -16,7 +26,7 @@ function Add-R([string]$name, $ok, $val) {
 $os   = (Get-CimInstance Win32_OperatingSystem).Caption
 $name = $env:COMPUTERNAME
 Add-R 'os'       $null $os
-Add-R 'hostname' ($name -notmatch '^(WIN2019|WIN2016|WIN2022|WIN2025)') $name
+Add-R 'hostname' $(if ($Template) { $null } else { ($name -notmatch '^(WIN2019|WIN2016|WIN2022|WIN2025)') }) $name
 
 # ---- payload provenance ----
 $pv = 'C:\Scripts\yc-payload-version.txt'
@@ -35,8 +45,11 @@ $yc = Get-Command yallacloud -EA SilentlyContinue
 Add-R 'yallacloud on PATH' ([bool]$yc) $(if ($yc) { $yc.Source } else { 'not resolvable' })
 $isql = Test-Path 'C:\Scripts\Install-Sql.ps1'
 Add-R 'install-sql' $isql $(if ($isql) { 'present' } else { 'absent (needs payload v262)' })
-$tpl = @(Get-ChildItem 'C:\Scripts\sql-templates' -File -EA SilentlyContinue).Count
-Add-R 'sql-templates' ($tpl -eq 5) "$tpl file(s)"
+# Count the .tmpl files, not everything in the folder. The assertion is "one SQL
+# ConfigurationFile template per supported version", and it read 'exactly 5 files' - so
+# adding TEMPLATE-NOTES.md to the payload turned a healthy machine into a FAIL.
+$tpl = @(Get-ChildItem 'C:\Scripts\sql-templates' -Filter '*.tmpl' -File -EA SilentlyContinue).Count
+Add-R 'sql-templates' ($tpl -eq 5) "$tpl .tmpl file(s)"
 $ncmd = @(Get-ChildItem 'C:\Scripts' -Filter '*.cmd' -File).Count
 Add-R 'catalog .cmd count' ($ncmd -ge 30) $ncmd
 
@@ -75,7 +88,7 @@ foreach ($d in 'viostor','vioscsi') {
 }
 $qga = Get-Service QEMU-GA -EA SilentlyContinue
 $cbi = Get-Service cloudbase-init -EA SilentlyContinue
-Add-R 'qemu-ga'        ([bool]$qga) $(if ($qga) { $qga.Status } else { 'absent' })
+Add-R 'qemu-ga'        $(if ($Template) { $null } else { [bool]$qga }) $(if ($qga) { $qga.Status } else { 'absent' })
 Add-R 'cloudbase-init' ([bool]$cbi) $(if ($cbi) { "$($cbi.Status)/$($cbi.StartType)" } else { 'absent' })
 
 # ---- sysprep / licensing ----

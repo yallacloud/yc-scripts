@@ -55,10 +55,26 @@ for oct in "$@"; do
   R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1 -Report' | tail -40
   # pwsh 7 is the guests' OpenSSH DefaultShell and flattens every non-zero exit to 1, so
   # the verdict is read from yc-preseal's own last line rather than from $?.
-  OUT=$(mktemp)
-  R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1 -SkipPayload -SkipUpdates' > "$OUT" 2>&1
-  verd=$(grep -o 'YC-PRESEAL-RESULT: [A-Z]*' "$OUT" | tail -1 | awk '{print $2}')
-  rm -f "$OUT"
+  # The gate is allowed to spend ONE reboot. The -Report pass above installs chocolatey
+  # servicing and .NET hotfixes, and those routinely leave a reboot pending that was NOT
+  # pending when the pass started - so yc-preseal reports REBOOT on a host where all 24 other
+  # gates PASS. Refusing outright there means a human has to restart the guest and run the
+  # whole seal again, which is exactly what happened on 100.64.20.17 and .18 on 2026-09-09.
+  # Anything other than REBOOT still refuses: a real defect must not be rebooted away.
+  verd=''
+  for attempt in 1 2; do
+    OUT=$(mktemp)
+    R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\yc-preseal.ps1 -SkipPayload -SkipUpdates' > "$OUT" 2>&1
+    verd=$(grep -o 'YC-PRESEAL-RESULT: [A-Z]*' "$OUT" | tail -1 | awk '{print $2}')
+    rm -f "$OUT"
+    [ "$verd" = "READY" ] && break
+    [ "$verd" = "REBOOT" ] && [ $attempt -eq 1 ] || break
+    say "$IP: gate wants a reboot - restarting once, then re-checking"
+    R "$IP" 'shutdown /r /t 5 /f' >/dev/null 2>&1
+    sleep 30
+    if ! wait_up "$IP"; then say "$IP: did not come back from the gate reboot"; verd='NO-BOOT'; break; fi
+    sleep 30
+  done
   if [ "$verd" != "READY" ]; then say "$IP: NOT ready (verdict=${verd:-none}) - refusing to seal"; VERDICT[$IP]="NOT-READY"; continue; fi
 
   say "$IP: 1 Fix-PreSeal"
@@ -77,8 +93,19 @@ for oct in "$@"; do
   if [ "$DRYRUN" = "1" ]; then say "$IP: DRYRUN - stopping after preflight"; VERDICT[$IP]="PREFLIGHT-OK"; continue; fi
 
   say "$IP: 4 Seal-Manual (cleanup)"
-  R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Seal-Manual.ps1'
-  if [ $? -ne 0 ]; then say "$IP: Seal-Manual aborted"; VERDICT[$IP]="SEAL-ABORT"; continue; fi
+  # Judge this by what Seal-Manual LOGGED, not by $?. The guests' OpenSSH DefaultShell is
+  # pwsh 7, which does not report a child's exit status faithfully: on 100.64.20.18
+  # 2026-09-09 Seal-Manual finished its cleanup and logged [END] exit=0, and $? still came
+  # back non-zero, so the driver declared SEAL-ABORT on a run that had actually succeeded.
+  # Seal-Manual's own last line is the authority.
+  SOUT=$(mktemp)
+  R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\Seal-Manual.ps1' > "$SOUT" 2>&1
+  tail -3 "$SOUT" | grep -v RISK
+  if grep -q 'ABORT:' "$SOUT" || ! grep -q '\[END\] exit=0' "$SOUT"; then
+    say "$IP: Seal-Manual did not finish cleanly"; grep -E 'ABORT:' "$SOUT" | tail -2
+    rm -f "$SOUT"; VERDICT[$IP]="SEAL-ABORT"; continue
+  fi
+  rm -f "$SOUT"
 
   say "$IP: 5 AppX-Strip x4"
   R "$IP" 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& C:\Scripts\AppX-Strip.ps1; & C:\Scripts\AppX-Strip.ps1; & C:\Scripts\AppX-Strip.ps1; & C:\Scripts\AppX-Strip.ps1"' | tail -10

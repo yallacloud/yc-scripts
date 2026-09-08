@@ -3,7 +3,7 @@ param(
   [switch]$SkipPayload,
   [switch]$SkipUpdates,
   [int]$MaxUpdatePasses = 3,
-  [string]$ExpectCatalog = '2.17.0',
+  [string]$ExpectCatalog = '',
   [string]$Branch = 'main',
   [switch]$Help
 )
@@ -372,6 +372,37 @@ if ($Report) {
   L '6 focus    : console logon focused on .\Administrator'
 }
 
+# ---- 6b SETTLE THE SCHEDULED TASKS -------------------------------------------------
+# Step 1 deletes and rewrites the whole of C:\Scripts. Any YC task that happens to fire in
+# that window finds its script missing and records a failure - measured on WIN2019BIOS
+# 2026-09-08: YC-Health fired at 22:50:50 mid-swap and recorded LastTaskResult 2147943515,
+# which yc-check then reported as a FAIL on an image that was perfectly fine. Running it
+# again against the FINAL payload returned 0.
+#
+# So the tasks are run once here, deliberately, and their result is checked. This is not
+# about silencing yc-check: a sealed image whose health task cannot complete is a real
+# defect, and the only way to know is to run it. YC-Boot is left alone - it is an -AtStartup
+# task and running it by hand outside a boot proves nothing about a boot.
+$taskFail = @()
+foreach ($tn in 'YC-Health','YC-KeyGuard') {
+  $tk = Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+  if (-not $tk) { L ('6b tasks    : ' + $tn + ' not registered yet - Fix-PreSeal registers it during the seal run'); continue }
+  if ($Report) {
+    $ti = Get-ScheduledTaskInfo -TaskName $tn -ErrorAction SilentlyContinue
+    L ('6b tasks    : ' + $tn + ' LastResult=' + $ti.LastTaskResult)
+    if ($ti.LastTaskResult -ne 0) { $taskFail += $tn }
+    continue
+  }
+  Start-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+  for ($n = 0; $n -lt 60; $n++) {
+    Start-Sleep -Seconds 5
+    if ((Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue).State -ne 'Running') { break }
+  }
+  $ti = Get-ScheduledTaskInfo -TaskName $tn -ErrorAction SilentlyContinue
+  if ($ti.LastTaskResult -eq 0) { L ('6b tasks    : ' + $tn + ' ran clean against the final payload (0)') }
+  else { L ('6b tasks    : ' + $tn + ' returned ' + $ti.LastTaskResult) 'WARN'; $taskFail += $tn }
+}
+
 # ---- 7 VERIFY -----------------------------------------------------------------------
 L '7 verify   : ---------------------------------------------------------------'
 function V([string]$n, [bool]$ok, [string]$v) {
@@ -394,7 +425,14 @@ try {
 } catch { $script:payloadNote = 'could not reach GitHub: ' + $_.Exception.Message }
 
 $cat = Get-YcCatalogVersion
-V 'catalogue' ($cat -eq $ExpectCatalog) ($cat + ' (want ' + $ExpectCatalog + ')')
+# The catalogue version is a LABEL. What actually matters is that the payload on this image
+# is the published one, and 'fix5 payload is current' proves that by sha - so the label is
+# reported, not asserted, unless someone explicitly passes -ExpectCatalog. A hardcoded
+# expected version here just goes stale on the next release and fails a perfectly good image,
+# which is exactly what it did on the first 2.18.2 run.
+if ($ExpectCatalog) { V 'catalogue' ($cat -eq $ExpectCatalog) ($cat + ' (want ' + $ExpectCatalog + ')') }
+else { L ('7 verify   : {0,-22} {1,-4} {2}' -f 'catalogue', 'INFO', $cat) }
+V 'catalogue is real' ($cat -match '^\d+\.\d+') ($cat + ' (a stub Yallacloud.ps1 has none)')
 $rel = Get-YcDotNetRelease
 V 'dotnet 4.8+' ($rel -ge 528040) ('Release ' + $rel)
 $sc = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319' -Name SchUseStrongCrypto -ErrorAction SilentlyContinue).SchUseStrongCrypto
@@ -493,6 +531,7 @@ V 'fix4 focus at firstboot' ((Select-String -Path (Join-Path $S 'yc-firstboot.ps
 V 'fix5 Update-YcScripts' (Test-Path (Join-Path $S 'Update-YcScripts.ps1')) 'baked in, required by the sync step'
 V 'fix5 payload is current' ($script:payloadCurrent) $script:payloadNote
 
+V 'YC tasks run clean' ($taskFail.Count -eq 0) $(if ($taskFail.Count) { 'non-zero: ' + ($taskFail -join ', ') } else { 'YC-Health, YC-KeyGuard = 0' })
 $yc = Get-Command yallacloud -ErrorAction SilentlyContinue
 V 'yallacloud runs' ([bool]$yc) $(if ($yc) { $yc.Source } else { 'not resolvable' })
 
@@ -513,6 +552,12 @@ if (Test-Path $chk) {
 L '7 verify   : ---------------------------------------------------------------'
 if ($fail.Count) {
   L ('NOT READY TO SEAL - ' + $fail.Count + ' problem(s): ' + ($fail -join ', ')) 'ERROR'
+  # A reboot that became pending DURING this run - chocolatey servicing, a .NET hotfix, a
+  # driver - is not a defect, it is the one thing a restart fixes. Step 0 only ever sees a
+  # reboot that was ALREADY pending when we started, so without this the outer loop reads
+  # FAILED and stops on a host that is one restart away from READY. Measured 2026-09-09 on
+  # 100.64.20.17 and .18: 24 of 25 gates PASS, the only complaint 'reboot not pending'.
+  if ($fail.Count -eq 1 -and $fail[0] -eq 'reboot not pending') { End-YcPreseal 'REBOOT' 8 }
   End-YcPreseal 'FAILED' 1
 }
 L 'READY TO SEAL. Reboot once, then run the seal sequence.' 'OK'

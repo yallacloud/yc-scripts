@@ -57,6 +57,12 @@ wait_up(){   # $1 = ip
 LOCAL="/root/.yc-preseal.ps1"
 
 fetch_local(){
+  # NOFETCH=1 uses the copy already at $LOCAL. For when the node has been handed the
+  # exact bytes out of band and the CDN must not get a vote.
+  if [ "${NOFETCH:-0}" = "1" ] && [ -s "$LOCAL" ]; then
+    say "using $LOCAL as-is  $(wc -c < "$LOCAL") bytes  sha $(sha256sum "$LOCAL" | cut -c1-16)"
+    return 0
+  fi
   local url="$RAW/seal/yc-preseal.ps1"
   local n
   for n in 1 2 3 4 5 6; do

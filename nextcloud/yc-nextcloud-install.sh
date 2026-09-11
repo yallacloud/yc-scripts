@@ -35,6 +35,7 @@ TARBALL=""                     # blank = download Nextcloud from download.nextcl
                                 # Set to a LOCAL pre-downloaded archive to skip the
                                 # download entirely, e.g. TARBALL="/root/latest.tar.bz2"
                                 # (a sibling .sha256/.sha512 is used to verify it).
+APT_MIRROR="ae.archive.ubuntu.com"  # apt archive mirror (UAE). Change per region if needed.
 TARBALL_URL=""                 # optional INTERNAL mirror (e.g. pbs01) serving
                                 # latest.tar.bz2 + latest.tar.bz2.sha256. When set and
                                 # TARBALL is not already a local file, both are pulled
@@ -107,6 +108,7 @@ HTTPS_PORT=$HTTPS_PORT
 SET_HOSTNAME=$SET_HOSTNAME
 TARBALL=$TARBALL
 TARBALL_URL=$TARBALL_URL
+APT_MIRROR=$APT_MIRROR
 EOF
 chmod 600 "$CFG"
 
@@ -264,13 +266,14 @@ DB_NAME=nextcloud; DB_USER=nc_user01
 # ------------------------------------------------------------- 4. packages
 export DEBIAN_FRONTEND=noninteractive
 timedatectl set-timezone "$TZ_SET" 2>/dev/null || true
-# Ubuntu 24.04 repo fix: some networks fail on the default http mirrors
-# (eu.archive.*). Force https + the canonical archive.ubuntu.com. Handles the
-# new deb822 file (ubuntu.sources) and the legacy sources.list if present.
-say "normalising apt mirrors to https archive.ubuntu.com"
+# Ubuntu 24.04 repo fix: the default archive.ubuntu.com / cloudflare / eu.archive
+# mirrors can be slow or unreachable on some networks. Repoint the archive host
+# at APT_MIRROR (default the UAE mirror ae.archive.ubuntu.com). security.ubuntu.com
+# is left as-is. Handles the deb822 ubuntu.sources and the legacy sources.list.
+say "pointing apt archive mirror at ${APT_MIRROR}"
 for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
   [ -f "$F" ] || continue
-  sed -i -E 's#http://[a-z.]*archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g; s#http://security.ubuntu.com/ubuntu#https://security.ubuntu.com/ubuntu#g' "$F"
+  sed -i -E "s#https?://([a-z0-9.-]*\\.)?archive\\.ubuntu\\.com/ubuntu#http://${APT_MIRROR}/ubuntu#g" "$F"
 done
 say "apt update"
 apt-get update -qq || die "apt update failed"

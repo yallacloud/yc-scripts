@@ -1,0 +1,30 @@
+#cloud-config
+# YallaCloud Nextcloud - minimal userdata: fetch installer + per-VM conf.
+package_update: false
+write_files:
+  - path: /etc/yallacloud/nextcloud.conf
+    permissions: '0600'
+    content: |
+      FQDN=gemsfs.applite.cloud
+      ADMIN_USER=admin
+      DATA_PATH=/nc_data
+      TIER=standard
+      TZ_SET=Asia/Dubai
+      PHONE_REGION=AE
+      SUDO_USER_NAME=chadmin
+      HTTPS_PORT=
+      SET_HOSTNAME=yes
+      TARBALL=
+      TARBALL_URL=https://github.com/yallacloud/yc-scripts/releases/download/nc-latest
+  - path: /opt/yc-nc/start.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -e
+      for i in 1 2 3 4 5; do
+        curl -fsSL 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/nextcloud/yc-nextcloud-install.sh' -o /opt/yc-nc/install.sh && break || sleep 10
+      done
+      chmod +x /opt/yc-nc/install.sh
+      exec setsid /opt/yc-nc/install.sh </dev/null >/var/log/yc-nextcloud-boot.log 2>&1 &
+runcmd:
+  - /opt/yc-nc/start.sh

@@ -7,8 +7,8 @@
 #
 # WHITELIST SOURCE OF TRUTH
 # -------------------------
-# $Catalog below is the 79-file command set from /root/final_scripts on ycnode01
-# (10.15.1.101) - the source of truth named in SCRIPTS-FOLDER-IMPROVEMENTS.md,
+# $Catalog below is the 79-file command set from /root/final_scripts on the build node
+# - the source of truth named in SCRIPTS-FOLDER-IMPROVEMENTS.md,
 # baked into the golden by inject6.sh. Plus the golden's own runtime scripts and
 # anything a baked scheduled task points at. Everything else in the ROOT of
 # C:\Scripts goes.

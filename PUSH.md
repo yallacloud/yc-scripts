@@ -26,10 +26,36 @@ git push
 
 ## Before pushing a payload
 
-Run the self-check that ships with it:
+### 1. Prove you are not publishing a secret
+
+    python3 scan-secrets.py
+
+**This repo is PUBLIC.** Guests fetch the payload over plain HTTPS with no credential, so
+anything committed here is world-readable forever and stays in the git history after it is
+deleted. The scanner must exit 0.
+
+What it allows, and why: Microsoft-published **GVLK** client keys are public by design and
+the licensing table needs them. Everything else that looks like a product key is a finding.
+
+What must NEVER be committed:
+
+- **SQL Server MAKs.** They live in the estate key store and are pasted into the build
+  userdata per build. The builder userdata itself is not in this repo for the same reason -
+  it also carries the webhook secret.
+- **Windows MAKs.** Same rule. The GVLKs in `_yc-licensing.ps1` are not MAKs.
+- Any password, API key, bearer token, webhook secret or private key.
+- The firewall `chadmin` password and the OPNsense API key/secret - these are YallaCloud's
+  own standing estate credentials and belong in no document at all.
+
+A finding is not automatically a leak - read each one and decide. The point is that nobody
+pushes without having looked.
+
+### 2. Run the payload's own self-check
+
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\test-activate.ps1
+powershell -ExecutionPolicy Bypass -File .\Yc-VmBuild.ps1 -SelfCheck
 ```
 
 It must end with `all checks passed` and no `FAIL` line. A payload that fails the

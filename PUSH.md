@@ -28,7 +28,8 @@ git push
 
 ### 1. Prove you are not publishing a secret
 
-    python3 scan-secrets.py
+    python3 scan-secrets.py --selftest    # prove the gate still fires
+    python3 scan-secrets.py               # then prove the tree is clean
 
 **This repo is PUBLIC.** Guests fetch the payload over plain HTTPS with no credential, so
 anything committed here is world-readable forever and stays in the git history after it is

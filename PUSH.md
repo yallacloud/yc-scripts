@@ -88,3 +88,21 @@ revoking the token cannot break a deployed VM or a sealed template.
 
 Bake `userdata-yc-deploy-fixes.txt` into the templates as the cloud-init user data.
 It is frozen: two constant URLs, no hash, no credential. It never needs editing again.
+
+## The local Forgejo mirror
+
+`git.mgmt.yallacloud.net/yallacloud/yc-scripts` is a **pull mirror** of this repo,
+created 2026-09-20. It follows GitHub on its own every 10 minutes - there is no second
+push to make and nothing to remember.
+
+    clone (inside the estate):  https://git.mgmt.yallacloud.net/yallacloud/yc-scripts.git
+    host:                       yccont01 10.15.0.203, podman container foundation_forgejo_1
+    owner:                      org yallacloud, public on the instance (no credential to clone)
+
+It is **read-only**. Never push to it and never commit there - a mirror with local commits
+stops syncing and silently diverges from what the VMs actually download. GitHub stays
+canonical because the sealed templates fetch the payload from
+`raw.githubusercontent.com`, and that URL is frozen into every image.
+
+To force a sync instead of waiting out the 10 minutes: Forgejo web UI ->
+repo -> Settings -> Mirror Settings -> Synchronize Now.

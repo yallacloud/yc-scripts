@@ -96,7 +96,7 @@ created 2026-09-20. It follows GitHub on its own every 10 minutes - there is no 
 push to make and nothing to remember.
 
     clone (inside the estate):  https://git.mgmt.yallacloud.net/yallacloud/yc-scripts.git
-    host:                       yccont01 10.15.0.203, podman container foundation_forgejo_1
+    host:  the estate management host (see the internal runbook)
     owner:                      org yallacloud, public on the instance (no credential to clone)
 
 It is **read-only**. Never push to it and never commit there - a mirror with local commits

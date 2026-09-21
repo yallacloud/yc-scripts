@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-#  yc-nextcloud-manual.sh  1.2.0                                              #
+#  yc-nextcloud-manual.sh  1.4.0                                              #
 #  Run this AS ROOT on a fresh Ubuntu 24.04 LTS VM.                          #
 #  VM to install a production Nextcloud with a Let's Encrypt certificate.     #
 #                                                                            #
@@ -13,6 +13,16 @@
 #                                                                            #
 #  Progress: /var/log/yc-nextcloud-install.log                              #
 #  Result:   /root/yc-handover.json   (all passwords, chmod 600)            #
+#                                                                            #
+#  1.4.0  sshd: ALL settings in one drop-in (00-yallacloud-root.conf, first   #
+#              in the include glob so it wins). Pubkey auth explicit,         #
+#              optional operator key install. Socket activation dropped and   #
+#              masked - ssh.socket overrides the Port in sshd_config and a    #
+#              socket restart can leave NOTHING listening. Listener is        #
+#              verified before the script continues.                         #
+#              cloud-init disabled at the end so it stops rewriting netplan,  #
+#              the sshd drop-in and the hostname on every boot.              #
+#              Final section: post-install checks, then a clean reboot.       #
 ###############################################################################
 set -uo pipefail
 
@@ -42,6 +52,21 @@ TARBALL_URL=""                 # optional INTERNAL mirror (e.g. pbs01) serving
                                 # to /root over the LAN (fast, no nextcloud.com, no
                                 # FortiGate throttle), e.g. "http://10.x.x.x/nextcloud".
 
+# --- ssh ---------------------------------------------------------------------
+SSH_PUBKEY=""                  # optional operator public key, installed for root
+                                # and $SUDO_USER_NAME, e.g.
+                                # "ssh-ed25519 AAAAC3Nza... bilal@elitebook"
+                                # blank = pubkey auth still enabled, add keys later.
+PERMIT_ROOT_LOGIN="yes"        # yes | prohibit-password | no
+                                # prohibit-password = key-only root (set SSH_PUBKEY first)
+
+# --- finish ------------------------------------------------------------------
+DISABLE_CLOUD_INIT="yes"       # yes = stop cloud-init re-running every boot once the
+                                # build is done. Do NOT set yes on a VM you will clone
+                                # or template - see section 14.
+REBOOT_AFTER="yes"             # yes = verify every service and port, then reboot
+                                # cleanly at the end. no = leave the box running.
+
 # --- overrides (leave blank to auto-detect) ---------------------------------
 SSH_PORT_OVERRIDE=""            # blank = 3222 if the VM has a public IP, else 22.
                                 # behind a firewall (private IP) leave blank -> 22.
@@ -50,7 +75,7 @@ GATEWAY_OVERRIDE=""             # blank = auto (tries .1, then .254, then .2).
                                 # if auto-detect picks the wrong one.
 # ============================================================================
 #
-#  >>> FIREWALL / NAT CASE (private IP like 172.30.30.3) <<<
+#  >>> FIREWALL / NAT CASE (private IP like 172.30.30.3) <
 #  For Let's Encrypt to succeed, the firewall must forward, from the PUBLIC IP
 #  the A record points at, to THIS VM:
 #        TCP 80  -> <this VM>:80     (required for the certificate)
@@ -93,6 +118,10 @@ rnd()  { genpw; }   # every generated secret now follows the YallaCloud rule
 [ -f "$CFG" ] && . "$CFG"
 case "$FQDN" in cloud.example.com|"") die "edit FQDN in the CONFIG block first";; esac
 : "${HTTPS_PORT:=443}"           # blank -> standard 443 (nginx listen needs a port)
+: "${PERMIT_ROOT_LOGIN:=yes}"
+: "${SSH_PUBKEY:=}"
+: "${DISABLE_CLOUD_INIT:=yes}"
+: "${REBOOT_AFTER:=yes}"
 
 # persist the choices so a re-run and the handover agree
 mkdir -p /etc/yallacloud
@@ -109,6 +138,10 @@ SET_HOSTNAME=$SET_HOSTNAME
 TARBALL=$TARBALL
 TARBALL_URL=$TARBALL_URL
 APT_MIRROR=$APT_MIRROR
+SSH_PUBKEY=$SSH_PUBKEY
+PERMIT_ROOT_LOGIN=$PERMIT_ROOT_LOGIN
+DISABLE_CLOUD_INIT=$DISABLE_CLOUD_INIT
+REBOOT_AFTER=$REBOOT_AFTER
 EOF
 chmod 600 "$CFG"
 
@@ -671,22 +704,69 @@ if ! id "$SUDO_USER_NAME" >/dev/null 2>&1; then
   usermod -aG sudo "$SUDO_USER_NAME"
 fi
 chpasswd <<<"${SUDO_USER_NAME}:${SUDO_PASS}"
-if [ "$SSH_PORT" != "22" ]; then
-  sed -i '/^#\?Port /d' /etc/ssh/sshd_config
-  echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
-  # Ubuntu 24.04 uses socket activation (ssh.socket) which listens on 22 and
-  # OVERRIDES the Port in sshd_config. Point the socket at the new port too.
-  if systemctl list-unit-files ssh.socket >/dev/null 2>&1; then
-    mkdir -p /etc/systemd/system/ssh.socket.d
-    cat > /etc/systemd/system/ssh.socket.d/port.conf <<EOS
-[Socket]
-ListenStream=
-ListenStream=${SSH_PORT}
-EOS
-    systemctl daemon-reload
-    systemctl restart ssh.socket 2>/dev/null || true
-  fi
+
+# ALL sshd settings live in ONE drop-in. Ubuntu 24.04's sshd_config begins with
+# "Include /etc/ssh/sshd_config.d/*.conf", the glob is read in sort order, and
+# sshd takes the FIRST value it sees for a keyword. The 00- prefix therefore
+# wins over cloud-init's 50-cloud-init.conf and anything in sshd_config itself.
+sed -i '/^#\?Port /d' /etc/ssh/sshd_config
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/00-yallacloud-root.conf <<EOF
+# Written by yc-nextcloud. First file in the include glob, so these values win.
+Port ${SSH_PORT}
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication yes
+PermitRootLogin ${PERMIT_ROOT_LOGIN}
+KbdInteractiveAuthentication no
+UsePAM yes
+EOF
+chmod 644 /etc/ssh/sshd_config.d/00-yallacloud-root.conf
+
+# install the operator key, if one was supplied
+install_key() {
+    local user="$1" home
+    home=$(getent passwd "$user" | cut -d: -f6)
+    [ -n "$home" ] && [ -d "$home" ] || { say "  no home directory for ${user} - key skipped"; return; }
+    mkdir -p "${home}/.ssh"
+    touch "${home}/.ssh/authorized_keys"
+    grep -qxF "$SSH_PUBKEY" "${home}/.ssh/authorized_keys" \
+        || echo "$SSH_PUBKEY" >> "${home}/.ssh/authorized_keys"
+    chmod 700 "${home}/.ssh"; chmod 600 "${home}/.ssh/authorized_keys"
+    chown -R "${user}:$(id -gn "$user")" "${home}/.ssh"
+    say "  key installed for ${user}"
+}
+if [ -n "$SSH_PUBKEY" ]; then
+    case "$SSH_PUBKEY" in
+        ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*\ *|sk-ssh-*\ *|sk-ecdsa-*\ *) : ;;
+        *) die "SSH_PUBKEY does not look like a public key line (expected ssh-ed25519, ssh-rsa, ecdsa-sha2-* or sk-*)" ;;
+    esac
+    install_key root
+    install_key "$SUDO_USER_NAME"
+    SSH_KEY_STATE="yes"
+else
+    say "  no SSH_PUBKEY set - pubkey auth is enabled, add keys to ~/.ssh/authorized_keys"
+    SSH_KEY_STATE="no"
 fi
+
+# Ubuntu 24.04 ships ssh.socket ENABLED. Under socket activation the Port in
+# sshd_config is IGNORED (the port lives in the unit), and restarting the
+# socket can leave NOTHING listening - locking you out of a box that looks
+# perfectly healthy. Drop socket activation and run sshd as a plain service:
+# one source of truth for the port, and a listener that survives a restart.
+sshd -t || die "sshd configuration is invalid - refusing to touch a working sshd"
+systemctl disable --now ssh.socket >/dev/null 2>&1 || true
+rm -rf /etc/systemd/system/ssh.socket.d
+systemctl mask ssh.socket >/dev/null 2>&1 || true
+systemctl daemon-reload
+systemctl enable ssh.service >/dev/null 2>&1
+systemctl restart ssh.service || die "sshd would not start on port ${SSH_PORT}"
+sleep 1
+ss -ltn | grep -qE "[:.]${SSH_PORT}[[:space:]]" \
+  || die "nothing is listening on ${SSH_PORT} - keep your console session open"
+sshd -T 2>/dev/null | grep -qi '^pubkeyauthentication yes' \
+  || die "pubkey auth did not take effect - check /etc/ssh/sshd_config.d/00-yallacloud-root.conf"
+say "  sshd on ${SSH_PORT}: pubkey yes, password yes, root ${PERMIT_ROOT_LOGIN}, socket masked"
 
 # ------------------------------------------------------ 13. firewall, tier
 say "hardening (tier: $TIER)"
@@ -733,10 +813,48 @@ if [ "$TIER" = "hardened" ]; then
   $O config:app:set twofactor_totp enforced --value=1 >/dev/null 2>&1
 fi
 
-systemctl restart fail2ban ssh nginx php${PHPV}-fpm
+# NOTE: ssh is deliberately NOT in this restart list. Section 12 already
+# restarted and verified it; bouncing it again would drop the session this
+# script is running in, and would race the socket unit it just masked.
+systemctl restart fail2ban nginx php${PHPV}-fpm
 systemctl enable --now nginx mariadb redis-server fail2ban php${PHPV}-fpm >/dev/null 2>&1
 
-# ------------------------------------------------------------ 14. handover
+# ---------------------------------------------------- 14. disable cloud-init
+# cloud-init has done its job: the instance is built. Left enabled it re-runs
+# every boot and can rewrite things this script owns - netplan, the sshd
+# drop-in, the hostname - silently undoing the build.
+#
+# /etc/cloud/cloud-init.disabled is cloud-init's own supported switch: its
+# systemd generator checks for that file and declines to enable any of the
+# units. The explicit disables below are belt and braces for images where the
+# units were enabled statically.
+#
+# WARNING: do NOT do this on a VM you intend to clone or turn into a template.
+# cloud-init is what regenerates the hostname, machine-id and SSH host keys per
+# instance; without it every clone ships identical host keys.
+if [ "$DISABLE_CLOUD_INIT" = "yes" ]; then
+    if [ -d /etc/cloud ]; then
+        say "disabling cloud-init permanently"
+        touch /etc/cloud/cloud-init.disabled
+        for U in cloud-init cloud-init-local cloud-init-main cloud-config cloud-final; do
+            systemctl disable "$U" >/dev/null 2>&1 || true
+        done
+        say "  /etc/cloud/cloud-init.disabled created, units disabled"
+        say "  to undo: rm /etc/cloud/cloud-init.disabled && systemctl enable cloud-init-local cloud-init cloud-config cloud-final"
+        CLOUD_INIT_STATE="disabled"
+    else
+        say "cloud-init is not installed - nothing to disable"
+        CLOUD_INIT_STATE="not-installed"
+    fi
+else
+    say "DISABLE_CLOUD_INIT=no - cloud-init left enabled"
+    CLOUD_INIT_STATE="enabled"
+fi
+# Note: /etc/netplan/50-cloud-init.yaml and /etc/ssh/sshd_config.d/50-cloud-init.conf
+# are deliberately LEFT IN PLACE. They are static files now - still read at boot,
+# no longer rewritten. Deleting the netplan one would drop the VM's addressing.
+
+# ------------------------------------------------------------ 15. handover
 NC_VER=$($O status 2>/dev/null | awk '/versionstring/{print $3}')
 ISSUER=$(echo | timeout 10 openssl s_client -connect "${FQDN}:443" -servername "$FQDN" 2>/dev/null \
          | openssl x509 -noout -issuer 2>/dev/null | sed 's/issuer=//')
@@ -754,6 +872,12 @@ cat > "$OUT" <<EOF
   "sudo_user": "${SUDO_USER_NAME}",
   "sudo_password": "${SUDO_PASS}",
   "ssh_port": ${SSH_PORT},
+  "ssh_mode": "service (ssh.socket masked)",
+  "ssh_pubkey_auth": "enabled",
+  "ssh_password_auth": "enabled",
+  "ssh_key_installed": "${SSH_KEY_STATE}",
+  "permit_root_login": "${PERMIT_ROOT_LOGIN}",
+  "cloud_init": "${CLOUD_INIT_STATE}",
   "is_public": ${IS_PUBLIC},
   "network_shape": "${NET_SHAPE}",
   "gateway": "${NET_GW}",
@@ -778,4 +902,57 @@ EOF
 chmod 600 "$OUT"
 touch /root/yc-INSTALL-OK
 say "DONE - handover written to $OUT"
-say "URL https://${FQDN}  admin ${ADMIN_USER} / ${ADMIN_PASS}  ssh port ${SSH_PORT}"
+say "URL https://${FQDN}${PORTSFX}  admin ${ADMIN_USER} / ${ADMIN_PASS}  ssh port ${SSH_PORT}"
+
+# --------------------------------------------- 16. verify, then clean reboot
+# Nothing here changes the build. It proves the box is actually serving before
+# the reboot, and refuses to reboot if it is not - a reboot into a broken state
+# is far harder to diagnose than a script that stopped and said why.
+say "post-install verification"
+VFAIL=0
+for U in nginx mariadb redis-server "php${PHPV}-fpm" ssh fail2ban; do
+    if systemctl is-active --quiet "$U"; then
+        systemctl is-enabled --quiet "$U" 2>/dev/null \
+            || say "  warning: ${U} is running but not enabled at boot"
+    else
+        say "  NOT RUNNING: ${U}"; VFAIL=1
+    fi
+done
+for P in "$SSH_PORT" "$HTTPS_PORT" 80; do
+    ss -ltn | grep -qE "[:.]${P}[[:space:]]" || { say "  NOT LISTENING: ${P}"; VFAIL=1; }
+done
+$O status >/dev/null 2>&1 || { say "  occ status failed - Nextcloud is not answering"; VFAIL=1; }
+curl -skS -o /dev/null -m 15 "https://127.0.0.1:${HTTPS_PORT}/status.php" \
+    || { say "  local https probe failed"; VFAIL=1; }
+
+if [ "$VFAIL" != "0" ]; then
+    say "VERIFICATION FAILED - not rebooting. Fix the above first."
+    say "Full log: $LOG   Handover: $OUT"
+    exit 1
+fi
+say "all services healthy, all ports listening"
+
+if [ "$REBOOT_AFTER" != "yes" ]; then
+    say "REBOOT_AFTER=no - leaving the box running. Reboot when convenient."
+    exit 0
+fi
+
+say "clean shutdown in 15s - press Ctrl-C now to abort"
+sleep 15
+
+# Quiesce in dependency order: web tier first so nothing writes during the
+# datastore flush, then the datastores, then hand over to systemd.
+# innodb_flush_log_at_trx_commit=2 (set in section 5) leaves up to a second of
+# commits in the OS cache - stopping MariaDB explicitly closes that window
+# instead of racing the shutdown timer.
+say "  stopping web tier"
+systemctl stop nginx "php${PHPV}-fpm" >/dev/null 2>&1 || true
+say "  flushing redis"
+redis-cli -a "$REDIS_PASS" --no-auth-warning SAVE >/dev/null 2>&1 || true
+systemctl stop redis-server >/dev/null 2>&1 || true
+say "  flushing mariadb - do not interrupt"
+mysql --no-defaults -u root -e "FLUSH TABLES; FLUSH LOGS;" >/dev/null 2>&1 || true
+systemctl stop mariadb >/dev/null 2>&1 || true
+sync; sync
+say "  rebooting now - reconnect on ssh port ${SSH_PORT}"
+systemctl reboot || reboot || init 6

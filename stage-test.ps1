@@ -7,10 +7,17 @@
     live instance. This runs them on a box you are willing to throw away, in an order where the
     interesting phases are also the FAST ones, and bundles every log into one file to send back.
 
-  WHAT IT DELIBERATELY DOES NOT RUN
-    TOOLS      installs Chocolatey, git, PowerShell 7, dbatools, SSMS. Minutes, and the least
-               interesting thing to prove. Pass -IncludeTools if you want it.
-    DISKSCAN   chkdsk /scan on a 1 TB volume. Long. Pass -IncludeDiskScan if you want it.
+  THE OPTIONAL STAGES, AND WHAT THEY COST
+    -IncludeTools      stage D. Chocolatey, git, .NET 4.8, PowerShell 7, dbatools, winget.
+                       SSMS is NOT in it: it is the single longest download in the payload and
+                       nothing in the corruption-prevention path needs it. Add -IncludeSsms to
+                       pull it too, and expect to wait.
+    -IncludeTasks      stage F. YC-AutoUpdate and YC-Inventory - the two recurring jobs. Fast.
+                       Both are REMOVED again in step 3, so this proves registration and
+                       readback without leaving anything running on this box.
+    -IncludeDiskScan   stage E. Registers YC-DiskScan, which is a chkdsk /scan at 05:15. The
+                       REGISTRATION is instant; the scan itself never runs here because step 3
+                       removes the task. Nothing long happens during this stage.
     The deferred CHECKDB baseline task is REMOVED at the end if SQLMAINT ever registers it, so
     nothing fires at 02:15 on a box with failing storage.
 
@@ -20,13 +27,21 @@
     SQLHARDEN  NO-OP  - every database is already PAGE_VERIFY CHECKSUM; reports the SIMPLE ones
     SQLMAINT   REFUSE - suspect_pages is full, so it must not schedule a CHECKDB
     SQLBACKUP  REFUSE - Acronis is running AND the data will not fit the free space
-    A refusal here is a PASS. Two of these five phases are supposed to say no.
+    TOOLS      PASS   - installs what is missing; already-present tools are reported, not reinstalled
+    TASKS      PASS   - registers YC-AutoUpdate and YC-Inventory, reads both back, then removes them
+    DISKSCAN   PASS   - registers YC-DiskScan and reads it back, then removes it
+    A refusal here is a PASS. Two of these phases are supposed to say no.
 
-  RUN IT (elevated):
+  RUN IT (elevated). The plain one-liner runs stages A-C only, because iex cannot pass arguments:
     [Net.ServicePointManager]::SecurityProtocol='Tls12'; iex (irm https://raw.githubusercontent.com/yallacloud/yc-scripts/main/stage-test.ps1)
+
+  TO GET THE OPTIONAL STAGES, save it first and then call it with switches:
+    [Net.ServicePointManager]::SecurityProtocol='Tls12'
+    irm https://raw.githubusercontent.com/yallacloud/yc-scripts/main/stage-test.ps1 -OutFile $env:TEMP\st.ps1
+    & $env:TEMP\st.ps1 -IncludeTools -IncludeTasks -IncludeDiskScan
 ================================================================================================
 #>
-param([switch]$IncludeTools,[switch]$IncludeDiskScan)
+param([switch]$IncludeTools,[switch]$IncludeSsms,[switch]$IncludeTasks,[switch]$IncludeDiskScan)
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
 $Dir = 'C:\Scripts'
@@ -79,8 +94,17 @@ $stages = @(
   @{ n='B  SQLMAINT  (EXPECTED TO REFUSE)'; a=@('-Run','-Only','SURVEY,SQLMAINT');   expect='REFUSE - suspect_pages is not empty' },
   @{ n='C  SQLBACKUP (EXPECTED TO REFUSE)'; a=@('-Run','-Only','SURVEY,SQLBACKUP');  expect='REFUSE - another backup scheme, and/or the data will not fit' }
 )
-if ($IncludeTools)    { $stages += @{ n='D  TOOLS (slow)';    a=@('-Run','-Only','SURVEY,TOOLS');    expect='installs Chocolatey, git, PS7, dbatools, SSMS' } }
-if ($IncludeDiskScan) { $stages += @{ n='E  DISKSCAN (slow)'; a=@('-Run','-Only','SURVEY,DISKSCAN'); expect='registers YC-DiskScan' } }
+if ($IncludeTools) {
+  # SSMS is opt-in inside an opt-in. It is a multi-hundred-megabyte installer and nothing in the
+  # corruption-prevention path calls it, so it must not be what makes this stage look like a hang.
+  $ta = @('-Run','-Only','SURVEY,TOOLS')
+  if (-not $IncludeSsms) { $ta += '-SkipSsms' }
+  $stages += @{ n=('D  TOOLS' + $(if ($IncludeSsms) {' + SSMS (very slow)'} else {' (no SSMS)'}))
+                a=$ta
+                expect=('Chocolatey, git, .NET, PowerShell 7, dbatools, winget' + $(if ($IncludeSsms) {', SSMS'} else {' - SSMS skipped'})) }
+}
+if ($IncludeDiskScan) { $stages += @{ n='E  DISKSCAN'; a=@('-Run','-Only','SURVEY,SQLPREP,DISKSCAN'); expect='registers YC-DiskScan - the registration is instant, the scan never runs here' } }
+if ($IncludeTasks)    { $stages += @{ n='F  TASKS';    a=@('-Run','-Only','SURVEY,TASKS');            expect='registers YC-AutoUpdate and YC-Inventory, both proven by readback' } }
 
 $results = @()
 foreach ($s in $stages) {
@@ -95,10 +119,34 @@ foreach ($s in $stages) {
   Say ('  -> exit ' + $p.ExitCode + '   (' + $secs + 's)') $(if ($p.ExitCode -in @(0,2,3)) {'Green'} else {'Yellow'})
 }
 
-# ---- 3. make sure nothing is left scheduled on a box with failing storage ----------------------
+# ---- 3. READ BACK what was registered, THEN remove it ------------------------------------------
+# The whole point of a schedule test is the readback. Removing a task without first recording what
+# it was, when it fired and WHO it ran as proves nothing except that Unregister works.
+$YcTasks = @('YC-IntegrityBaseline','YC-SqlIntegrityFast','YC-SqlIntegrity','YC-SqlRestoreVerify',
+             'YC-DiskScan','YC-AutoUpdate','YC-Inventory','YC-AdoptResume','YC-S4U-Probe')
+$taskDump = New-Object System.Collections.Generic.List[string]
 Write-Host ''
-Say 'STEP 3  removing anything that would fire later on this box...'
-foreach ($t in @('YC-IntegrityBaseline','YC-SqlIntegrityFast','YC-SqlIntegrity','YC-SqlRestoreVerify','YC-DiskScan','YC-AdoptResume','YC-S4U-Probe')) {
+Say 'STEP 3  reading back every task this run could have registered...'
+foreach ($t in $YcTasks) {
+  try {
+    $st = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
+    if (-not $st) { $null = $taskDump.Add(('  {0,-22} ABSENT' -f $t)); continue }
+    $who = ''
+    try { $who = $st.Principal.UserId + ' / ' + $st.Principal.LogonType + ' / ' + $st.Principal.RunLevel } catch {}
+    $trg = ''
+    try { $trg = (@($st.Triggers | ForEach-Object { $_.CimClass.CimClassName + '@' + [string]$_.StartBoundary }) -join ' ; ') } catch {}
+    $act = ''
+    try { $act = (@($st.Actions | ForEach-Object { $_.Execute + ' ' + $_.Arguments }) -join ' ; ') } catch {}
+    $null = $taskDump.Add(('  {0,-22} PRESENT' -f $t))
+    $null = $taskDump.Add( '     runs as : ' + $who)
+    $null = $taskDump.Add( '     trigger : ' + $trg)
+    $null = $taskDump.Add( '     action  : ' + $act)
+    Say ('  ' + $t + '  ->  ' + $who) 'Green'
+  } catch { $null = $taskDump.Add(('  {0,-22} could not be read: {1}' -f $t, $_.Exception.Message)) }
+}
+
+Say 'removing anything that would fire later on this box...'
+foreach ($t in $YcTasks) {
   try { if (Get-ScheduledTask -TaskName $t -EA SilentlyContinue) {
           Unregister-ScheduledTask -TaskName $t -Confirm:$false
           Say ('  removed ' + $t) 'Yellow' } } catch {}
@@ -120,7 +168,29 @@ $null = $b.Add('')
 $null = $b.Add('  A REFUSAL IS A PASS. Stages B and C are supposed to say no.')
 $null = $b.Add('')
 foreach ($r in $results) { $null = $b.Add(('  {0,-40} exit {1,-3} {2,4}s   expected: {3}' -f $r.stage, $r.exit, $r.seconds, $r.expected)) }
-foreach ($f in @('adopt-migrated-vm.log','baseline_beforemigration.log','adopt-migrated-vm.state.json','pageverify.undo.json','yc-integrity.log')) {
+$null = $b.Add('')
+$null = $b.Add('================================================================================')
+$null = $b.Add('  SCHEDULED TASKS as they stood BEFORE step 3 removed them')
+$null = $b.Add('================================================================================')
+foreach ($line in $taskDump) { $null = $b.Add($line) }
+$null = $b.Add('')
+$null = $b.Add('================================================================================')
+$null = $b.Add('  TOOLS - what is actually on this host now')
+$null = $b.Add('================================================================================')
+foreach ($probe in @(
+    @{ n='choco';    c={ (& choco.exe --version 2>&1 | Select-Object -First 1) } },
+    @{ n='git';      c={ (& git.exe --version 2>&1 | Select-Object -First 1) } },
+    @{ n='winget';   c={ (& winget.exe --version 2>&1 | Select-Object -First 1) } },
+    @{ n='pwsh 7';   c={ (@(Get-ChildItem 'C:\Program Files\PowerShell\7\pwsh.exe' -EA SilentlyContinue).Count) } },
+    @{ n='dbatools'; c={ (@(Get-Module dbatools -ListAvailable -EA SilentlyContinue | ForEach-Object { [string]$_.Version }) -join ', ') } },
+    @{ n='.NET rel'; c={ (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -EA SilentlyContinue).Release } },
+    @{ n='ssms';     c={ (@(Get-ChildItem 'C:\Program Files (x86)\Microsoft SQL Server Management Studio*' -EA SilentlyContinue).Count) } })) {
+  $val = ''
+  try { $val = [string](& $probe.c) } catch { $val = 'probe failed: ' + $_.Exception.Message }
+  if (-not $val) { $val = '(absent)' }
+  $null = $b.Add(('  {0,-10} {1}' -f $probe.n, $val))
+}
+foreach ($f in @('adopt-migrated-vm.log','baseline_beforemigration.log','adopt-migrated-vm.state.json','pageverify.undo.json','yc-integrity.log','yc-autoupdate.log','report-inventory.log','dbatools-install.log','install-dotnet.log')) {
   $p2 = Join-Path $Dir $f
   $null = $b.Add(''); $null = $b.Add('================================================================================')
   $null = $b.Add('  ' + $f); $null = $b.Add('================================================================================')

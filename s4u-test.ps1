@@ -22,18 +22,32 @@
     Nothing that survives. It creates up to three scheduled tasks with throwaway names and
     unregisters every one of them before it exits, and it writes one report file.
 
-  RUN IT (elevated):
-    [Net.ServicePointManager]::SecurityProtocol='Tls12'; iex (irm https://raw.githubusercontent.com/yallacloud/yc-scripts/main/s4u-test.ps1)
+  RUN IT (elevated). SAVE IT FIRST - do NOT pipe this one through iex:
+    [Net.ServicePointManager]::SecurityProtocol='Tls12'
+    irm https://raw.githubusercontent.com/yallacloud/yc-scripts/main/s4u-test.ps1 -OutFile $env:TEMP\s4u.ps1
+    & $env:TEMP\s4u.ps1
+
+  WHY NOT iex: a script run through Invoke-Expression shares the host's session, so an
+  'exit' in it terminates the WINDOW, taking the error message with it. The first version of
+  this script did exactly that and the operator saw a console vanish with no output at all.
+  Everything below therefore returns instead of exiting, and writes a log as it goes so there
+  is evidence even if something does kill the session.
 ================================================================================================
 #>
 $ErrorActionPreference = 'Continue'
 $Dir   = 'C:\Scripts'
 $Body  = Join-Path $env:TEMP 'yc-s4u-body.ps1'
 $Out   = Join-Path $env:TEMP 'yc-s4u-result.txt'
+$Log   = Join-Path $env:TEMP 'yc-s4u-test.log'
 $Task  = 'YC-S4U-Experiment'
 $User  = $env:COMPUTERNAME + '\chadmin'
 
-function Say { param([string]$m,[string]$c='Gray') Write-Host ('  ' + $m) -ForegroundColor $c }
+Set-Content -LiteralPath $Log -Value ((Get-Date).ToString('s') + '  s4u-test start') -Encoding ascii -ErrorAction SilentlyContinue
+function Say {
+  param([string]$m,[string]$c='Gray')
+  Write-Host ('  ' + $m) -ForegroundColor $c
+  try { Add-Content -LiteralPath $Log -Value ((Get-Date).ToString('s') + '  ' + $m) -Encoding ascii } catch {}
+}
 
 Write-Host ''
 Write-Host '  YALLACLOUD - S4U REGISTRATION TEST' -ForegroundColor Green
@@ -42,7 +56,7 @@ Write-Host ''
 $admin = $false
 try { $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
                 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
-if (-not $admin) { Say 'Run this from an ELEVATED PowerShell.' 'Red'; exit 5 }
+if (-not $admin) { Say 'Run this from an ELEVATED PowerShell. Nothing was done.' 'Red'; return }
 
 # ---- the body that will run AS SYSTEM ----------------------------------------------------------
 # Written to a file rather than passed as a -Command string: a multi-line script in an argument
@@ -97,6 +111,7 @@ Remove-Item -LiteralPath $Out -Force -ErrorAction SilentlyContinue
 Say ('probe body written: ' + $Body)
 
 # ---- run it as SYSTEM --------------------------------------------------------------------------
+$started = $false
 try {
   $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "' + $Body + '"')
   $p = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -104,10 +119,13 @@ try {
   Register-ScheduledTask -TaskName $Task -Action $a -Trigger $t -Principal $p -Force -ErrorAction Stop | Out-Null
   Start-ScheduledTask -TaskName $Task
   Say 'running the probe as SYSTEM...'
-} catch { Say ('could not start the SYSTEM probe: ' + $_.Exception.Message) 'Red'; exit 6 }
+  $started = $true
+} catch { Say ('could not start the SYSTEM probe: ' + $_.Exception.Message) 'Red' }
 
 $waited = 0
-while ((-not (Test-Path -LiteralPath $Out)) -and $waited -lt 60) { Start-Sleep -Seconds 2; $waited += 2 }
+if ($started) {
+  while ((-not (Test-Path -LiteralPath $Out)) -and $waited -lt 60) { Start-Sleep -Seconds 2; $waited += 2 }
+}
 try { Unregister-ScheduledTask -TaskName $Task -Confirm:$false } catch {}
 Remove-Item -LiteralPath $Body -Force -ErrorAction SilentlyContinue
 
@@ -122,9 +140,13 @@ if (Test-Path -LiteralPath $Out) {
     Write-Host ''
     Say ('also saved to ' + (Join-Path $Dir 's4u-test-result.txt')) 'Green'
   }
+} elseif (-not $started) {
+  Say 'the SYSTEM probe was never started - see the message above. Nothing was measured.' 'Red'
 } else {
   Say ('the SYSTEM probe produced no output after ' + $waited + 's. It did not run.') 'Red'
+  Say 'Check Task Scheduler history for YC-S4U-Experiment.' 'Yellow'
 }
 Write-Host ''
 Say 'Every task this created has been unregistered. Nothing is left behind.' 'Green'
+Say ('a log of this run is at ' + $Log) 'Green'
 Write-Host ''

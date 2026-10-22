@@ -177,11 +177,28 @@ $null = $b.Add('')
 $null = $b.Add('================================================================================')
 $null = $b.Add('  TOOLS - what is actually on this host now')
 $null = $b.Add('================================================================================')
+# This process started BEFORE the installs ran, so its PATH does not have them and
+# "choco.exe is not recognized" was this probe's own blind spot, not a failed install - it said
+# choco, git and winget were absent on a run whose own logs recorded all three installing
+# successfully. Re-read the machine and user PATH, then probe by install path, never by name.
+try {
+  $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+} catch {}
+function Probe-Exe {
+  param([string[]]$Paths,[string[]]$Args)
+  foreach ($p in $Paths) {
+    foreach ($hit in @(Get-ChildItem -Path $p -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+      try { return ((& $hit.FullName @Args 2>&1 | Where-Object { $_ } | Select-Object -First 1) | Out-String).Trim() }
+      catch { return ('present at ' + $hit.FullName + ' but would not run: ' + $_.Exception.Message) }
+    }
+  }
+  return ''
+}
 foreach ($probe in @(
-    @{ n='choco';    c={ (& choco.exe --version 2>&1 | Select-Object -First 1) } },
-    @{ n='git';      c={ (& git.exe --version 2>&1 | Select-Object -First 1) } },
-    @{ n='winget';   c={ (& winget.exe --version 2>&1 | Select-Object -First 1) } },
-    @{ n='pwsh 7';   c={ (@(Get-ChildItem 'C:\Program Files\PowerShell\7\pwsh.exe' -EA SilentlyContinue).Count) } },
+    @{ n='choco';    c={ Probe-Exe -Paths @('C:\ProgramData\chocolatey\bin\choco.exe') -Args @('--version') } },
+    @{ n='git';      c={ Probe-Exe -Paths @('C:\Program Files\Git\cmd\git.exe','C:\Program Files (x86)\Git\cmd\git.exe') -Args @('--version') } },
+    @{ n='winget';   c={ Probe-Exe -Paths @((Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'),'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller*\winget.exe') -Args @('--version') } },
+    @{ n='pwsh 7';   c={ Probe-Exe -Paths @('C:\Program Files\PowerShell\7\pwsh.exe','C:\Program Files\PowerShell\7-preview\pwsh.exe') -Args @('-NoProfile','-Command','$PSVersionTable.PSVersion.ToString()') } },
     @{ n='dbatools'; c={ (@(Get-Module dbatools -ListAvailable -EA SilentlyContinue | ForEach-Object { [string]$_.Version }) -join ', ') } },
     @{ n='.NET rel'; c={ (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -EA SilentlyContinue).Release } },
     @{ n='ssms';     c={ (@(Get-ChildItem 'C:\Program Files (x86)\Microsoft SQL Server Management Studio*' -EA SilentlyContinue).Count) } })) {

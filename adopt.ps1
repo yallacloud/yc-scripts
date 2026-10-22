@@ -26,6 +26,14 @@
 #   6. hands over to  migrated-vm -Run , which does the other nine phases and pulls the full payload
 #
 # It is deliberately small. Everything it could do twice, it leaves to the script it hands over to.
+#
+# WHY THE BODY IS A FUNCTION AND WHY THERE IS NO 'exit' IN IT
+#   This file is designed to be run through  iex (irm ...) , which executes it IN THE OPERATOR'S
+#   OWN SESSION. An 'exit' there does not end a script - it ends the WINDOW. This file used to end
+#   with 'exit $code', so every single run closed the console the instant migrated-vm finished,
+#   and the operator never got to read the verdict that had just been printed. Reported as
+#   "why the script exits?". Everything below returns instead, and $LASTEXITCODE still carries
+#   the result for anything that checks it.
 # ================================================================================================
 $ErrorActionPreference = 'Stop'
 $Url    = 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/YallaCloud-CScripts-latest.zip'
@@ -34,6 +42,8 @@ $Dir    = 'C:\Scripts'
 $Line   = "[Net.ServicePointManager]::SecurityProtocol='Tls12'; iex (irm https://raw.githubusercontent.com/yallacloud/yc-scripts/main/adopt.ps1)"
 
 function Say($m,$c='Gray'){ Write-Host ('  ' + $m) -ForegroundColor $c }
+
+function Invoke-YcAdoptOnRamp {
 
 Write-Host ''
 Write-Host '  YALLACLOUD  -  adopting this migrated VM' -ForegroundColor Green
@@ -56,7 +66,7 @@ if (-not $admin) {
   Say ''
   Say $Line 'White'
   Say ''
-  exit 5
+  return 5
 }
 
 if (-not (Test-Path -LiteralPath $Dir)) { New-Item -ItemType Directory -Path $Dir -Force | Out-Null }
@@ -72,7 +82,7 @@ try {
   Say ('download failed: ' + $_.Exception.Message) 'Red'
   Say 'This guest needs HTTPS to raw.githubusercontent.com:443. Nothing was changed.' 'Yellow'
   Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  exit 6
+  return 6
 }
 
 $want = ([string]$sidecar -split '\s+')[0].Trim().ToUpper()
@@ -83,7 +93,7 @@ if (-not $want -or $want -ne $got) {
   Say ('  got      ' + $got)  'Red'
   Say 'If a payload was pushed in the last 5 minutes this is the CDN cache. Wait, then run it again.' 'Yellow'
   Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  exit 4
+  return 4
 }
 Say ('payload verified  sha256=' + $got.Substring(0,16) + '...') 'Green'
 
@@ -95,13 +105,13 @@ try {
   try {
     foreach ($name in @('Adopt-MigratedVm.ps1','Update-YcScripts.ps1')) {
       $e = $z.Entries | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-      if (-not $e) { Say ($name + ' is not inside the payload zip.') 'Red'; exit 4 }
+      if (-not $e) { Say ($name + ' is not inside the payload zip.') 'Red'; return 4 }
       [IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $Dir $name), $true)
     }
   } finally { $z.Dispose() }
 } catch {
   Say ('extract failed: ' + $_.Exception.Message) 'Red'
-  exit 4
+  return 4
 } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 
 # Hand over. Everything else - survey, prerequisites, the full payload sync, PATH, SQL, backups,
@@ -116,18 +126,18 @@ Write-Host ''
 $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $Dir 'Adopt-MigratedVm.ps1')) + $passthru
 $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Wait -PassThru -NoNewWindow
 $code = $proc.ExitCode
-Write-Host ''
-$changedThings = ($passthru -notcontains '-Report' -and $passthru -notcontains '-Status')
-switch ($code) {
-  0 { if ($changedThings) {
-        Say 'DONE. This VM is now managed by the YallaCloud scripts. Type  yallacloud  for the catalog.' 'Green'
-      } else {
-        Say 'REPORT ONLY - nothing on this machine was changed. The survey path is above.' 'Green'
-        Say 'To adopt it, run the same line without YC_ADOPT_ARGS set.' 'Gray'
-      } }
-  1 { Say 'A REBOOT IS PENDING. Restart this machine - the run continues by itself.' 'Yellow' }
-  3 { Say 'DONE, but some items were flagged for a human. They are listed above and in the log.' 'Yellow' }
-  default { Say ('migrated-vm exited ' + $code + '. See C:\Scripts\adopt-migrated-vm.log') 'Yellow' }
+
+# migrated-vm prints its own verdict box now - the one thing on screen that says whether this
+# worked. Repeating it here only pushed it off the top of a small console, and this copy had
+# already gone stale: it still said a pending reboot meant "the run continues by itself", which
+# stopped being true in 2.27.0 when the resume task was removed. One pointer, nothing more.
+Say 'The verdict above is from migrated-vm. Full log: C:\Scripts\adopt-migrated-vm.log' 'Gray'
+return $code
 }
+
+$code = 0
+try   { $code = Invoke-YcAdoptOnRamp }
+catch { Say ('the on-ramp failed: ' + $_.Exception.Message) 'Red'; $code = 9 }
 Write-Host ''
-exit $code
+# Carried for anything that checks it, WITHOUT ending the operator's session.
+$global:LASTEXITCODE = $code

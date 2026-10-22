@@ -194,11 +194,17 @@ foreach ($i in $instances) {
   W ('    cores/sockets : ' + (Q $t "SET NOCOUNT ON; SELECT CONVERT(varchar(10),cpu_count) + ' logical cpus, ' + CONVERT(varchar(10),cpu_count/hyperthread_ratio) + ' sockets' FROM sys.dm_os_sys_info;"))
   W ('    chadmin sysadmin : ' + (Q $t ("SET NOCOUNT ON; SELECT ISNULL(CONVERT(varchar(3),IS_SRVROLEMEMBER('sysadmin', N'" + $hostName + "\chadmin')),'no such login');")))
   W ('    SYSTEM sysadmin  : ' + (Q $t "SET NOCOUNT ON; SELECT ISNULL(CONVERT(varchar(3),IS_SRVROLEMEMBER('sysadmin', N'NT AUTHORITY\SYSTEM')),'no such login');"))
-  W ('    Ola procedures   : ' + (Q $t "SET NOCOUNT ON; SELECT CONVERT(varchar(10),COUNT(*)) + ' of 4 in DBA' FROM DBA.sys.procedures WHERE name IN ('DatabaseBackup','DatabaseIntegrityCheck','IndexOptimize','CommandExecute');"))
-  W ('    SQL Agent        : ' + (Q $t "SET NOCOUNT ON; SELECT CASE WHEN SERVERPROPERTY('Edition') LIKE 'Express%' THEN 'not available on Express' ELSE 'available' END;"))
+  W ('    Ola procedures   : ' + (Q $t "SET NOCOUNT ON; IF DB_ID('DBA') IS NULL SELECT 'DBA database does not exist - Ola is not installed' ELSE EXEC('SELECT CONVERT(varchar(10),COUNT(*)) + '' of 4 in DBA'' FROM DBA.sys.procedures WHERE name IN (''DatabaseBackup'',''DatabaseIntegrityCheck'',''IndexOptimize'',''CommandExecute'')');"))
+  W ('    SQL Agent        : ' + (Q $t "SET NOCOUNT ON; SELECT CASE WHEN CONVERT(varchar(128),SERVERPROPERTY('Edition')) LIKE 'Express%' THEN 'not available on Express' ELSE 'available' END;"))
 
   W '    databases (name | page_verify | recovery | state | size MB):'
-  $dbs = Q $t "SET NOCOUNT ON; SELECT name + ' | ' + page_verify_option_desc + ' | ' + recovery_model_desc + ' | ' + state_desc + ' | ' + CONVERT(varchar(20),CAST((SELECT SUM(size)*8.0/1024 FROM sys.master_files WHERE database_id = d.database_id) AS decimal(18,1))) FROM sys.databases d ORDER BY database_id;"
+  $dbs = Q $t ("SET NOCOUNT ON; SELECT CONVERT(varchar(10),database_id) + ' | ' + " +
+               "CONVERT(varchar(128),name) COLLATE DATABASE_DEFAULT + ' | ' + " +
+               "CONVERT(varchar(64),page_verify_option_desc) COLLATE DATABASE_DEFAULT + ' | ' + " +
+               "CONVERT(varchar(64),recovery_model_desc) COLLATE DATABASE_DEFAULT + ' | ' + " +
+               "CONVERT(varchar(64),state_desc) COLLATE DATABASE_DEFAULT + ' | ' + " +
+               "CONVERT(varchar(20),CAST((SELECT SUM(size)*8.0/1024 FROM sys.master_files WHERE database_id = d.database_id) AS decimal(18,1))) " +
+               "FROM sys.databases d ORDER BY database_id;")
   foreach ($line in @(([string]$dbs) -split "`n")) { if ($line.Trim()) { W ('      ' + $line.Trim()) } }
 
   W ('    suspect_pages    : ' + (Q $t "SET NOCOUNT ON; SELECT CONVERT(varchar(10),COUNT(*)) + ' row(s)' FROM msdb.dbo.suspect_pages;"))
@@ -209,6 +215,16 @@ foreach ($i in $instances) {
   $bh = Q $t "SET NOCOUNT ON; SELECT TOP 10 database_name + ' | ' + CONVERT(varchar(30),backup_finish_date,120) + ' | ' + type + ' | ' + ISNULL(user_name,'?') FROM msdb.dbo.backupset ORDER BY backup_finish_date DESC;"
   foreach ($line in @(([string]$bh) -split "`n")) { if ($line.Trim()) { W ('      ' + $line.Trim()) } }
 
+  W '    DAMAGE DETAIL (suspect_pages is CAPPED at 1000 rows - a full table means ongoing, uncounted):'
+  W ('      affected databases : ' + (Q $t "SET NOCOUNT ON; SELECT CONVERT(varchar(10),database_id) + '=' + ISNULL(CONVERT(varchar(128),DB_NAME(database_id)),'(dropped)') + ' rows=' + CONVERT(varchar(10),COUNT(*)) + ' maxerr=' + CONVERT(varchar(10),MAX(error_count)) + ' first=' + CONVERT(varchar(30),MIN(last_update_date),120) + ' last=' + CONVERT(varchar(30),MAX(last_update_date),120) FROM msdb.dbo.suspect_pages GROUP BY database_id;"))
+  W ('      event types        : ' + (Q $t "SET NOCOUNT ON; SELECT CONVERT(varchar(10),event_type) + '=' + CASE event_type WHEN 1 THEN '823 OS-level CRC or non-checksum 824 (THE STORAGE FAILED THE READ)' WHEN 2 THEN 'bad checksum' WHEN 3 THEN 'torn page' WHEN 4 THEN 'restored' WHEN 5 THEN 'repaired' WHEN 7 THEN 'deallocated by CHECKDB' END + ' x' + CONVERT(varchar(10),COUNT(*)) FROM msdb.dbo.suspect_pages GROUP BY event_type;"))
+  W ('      page span          : ' + (Q $t "SET NOCOUNT ON; SELECT 'db ' + CONVERT(varchar(10),database_id) + ' file ' + CONVERT(varchar(10),file_id) + ': pages ' + CONVERT(varchar(20),MIN(page_id)) + ' to ' + CONVERT(varchar(20),MAX(page_id)) + '  span=' + CONVERT(varchar(20),(MAX(page_id)-MIN(page_id))*8/1024) + ' MB  at ~' + CONVERT(varchar(20),MIN(page_id)*8/1024/1024) + ' GB into the file' FROM msdb.dbo.suspect_pages GROUP BY database_id, file_id;"))
+  W '    RESTORE HISTORY (is there a known-good copy to go back to?):'
+  $rh = Q $t "SET NOCOUNT ON; SELECT TOP 10 CONVERT(varchar(128),destination_database_name) COLLATE DATABASE_DEFAULT + ' | ' + CONVERT(varchar(30),restore_date,120) + ' | ' + CONVERT(varchar(10),restore_type) FROM msdb.dbo.restorehistory ORDER BY restore_date DESC;"
+  foreach ($line in @(([string]$rh) -split "`n")) { if ($line.Trim()) { W ('      ' + $line.Trim()) } }
+  W '    BACKUP TYPES SEEN (D=full I=diff L=log - no L means NO point-in-time recovery):'
+  $bt = Q $t "SET NOCOUNT ON; SELECT CONVERT(varchar(128),database_name) COLLATE DATABASE_DEFAULT + ' | ' + type + ' x' + CONVERT(varchar(10),COUNT(*)) + ' | newest ' + CONVERT(varchar(30),MAX(backup_finish_date),120) FROM msdb.dbo.backupset GROUP BY database_name, type ORDER BY database_name, type;"
+  foreach ($line in @(([string]$bt) -split "`n")) { if ($line.Trim()) { W ('      ' + $line.Trim()) } }
   W '    data/log file volumes:'
   $mf = Q $t "SET NOCOUNT ON; SELECT DISTINCT LEFT(physical_name,2) FROM sys.master_files;"
   foreach ($line in @(([string]$mf) -split "`n")) { if ($line.Trim()) { W ('      ' + $line.Trim()) } }
@@ -236,6 +252,26 @@ if ($elevated) {
 $cbi = Get-Service -Name 'cloudbase-init' -EA SilentlyContinue
 W ('  cloudbase-init: ' + $(if ($cbi) { $cbi.Status.ToString() } else { 'absent' }))
 W ('  C:\Scripts    : ' + $(if (Test-Path 'C:\Scripts') { (@(Get-ChildItem 'C:\Scripts' -File -EA SilentlyContinue).Count).ToString() + ' files' } else { 'absent' }))
+
+YcHdr 'STORAGE AND SQL ERRORS IN THE EVENT LOG (last 14 days)'
+W '  These are the events that say whether the STORAGE stack is failing, which is a different'
+W '  problem from SQL finding a logical inconsistency. 825 is the early warning that precedes 823.'
+$since = (Get-Date).AddDays(-14)
+foreach ($spec in @(
+    @{ log='System';      ids=@(7,9,11,15,51,52,129,153); label='disk / storage driver' },
+    @{ log='Application'; ids=@(823,824,825,3313,3314,3414,17053); label='SQL Server IO / recovery' })) {
+  W ('  ' + $spec.label + ' (' + $spec.log + '):')
+  try {
+    $ev = @(Get-WinEvent -FilterHashtable @{ LogName=$spec.log; Id=$spec.ids; StartTime=$since } -EA Stop |
+            Group-Object Id | Sort-Object Count -Descending)
+    if ($ev.Count -eq 0) { W '    none' }
+    foreach ($g in $ev) {
+      $newest = ($g.Group | Sort-Object TimeCreated -Descending | Select-Object -First 1)
+      W ('    event ' + $g.Name + ' x' + $g.Count + '   newest ' + $newest.TimeCreated.ToString('yyyy-MM-dd HH:mm'))
+      W ('      ' + (($newest.Message -split "`n")[0]).Trim())
+    }
+  } catch { W ('    none found, or the log is not readable: ' + $_.Exception.Message) }
+}
 
 W ''
 W '================================================================================'

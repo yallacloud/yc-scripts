@@ -84,8 +84,29 @@ function Say {
   if ($Level -eq 'HEAD') { Write-Host ''; Write-Host ('  ' + $Text) -ForegroundColor $c }
   else { Write-Host ('  ' + $Text) -ForegroundColor $c }
 }
-function Block { param([string]$T) $script:Blockers.Add($T) | Out-Null; Say ('BLOCKER: ' + $T) 'BLOCK' }
-function Risk  { param([string]$T) $script:Risks.Add($T)    | Out-Null; Say ('RISK: ' + $T) 'RISK' }
+# Inline, an L1 gets ONE SHORT LINE per finding, numbered, so the run reads as a list rather than
+# a wall of paragraphs. The full explanation - what it means, what to do, why - is printed ONCE in
+# the summary at the end and written in full to the report file. Printing the whole paragraph
+# twice, inline and again in the summary, is what made the first real run unreadable.
+function Short {
+  param([string]$T)
+  $one = (($T -split '(?<=\.)\s') | Select-Object -First 1).Trim()
+  if (-not $one) { $one = $T }
+  if ($one.Length -gt 108) { $one = $one.Substring(0,105) + '...' }
+  return $one
+}
+function Block {
+  param([string]$T)
+  $script:Blockers.Add($T) | Out-Null
+  Say ('BLOCKER ' + [string]$script:Blockers.Count + ': ' + (Short $T)) 'BLOCK'
+  $script:Log.Add('        full: ' + $T) | Out-Null
+}
+function Risk {
+  param([string]$T)
+  $script:Risks.Add($T) | Out-Null
+  Say ('RISK ' + [string]$script:Risks.Count + ': ' + (Short $T)) 'RISK'
+  $script:Log.Add('        full: ' + $T) | Out-Null
+}
 function Note  { param([string]$T) $script:Notes.Add($T)    | Out-Null }
 
 if ($Help) {
@@ -364,7 +385,7 @@ foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorA
   if ($row.dirty -eq 'YES') {
     Block ($row.drive + ' has the NTFS DIRTY BIT SET. Windows itself has already decided this filesystem needs repair and it has not been repaired. Migrating copies the damage exactly as it is. Run chkdsk /f on this volume in a maintenance window on the SOURCE, confirm it comes back clean, and re-run this check before booking the move.')
   } elseif ($row.dirty -eq 'unreadable') {
-    Risk ($row.drive + ': the dirty bit could not be read, so a clean filesystem has not actually been established on this volume.')
+    Risk ($row.drive + ' the dirty bit could not be read, so a clean filesystem has not actually been established on this volume.')
   }
 
   if ($row.freePct -lt 10) {
@@ -374,7 +395,7 @@ foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorA
   if ($SkipChkdsk) {
     $row.chkdsk = 'skipped (-SkipChkdsk)'
     Say ('   chkdsk     : SKIPPED') 'RISK'
-    Risk ($row.drive + ': the volume scan was skipped, so the filesystem on it is UNPROVEN.')
+    Risk ($row.drive + ' the volume scan was skipped, so the filesystem on it is UNPROVEN.')
   } elseif ($row.fs -ne 'NTFS') {
     $row.chkdsk = 'not applicable (' + $row.fs + ')'
     Say ('   chkdsk     : not applicable on ' + $row.fs)
@@ -395,7 +416,7 @@ foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorA
     if ($txt -match '(?i)made corrections|found problems|Errors found|corruption was found|needs to be taken offline|Run chkdsk with the /f') {
       $row.chkdskClean = $false
       $row.chkdskDetail = [string]$Matches[0]
-      Block ($row.drive + ': chkdsk /scan FOUND FILESYSTEM PROBLEMS ("' + $row.chkdskDetail + '"). This is on the SOURCE, before any migration. Repair it here with chkdsk /f in a maintenance window and confirm it comes back clean - migrating now copies a broken filesystem onto the new platform and the damage will be blamed on the move.')
+      Block ($row.drive + ' chkdsk /scan FOUND FILESYSTEM PROBLEMS ("' + $row.chkdskDetail + '"). This is on the SOURCE, before any migration. Repair it here with chkdsk /f in a maintenance window and confirm it comes back clean - migrating now copies a broken filesystem onto the new platform and the damage will be blamed on the move.')
     } elseif ($txt -match '(?i)found no problems|no further action is required') {
       $row.chkdskClean = $true
       $row.chkdskDetail = 'Windows reported no problems'
@@ -409,7 +430,7 @@ foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorA
       $row.chkdskClean = $null
       $row.chkdskDetail = (($txt -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 3) -join ' ')
       if ($row.chkdskDetail.Length -gt 300) { $row.chkdskDetail = $row.chkdskDetail.Substring(0,300) + '...' }
-      Risk ($row.drive + ': chkdsk /scan exited ' + [string]$code + ' and its output could not be read as either clean or failed. The filesystem on this volume is UNPROVEN. Last lines: ' + $row.chkdskDetail)
+      Risk ($row.drive + ' chkdsk /scan exited ' + [string]$code + ' and its output could not be read as either clean or failed. The filesystem on this volume is UNPROVEN. Last lines: ' + $row.chkdskDetail)
     }
   }
   $vols += $row
@@ -640,7 +661,10 @@ try {
       mac         = [string]$c.MACAddress
       dhcp        = [bool]$c.DHCPEnabled
       ipv4        = @(@($c.IPAddress) | Where-Object { $_ -and $_ -notmatch ':' })
-      subnetMask  = @(@($c.IPSubnet)  | Where-Object { $_ -and $_ -notmatch ':' })
+      # IPSubnet carries an entry per IPAddress, so on a dual-stack NIC it mixes dotted-quad
+      # masks with IPv6 prefix LENGTHS ("64", "128"). Printing those as a subnet mask next to an
+      # IPv4 address is nonsense an L1 would reasonably query, so only dotted quads are kept.
+      subnetMask  = @(@($c.IPSubnet)  | Where-Object { $_ -and $_ -match '^\d+\.\d+\.\d+\.\d+$' })
       gateway     = @(@($c.DefaultIPGateway))
       dns         = @(@($c.DNSServerSearchOrder))
       dnsDomain   = [string]$c.DNSDomain
@@ -1029,13 +1053,23 @@ try {
   foreach ($l in $script:Log) { $txt.Add($l) | Out-Null }
   Set-Content -LiteralPath ($base + '.txt') -Value $txt -Encoding Ascii
   $script:Report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath ($base + '.json') -Encoding Ascii
-  $sha = (Get-FileHash -LiteralPath ($base + '.txt') -Algorithm SHA256).Hash
   Write-Host ''
-  Write-Host ('  report : ' + $base + '.txt')
-  Write-Host ('  json   : ' + $base + '.json')
-  Write-Host ('  SHA256 : ' + $sha)
-  Write-Host '  Keep both. They are the record of what this VM was like BEFORE it moved.'
-} catch { Write-Host ('  could not write the report: ' + $_.Exception.Message) -ForegroundColor Red }
+  Write-Host ('  REPORT : ' + $base + '.txt') -ForegroundColor White
+  Write-Host ('  JSON   : ' + $base + '.json')
+  # SHA256 through .NET, NOT Get-FileHash. Measured: on a machine whose PSModulePath had
+  # PowerShell 7 ahead of 5.1, Get-FileHash did not resolve at all - and because it sat in the
+  # same try block as the writes, its failure printed "could not write the report" over a report
+  # that HAD been written. The hash is a nice-to-have; the path is not.
+  $sha = ''
+  try {
+    $fs = [IO.File]::OpenRead($base + '.txt')
+    try { $sha = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($fs) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $fs.Dispose() }
+    Write-Host ('  SHA256 : ' + $sha.ToUpper())
+  } catch { Write-Host '  SHA256 : could not be computed on this host (the report itself is fine)' }
+  $script:Report.reportSha256 = $sha.ToUpper()
+  Write-Host '  Keep both files. They are the record of what this VM was like BEFORE it moved.'
+} catch { Write-Host ('  COULD NOT WRITE THE REPORT: ' + $_.Exception.Message) -ForegroundColor Red }
 
 if ($Json) { Write-Host ''; $script:Report | ConvertTo-Json -Depth 8 }
 Write-Host ''

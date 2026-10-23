@@ -26,7 +26,7 @@ $SkipGuestAgent = $true
 $script:Flags = @()
 function L { param($m,$l='INFO') Write-Host ('    [' + $l + '] ' + $m) }
 function Flag { param($p,$w) $script:Flags += ($p + ': ' + $w) }
-foreach ($fn in @('Get-VirtioPin','Get-GuestAgentState','Get-VirtioState','Write-GuestPlatformLoud')) {
+foreach ($fn in @('Write-LoudBanner','Get-VirtioPin','Get-GuestAgentState','Get-VirtioState','Write-GuestPlatformLoud')) {
   Invoke-Expression (Grab $fn)
 }
 $fail = 0

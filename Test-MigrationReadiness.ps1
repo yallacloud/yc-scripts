@@ -72,7 +72,7 @@ $script:Notes    = New-Object System.Collections.Generic.List[string]
 $script:Report   = [ordered]@{
   schema='ycmig.readiness/1'; host=$env:COMPUTERNAME
   generatedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
-  tool='Test-MigrationReadiness.ps1'; version='1.0.0'
+  tool='Test-MigrationReadiness.ps1'; version='1.2.0'
 }
 $script:Log = New-Object System.Collections.Generic.List[string]
 
@@ -146,9 +146,14 @@ WHAT IT CHECKS
   every attached fixed volume   chkdsk /scan - ONLINE and READ-ONLY, no dismount, no repair,
                                 no reboot - plus the NTFS dirty bit, free space, disk layout
                                 and whether any disk is dynamic
-  SQL Server, if installed      damaged pages WITH THE DATES SQL SERVER WROTE, databases that
-                                have never passed a consistency check, recovery model,
-                                PAGE_VERIFY, size, and when each database was last backed up
+  SQL Server, if installed      which SQL Server it is (product year, version, SP/CU level),
+                                the edition and what that edition means commercially -
+                                Evaluation, Express, Developer or a paid one - the instance
+                                name, whether chadmin or a local administrator actually holds
+                                sysadmin, damaged pages WITH THE DATES SQL SERVER WROTE,
+                                databases that have never passed a consistency check, recovery
+                                model, PAGE_VERIFY, size in MB, and when each database was
+                                last backed up
   the backup path (VSS)         writers, providers, the services they need, and recent VSS
                                 errors - whether ANY backup of this machine can be
                                 application-consistent
@@ -163,8 +168,18 @@ WHAT IT CHECKS
                                 services and the accounts they run as, scheduled tasks, and
                                 every installed application with its version - the things the
                                 migration checklist asks a person to transcribe by hand
-  the machine                   boot mode, virtio/VMware drivers, uptime, pending reboot,
-                                Windows licence channel, and IO errors already in the event log
+  the machine                   boot mode, virtio and VMware Tools VERSIONS against the
+                                YallaCloud pin and whether their services are RUNNING, the
+                                QEMU guest agent and its service, uptime, pending reboot, and
+                                IO errors already in the event log
+  licensing, all of it          Windows edition (Standard or Datacenter), how it is licensed
+                                (OEM, MAK, KMS or evaluation), its activation state and the
+                                last 5 characters of the key; Office and Excel - installed or
+                                not, version, products, per-application versions, licence
+                                state, channel and key ending; and for SQL, the edition that
+                                decides the licence. Only the partial key Windows and Office
+                                publish themselves is read - no full key is ever read or
+                                reconstructed, and SQL publishes none at all.
 
 THE ANSWER
   GO             nothing found that should stop the move
@@ -218,6 +233,239 @@ EXAMPLES
 '@ | Write-Host
   Finish 0
   return
+}
+
+# ================================================================================================
+# GUEST TOOLING - versions and running state, not just "a file is there"
+#
+# Lifted verbatim from Adopt-MigratedVm.ps1, where these are covered by test-platform-branch.ps1.
+# The first version of this script only checked whether driver FILES existed, which answers the
+# wrong question twice over: it does not say which VERSION (an old virtio storage driver is
+# exposed to known IO races, and that travels with the VM), and it does not say whether the guest
+# agent is RUNNING - Get-Service reports a service whether it is Running or Stopped, so a dead
+# agent reads as a healthy one. On this estate snapshot backups are AGENTLESS: they ask that
+# agent to freeze the machine. A stopped agent means the backup you are about to rely on as the
+# migration fallback is crash-consistent and nothing says so.
+#
+# The pins come from MANIFEST.json when a payload is present. On a bare source VM there is none,
+# so they fall back to the built-in constants AND SAY WHICH THEY USED.
+$ScriptsDir = 'C:\Scripts'
+$script:VirtioPinFileVersion = '100.100.104.27100'   # virtio-win 0.1.271
+$script:VirtioDrivers = @('viostor','vioscsi','netkvm','balloon','vioser')
+$script:VMwareDrivers = @('pvscsi','vmxnet3','vmci','vmmemctl','vmmouse','vsock')
+
+function Get-GuestPlatformKind {
+  $o = [ordered]@{ kind='UNKNOWN'; manufacturer=''; model=''; bios=''; why='' }
+  try {
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    $o.manufacturer = [string]$cs.Manufacturer
+    $o.model        = [string]$cs.Model
+  } catch { }
+  try { $o.bios = [string](Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop).Manufacturer } catch { }
+  $all = ($o.manufacturer + ' ' + $o.model + ' ' + $o.bios)
+
+  # Order matters. A VMware guest reports "VMware, Inc." in Manufacturer AND in the BIOS, while a
+  # CloudStack/KVM guest reports QEMU in one and often "Standard PC" or a seabios string in the
+  # other, so the distinctive vendor string is tested before the generic machine model.
+  if     ($all -match 'VMware')                       { $o.kind='VMWARE';  $o.why='Manufacturer/BIOS reports VMware' }
+  elseif ($all -match 'QEMU|KVM|Bochs|SeaBIOS')       { $o.kind='KVM';     $o.why='Manufacturer/BIOS reports QEMU/KVM' }
+  elseif ($all -match 'Microsoft.*Virtual|Hyper-V')   { $o.kind='HYPERV';  $o.why='Manufacturer/Model reports a Microsoft virtual machine' }
+  elseif ($all -match 'Xen')                          { $o.kind='XEN';     $o.why='Manufacturer/BIOS reports Xen' }
+  elseif ($all -match 'VirtualBox')                   { $o.kind='VBOX';    $o.why='Manufacturer/BIOS reports VirtualBox' }
+  elseif ($all -match 'Amazon|Google|Nutanix|Parallels|oVirt|Red Hat') {
+                                                        $o.kind='OTHER-HV'; $o.why='reports a hypervisor vendor we do not have tooling for' }
+  else {
+    # Last resort: a machine with no hypervisor string but a virtual-looking model. Physical
+    # hardware answers with a real vendor and a real model, so this is only reached when neither
+    # matched - and saying UNKNOWN is better than guessing PHYSICAL and skipping every check.
+    if ($o.manufacturer -and $o.model) { $o.kind='PHYSICAL-OR-UNKNOWN'; $o.why='no hypervisor signature in Manufacturer, Model or BIOS' }
+    else { $o.why='could not read Win32_ComputerSystem' }
+  }
+  return $o
+}
+
+function Get-VirtioPin {
+  # Read the pinned package version out of the payload's own manifest. Falls back to the constant
+  # above, and SAYS SO, rather than silently comparing against nothing.
+  $pin = [ordered]@{ package=''; fileVersion=$script:VirtioPinFileVersion; source='built-in constant' }
+  try {
+    $mf = Join-Path $ScriptsDir 'MANIFEST.json'
+    if (Test-Path -LiteralPath $mf) {
+      $m = Get-Content -LiteralPath $mf -Raw | ConvertFrom-Json
+      $iso = @($m.members | Where-Object { $_.name -eq 'virtio-win-iso' }) | Select-Object -First 1
+      if ($iso -and $iso.version) { $pin.package = [string]$iso.version; $pin.source = 'MANIFEST.json' }
+    }
+  } catch {}
+  if (-not $pin.package) { $pin.package = '0.1.271-1 (manifest unreadable)' }
+  return $pin
+}
+
+function Get-VMwareToolsPin {
+  # VMware Tools 13.x DROPPED Windows Server 2012R2. A 2012R2 guest pinned to 13.x would be
+  # reported as out of date forever and could never satisfy it, so the pin is chosen by OS build:
+  # 14393 is Server 2016. The manifest carries both builds for exactly this reason
+  # (vmware-tools 13.1.0 and vmware-tools-legacy 12.5.4).
+  $pin = [ordered]@{ package=''; source='built-in constant'; track='current'; reason='' }
+  $build = 0
+  try { $build = [int]((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).BuildNumber) } catch {}
+  $wantLegacy = ($build -gt 0 -and $build -lt 14393)
+  $pin.track  = if ($wantLegacy) { 'legacy' } else { 'current' }
+  $pin.reason = if ($wantLegacy) { 'OS build ' + [string]$build + ' is older than Server 2016, which VMware Tools 13.x does not support' }
+                else { 'OS build ' + [string]$build + ' is Server 2016 or newer' }
+  $name = if ($wantLegacy) { 'vmware-tools-legacy' } else { 'vmware-tools' }
+  try {
+    $mf = Join-Path $ScriptsDir 'MANIFEST.json'
+    if (Test-Path -LiteralPath $mf) {
+      $m = Get-Content -LiteralPath $mf -Raw | ConvertFrom-Json
+      $e = @($m.members | Where-Object { $_.name -eq $name }) | Select-Object -First 1
+      if ($e -and $e.version) { $pin.package = [string]$e.version; $pin.source = 'MANIFEST.json' }
+    }
+  } catch {}
+  if (-not $pin.package) { $pin.package = if ($wantLegacy) { '12.5.4' } else { '13.1.0' } }
+  return $pin
+}
+
+function Compare-VersionLoose {
+  # Returns -1 older, 0 same, 1 newer, 99 not comparable. VMware Tools reports 4 parts
+  # (13.1.0.12345) while the manifest pins 3 (13.1.0), so only the parts both sides have are
+  # compared - otherwise every host reads as "older than the pin" forever.
+  param([string]$Have,[string]$Want)
+  $h = @(($Have -replace '[^0-9.]','') -split '\.' | Where-Object { $_ -ne '' })
+  $w = @(($Want -replace '[^0-9.]','') -split '\.' | Where-Object { $_ -ne '' })
+  if (-not $h.Count -or -not $w.Count) { return 99 }
+  $n = [Math]::Min($h.Count, $w.Count)
+  for ($i=0; $i -lt $n; $i++) {
+    $a = 0; $b = 0
+    [void][int]::TryParse($h[$i], [ref]$a); [void][int]::TryParse($w[$i], [ref]$b)
+    if ($a -lt $b) { return -1 }
+    if ($a -gt $b) { return 1 }
+  }
+  return 0
+}
+
+function Get-ServiceStateSafe {
+  # One shape for "is this agent service there, and is it actually running", used by both
+  # platforms. Get-Service returns the service whether it is Running or Stopped, which is exactly
+  # the trap this whole section exists to close.
+  param([string[]]$Names,[string]$DisplayLike)
+  $s = [ordered]@{ installed=$false; service=''; status='absent'; startType=''; running=$false }
+  $svc = $null
+  try { $svc = @(Get-Service -Name $Names -ErrorAction SilentlyContinue) | Select-Object -First 1 } catch {}
+  if (-not $svc -and $DisplayLike) {
+    try { $svc = @(Get-Service -DisplayName $DisplayLike -ErrorAction SilentlyContinue) | Select-Object -First 1 } catch {}
+  }
+  if (-not $svc) { return $s }
+  $s.installed = $true
+  $s.service   = [string]$svc.Name
+  $s.status    = [string]$svc.Status
+  $s.running   = ([string]$svc.Status -eq 'Running')
+  # StartType on the Get-Service object is PowerShell 5.1+ only on some builds; Win32_Service is
+  # on every Windows back to 2012R2, so read it there and never fail the whole probe for it.
+  try { $s.startType = [string](Get-CimInstance Win32_Service -Filter ("Name='" + $svc.Name + "'") -ErrorAction Stop).StartMode } catch {}
+  return $s
+}
+
+function Get-GuestAgentState {
+  # The KVM agent.
+  $g = [ordered]@{ platform='KVM'; agent='qemu-guest-agent'; installed=$false; service=''; status='absent'
+                   startType=''; version=''; running=$false; verdict='MISSING'
+                   why='no QEMU guest agent service on this machine' }
+  $s = Get-ServiceStateSafe -Names @('QEMU-GA','qemu-ga') -DisplayLike 'QEMU Guest Agent*'
+  foreach ($k in @('installed','service','status','startType','running')) { $g[$k] = $s[$k] }
+  if (-not $g.installed) { return $g }
+  try {
+    $exe = (Get-CimInstance Win32_Service -Filter ("Name='" + $g.service + "'") -ErrorAction Stop).PathName
+    if ($exe) {
+      $p = ($exe -replace '^"([^"]+)".*$','$1') -replace '\s+-.*$',''
+      if (Test-Path -LiteralPath $p) { $g.version = [string](Get-Item -LiteralPath $p).VersionInfo.FileVersion }
+    }
+  } catch { }
+  if ($g.running) {
+    $g.verdict = 'OK'
+    $g.why = 'installed and running (' + $g.service + ', start type ' + $(if ($g.startType) { $g.startType } else { 'unknown' }) + ')'
+  } else {
+    $g.verdict = 'STOPPED'
+    $g.why = 'installed but NOT RUNNING (' + $g.service + ' is ' + $g.status + '). Snapshot backups cannot freeze this machine while the agent is down, so they are crash-consistent and nothing says so.'
+  }
+  return $g
+}
+
+function Get-VMwareToolsState {
+  # The vCenter agent. Same shape as the KVM one so the report and the fleet event do not need to
+  # know which platform they are describing.
+  $pin = Get-VMwareToolsPin
+  $g = [ordered]@{ platform='VMWARE'; agent='VMware Tools'; installed=$false; service=''; status='absent'
+                   startType=''; version=''; running=$false
+                   pinPackage=$pin.package; pinTrack=$pin.track; pinSource=$pin.source; pinReason=$pin.reason
+                   versusPin='unknown'; drivers=@(); verdict='MISSING'
+                   why='no VMware Tools service on this machine' }
+  $s = Get-ServiceStateSafe -Names @('VMTools','VMwareTools') -DisplayLike 'VMware Tools*'
+  foreach ($k in @('installed','service','status','startType','running')) { $g[$k] = $s[$k] }
+  foreach ($k in @('HKLM:\SOFTWARE\VMware, Inc.\VMware Tools','HKLM:\SOFTWARE\WOW6432Node\VMware, Inc.\VMware Tools')) {
+    if ($g.version) { break }
+    try { $p = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+          if ($p -and $p.Version) { $g.version = [string]$p.Version } } catch {}
+  }
+  $drv = @()
+  foreach ($d in $script:VMwareDrivers) { if (Get-Service -Name $d -ErrorAction SilentlyContinue) { $drv += $d } }
+  $g.drivers = @($drv)
+  if (-not $g.installed -and -not $g.version) { return $g }
+  $g.installed = $true
+
+  if ($g.version) {
+    switch (Compare-VersionLoose -Have $g.version -Want $pin.package) {
+      -1 { $g.versusPin = 'OLDER-THAN-PIN' }
+       0 { $g.versusPin = 'MATCHES-PIN' }
+       1 { $g.versusPin = 'NEWER-THAN-PIN' }
+      default { $g.versusPin = 'NOT-COMPARABLE' }
+    }
+  }
+
+  if (-not $g.running) {
+    $g.verdict = 'STOPPED'
+    $g.why = 'installed (' + $(if ($g.version) { $g.version } else { 'version unreadable' }) + ') but NOT RUNNING (' + $(if ($g.service) { $g.service } else { 'VMTools' }) + ' is ' + $g.status + '). Snapshot backups cannot freeze this machine while VMware Tools is down, so they are crash-consistent and nothing says so.'
+  } elseif ($g.versusPin -eq 'OLDER-THAN-PIN') {
+    $g.verdict = 'OLD'
+    $g.why = 'running, but version ' + $g.version + ' is OLDER than the pinned ' + $pin.package + ' (' + $pin.track + ' track: ' + $pin.reason + ')'
+  } else {
+    $g.verdict = 'OK'
+    $g.why = 'installed and running (' + $g.service + ', version ' + $(if ($g.version) { $g.version } else { 'unreadable' }) + ', ' + $g.versusPin + ' ' + $pin.package + ')'
+  }
+  return $g
+}
+
+function Get-VirtioState {
+  # Every virtio driver present, its file version, and how it compares with the pin.
+  $pin = Get-VirtioPin
+  $out = [ordered]@{ pinPackage=$pin.package; pinFileVersion=$pin.fileVersion; pinSource=$pin.source
+                     present=$false; drivers=@(); verdict='NOT-VIRTIO'
+                     why='no virtio drivers on this machine' }
+  $rows = @(); $mismatch = 0; $unknown = 0
+  foreach ($d in $script:VirtioDrivers) {
+    $f = Join-Path $env:windir ('System32\drivers\' + $d + '.sys')
+    if (-not (Test-Path -LiteralPath $f)) { continue }
+    $v = ''
+    try { $v = [string](Get-Item -LiteralPath $f).VersionInfo.FileVersion } catch {}
+    $state = 'UNKNOWN'
+    if (-not $v) { $unknown++ }
+    elseif ($v -eq $pin.fileVersion) { $state = 'MATCHES-PIN' }
+    else { $state = 'DIFFERS-FROM-PIN'; $mismatch++ }
+    $rows += [ordered]@{ driver=$d; fileVersion=$(if ($v) { $v } else { '(unreadable)' }); state=$state }
+  }
+  $out.drivers = @($rows)
+  if ($rows.Count -eq 0) { return $out }
+  $out.present = $true
+  if ($mismatch -gt 0) {
+    $out.verdict = 'DIFFERS'
+    $out.why = [string]$mismatch + ' of ' + [string]$rows.Count + ' virtio driver(s) are NOT at the pinned version ' + $pin.package + '. An old virtio STORAGE driver is exposed to known IO races, and it was already old when this VM arrived.'
+  } elseif ($unknown -gt 0) {
+    $out.verdict = 'UNPROVEN'
+    $out.why = 'virtio is present but ' + [string]$unknown + ' driver version(s) could not be read, so the pin could not be checked'
+  } else {
+    $out.verdict = 'OK'
+    $out.why = 'all ' + [string]$rows.Count + ' virtio driver(s) are at the pinned version ' + $pin.package
+  }
+  return $out
 }
 
 # --- elevation ---------------------------------------------------------------------------------
@@ -292,21 +540,46 @@ if ($m.uptimeDays -gt $UptimeWarnDays) {
   Risk ('this VM has been up ' + [string]$m.uptimeDays + ' days. Nobody has seen it boot in that time, so whether it comes back up cleanly after the move is UNPROVEN. Reboot it in a maintenance window BEFORE the migration, not during it - a VM that fails to boot during a cutover is found with the window already burning.')
 }
 
-# Guest drivers. A VM landing on KVM with no virtio storage driver does not boot.
-$virtio = @(); $vmw = @()
-foreach ($d in @('viostor','vioscsi','netkvm','balloon','vioser')) {
-  if (Test-Path -LiteralPath ($env:windir + '\System32\drivers\' + $d + '.sys')) { $virtio += $d }
-}
-foreach ($d in @('pvscsi','vmxnet3','vmci','vmmemctl')) {
-  if (Get-Service -Name $d -ErrorAction SilentlyContinue) { $vmw += $d }
-}
-$m.virtioDrivers = @($virtio); $m.vmwareDrivers = @($vmw)
-if (@($virtio).Count) { Say ('virtio        : ' + (@($virtio) -join ', ')) 'OK' }
-else {
+# Guest drivers and the guest agent: VERSIONS and RUNNING STATE, not just presence.
+$vs  = Get-VirtioState
+$vmt = Get-VMwareToolsState
+$qga = Get-GuestAgentState
+$m.virtio = $vs; $m.vmwareTools = $vmt; $m.qemuGuestAgent = $qga
+
+if ($vs.present) {
+  Say ('virtio        : ' + $vs.verdict + '  (pin ' + $vs.pinPackage + ', from ' + $vs.pinSource + ')') $(if ($vs.verdict -eq 'OK') {'OK'} else {'RISK'})
+  foreach ($r in @($vs.drivers)) { Say ('   ' + ('{0,-10} {1,-22} {2}' -f $r.driver, $r.fileVersion, $r.state)) }
+  if ($vs.verdict -eq 'DIFFERS') {
+    Risk ('virtio drivers on this source VM are NOT at the pinned version ' + $vs.pinPackage + '. An old virtio STORAGE driver is exposed to known IO races, and it is already that old TODAY - it travels with the VM. ' + (((@($vs.drivers | Where-Object { $_.state -eq 'DIFFERS-FROM-PIN' }) | ForEach-Object { $_.driver + ' ' + $_.fileVersion })) -join ', '))
+  } elseif ($vs.verdict -eq 'UNPROVEN') {
+    Risk ('virtio is present but a driver version could not be read, so it cannot be compared with the pin.')
+  }
+} else {
   Say 'virtio        : NONE PRESENT' 'RISK'
   Risk 'no virtio drivers are installed. If the target is KVM/CloudStack this VM will NOT BOOT after the move until they are injected offline. Inject them on the source first, or confirm the target uses the same controller this VM already has.'
 }
-if (@($vmw).Count) { Note ('VMware drivers present on the source: ' + (@($vmw) -join ', ') + ' - they will be inert on a KVM target.') }
+
+if ($vmt.installed) {
+  Say ('vmware tools  : ' + $vmt.verdict + '  version ' + $(if ($vmt.version) { $vmt.version } else { '(unreadable)' }) + '  service ' + $vmt.service + '=' + $vmt.status + '  vs pin ' + $vmt.pinPackage + ': ' + $vmt.versusPin) $(if ($vmt.verdict -eq 'OK') {'OK'} else {'RISK'})
+  if (@($vmt.drivers).Count) { Say ('   drivers    : ' + (@($vmt.drivers) -join ', ')) }
+  if (-not $vmt.running) {
+    Risk ('VMware Tools is installed on this source VM (version ' + $(if ($vmt.version) { $vmt.version } else { 'unreadable' }) + ') but the service is ' + $vmt.status + '. On vCenter that agent is what freezes the machine for a snapshot, so any backup taken right now is crash-consistent - including the one you are relying on as the migration fallback.')
+  } elseif ($vmt.verdict -eq 'OLD') {
+    Risk ('VMware Tools is running but version ' + $vmt.version + ' is older than the pinned ' + $vmt.pinPackage + ' (' + $vmt.pinTrack + ' track: ' + $vmt.pinReason + ').')
+  }
+} else { Say 'vmware tools  : not installed' }
+
+if ($qga.installed) {
+  Say ('qemu agent    : ' + $qga.verdict + '  service ' + $qga.service + '=' + $qga.status + $(if ($qga.version) { '  version ' + $qga.version } else { '' })) $(if ($qga.verdict -eq 'OK') {'OK'} else {'RISK'})
+  if (-not $qga.running) {
+    Risk ('the QEMU guest agent is installed on this source VM but the service is ' + $qga.status + '. On KVM/OpenStack that agent is what freezes the machine for a snapshot, so any snapshot backup taken right now is crash-consistent - including the one you are relying on as the migration fallback.')
+  }
+} else {
+  Say 'qemu agent    : not installed'
+  if ($m.platform -eq 'KVM/OPENSTACK') {
+    Risk 'this is a KVM/OpenStack guest with NO QEMU guest agent installed. Snapshot backups of it cannot freeze the machine, so they are crash-consistent - which matters most right now, because a snapshot is the usual migration fallback.'
+  }
+}
 
 # A pending reboot means something is half-applied. Copying a machine mid-update is how you get
 # a VM that boots into a repair loop on the far side.
@@ -319,21 +592,95 @@ if (@($pending).Count) {
   Block ('a reboot is PENDING on this machine (' + (@($pending) -join ', ') + '). Something is half-applied. Reboot it and re-run this check BEFORE migrating - copying a machine mid-update is how a VM arrives in a repair loop.')
 } else { Say 'pending reboot: none' 'OK' }
 
-# Activation drops when the MAC changes. Commercial, not technical, but it surfaces at cutover.
+# WINDOWS LICENSING. Which edition, Standard or Datacenter, how it is licensed, and the last 5
+# characters of the key - the PartialProductKey, which is the only part of the key Windows itself
+# publishes. The full key is NEVER read and NEVER reconstructed by this script.
+# Activation is bound to the hardware identity, and a migration changes exactly that: new MAC,
+# new firmware, new disk controller. So this is not a detail - it is the thing that surfaces at
+# cutover as "the server says it is not activated" and turns into a commercial argument.
+$m.windowsEdition   = ''
+$m.windowsEditionId = ''
+$m.windowsRelease   = ''
+$m.windowsSku       = 'UNKNOWN'
+$m.windowsLicense   = 'unreadable'
+$m.windowsLicName   = ''
+$m.windowsChannel   = ''
+$m.windowsKeyLast5  = ''
+$m.windowsGraceDays = 0
+$m.windowsEvaluation = $false
 try {
-  $lic = @(Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND Name LIKE 'Windows%'" -ErrorAction Stop)
-  if ($lic.Count) {
-    $st = [int]$lic[0].LicenseStatus
-    $m.windowsLicense = switch ($st) { 1 {'Licensed'} 2 {'OOB Grace'} 3 {'OOT Grace'} 4 {'Non-Genuine Grace'} 5 {'Notification'} 6 {'Extended Grace'} default {'Unknown(' + [string]$st + ')'} }
-    $m.windowsChannel = [string]$lic[0].ProductKeyChannel
-    Say ('windows       : ' + $m.windowsLicense + '  (' + $m.windowsChannel + ')')
-    if ($m.windowsChannel -match 'OEM') {
-      Risk ('Windows on this VM is an OEM licence (' + $m.windowsChannel + '). OEM licences are tied to the original hardware and do NOT transfer. Activation will drop after the move and re-licensing is a COMMERCIAL decision, not a technical one. Raise it before the window, not after.')
-    } elseif ($st -ne 1) {
-      Risk ('Windows is not fully licensed on the source already (' + $m.windowsLicense + '). The move will not fix that, and the MAC change may make it worse.')
-    }
+  $cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+  $m.windowsEditionId = [string]$cv.EditionID
+  $m.windowsEdition   = [string]$cv.ProductName
+  if     ($cv.DisplayVersion) { $m.windowsRelease = [string]$cv.DisplayVersion }
+  elseif ($cv.ReleaseId)      { $m.windowsRelease = [string]$cv.ReleaseId }
+} catch { Note 'could not read the Windows edition from the registry' }
+
+# Standard or Datacenter in one word, because that is the word that gets quoted commercially.
+# Server editions are tested first, because a Server SKU string can also contain words that
+# appear in client editions. If nothing matches, report the EditionID rather than UNKNOWN -
+# "UNKNOWN" on a machine where the edition WAS read is a lie the reader cannot check.
+$edBlob = $m.windowsEditionId + ' ' + [string]$m.os
+if     ($edBlob -match 'Datacenter')           { $m.windowsSku = 'DATACENTER' }
+elseif ($edBlob -match 'Standard')             { $m.windowsSku = 'STANDARD' }
+elseif ($edBlob -match 'Essentials')           { $m.windowsSku = 'ESSENTIALS' }
+elseif ($edBlob -match 'ServerWeb|Web Server') { $m.windowsSku = 'WEB' }
+elseif ($edBlob -match 'Enterprise')           { $m.windowsSku = 'ENTERPRISE (client OS)' }
+elseif ($edBlob -match 'Professional|Pro\b')   { $m.windowsSku = 'PROFESSIONAL (client OS)' }
+elseif ($m.windowsEditionId)                   { $m.windowsSku = $m.windowsEditionId.ToUpper() }
+if ($edBlob -match 'Eval')                     { $m.windowsEvaluation = $true }
+
+# A domain controller is not an ordinary VM. It holds FSMO roles and it replicates, so moving
+# one has rules an application server does not, and USN rollback from a snapshot-style restore
+# is the classic way an AD forest gets damaged by a migration that otherwise "worked".
+$m.productType = 'unknown'
+try {
+  switch ([int](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).ProductType) {
+    1 { $m.productType = 'workstation' }
+    2 { $m.productType = 'DOMAIN CONTROLLER' }
+    3 { $m.productType = 'server' }
+  }
+} catch {}
+Say ('role          : ' + $m.productType)
+if ($m.productType -eq 'DOMAIN CONTROLLER') {
+  Risk 'this VM is a DOMAIN CONTROLLER. A DC is not migrated like an application server: it holds FSMO roles, it replicates, and restoring it from a snapshot after the fact causes USN rollback, which silently breaks Active Directory replication rather than failing loudly. Confirm which roles it holds, that another writable DC is available and healthy during the window, and that the agreed fallback is a DC-safe one - not a snapshot revert.'
+}
+
+# ApplicationID 55c92734-... is Windows itself. Filtering on it keeps Office and every other
+# licensed product out of the answer; PartialProductKey IS NOT NULL keeps the hundreds of
+# unused SKU rows out.
+try {
+  $lic = @(Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -ErrorAction Stop)
+  if (@($lic).Count) {
+    $wl = $lic[0]
+    $st = [int]$wl.LicenseStatus
+    $m.windowsLicense  = switch ($st) { 0 {'UNLICENSED'} 1 {'Licensed'} 2 {'OOB Grace'} 3 {'OOT Grace'} 4 {'Non-Genuine Grace'} 5 {'Notification - NOT ACTIVATED'} 6 {'Extended Grace'} default {'Unknown(' + [string]$st + ')'} }
+    $m.windowsChannel  = [string]$wl.ProductKeyChannel
+    $m.windowsKeyLast5 = [string]$wl.PartialProductKey
+    $m.windowsLicName  = [string]$wl.Name
+    if ($wl.GracePeriodRemaining -gt 0) { $m.windowsGraceDays = [math]::Round([int]$wl.GracePeriodRemaining / 1440, 1) }
+  } else {
+    $m.windowsLicense = 'NO PRODUCT KEY INSTALLED'
   }
 } catch { Note 'could not read the Windows licence state' }
+
+Say ('windows ed    : ' + $m.windowsSku + '   (' + $(if ($m.windowsEdition) { $m.windowsEdition } else { [string]$m.os }) + $(if ($m.windowsRelease) { ', release ' + $m.windowsRelease } else { '' }) + ', EditionID ' + $(if ($m.windowsEditionId) { $m.windowsEditionId } else { 'unreadable' }) + ')')
+Say ('windows lic   : ' + $m.windowsLicense + '   channel ' + $(if ($m.windowsChannel) { $m.windowsChannel } else { '(none)' }) + '   key ends ' + $(if ($m.windowsKeyLast5) { $m.windowsKeyLast5 } else { '(no key installed)' })) $(if ($m.windowsLicense -eq 'Licensed') {'OK'} else {'RISK'})
+if ($m.windowsGraceDays -gt 0) { Say ('   grace left : ' + [string]$m.windowsGraceDays + ' days') 'RISK' }
+
+if ($m.windowsEvaluation) {
+  Block ('this is an EVALUATION build of Windows (' + $m.windowsEditionId + ', key ends ' + $(if ($m.windowsKeyLast5) { $m.windowsKeyLast5 } else { 'none' }) + '). An evaluation Server starts shutting itself down every hour once the period ends, and on several SKUs it CANNOT be converted to a licensed edition in place - it has to be rebuilt. Migrating it carries the timer across with it. Settle the licence BEFORE the window: a VM that begins rebooting hourly a few days after the move will be read as a migration failure, and it is not one.')
+}
+if ($m.windowsChannel -match 'OEM') {
+  Risk ('Windows on this VM is an OEM licence (' + $m.windowsChannel + ', key ends ' + $m.windowsKeyLast5 + '). OEM licences are tied to the original hardware and do NOT transfer. Activation will drop after the move and re-licensing is a COMMERCIAL decision, not a technical one. Raise it before the window, not after.')
+} elseif ($m.windowsChannel -match 'MAK') {
+  Risk ('Windows is activated with a MAK key (ends ' + $m.windowsKeyLast5 + '). MAK activations are counted per key, so after the move this VM consumes ANOTHER activation from it. Confirm the key still has activations left and that whoever holds it is reachable on the night - a MAK with no activations left cannot be worked around in the window.')
+} elseif ($m.windowsChannel -match 'GVLK|KMS') {
+  Risk ('Windows is KMS-activated (' + $m.windowsChannel + ', key ends ' + $m.windowsKeyLast5 + '). A KMS client has to reach its KMS host at least every 180 days. If the host it uses today sits on the source network, activation lapses WEEKS AFTER the move with nothing looking wrong on the night itself. Point it at the YallaCloud KMS host as part of the cutover and confirm it activates there.')
+}
+if ($m.windowsLicense -ne 'Licensed' -and -not $m.windowsEvaluation) {
+  Risk ('Windows is already not fully licensed on the source (' + $m.windowsLicense + '). The move does not fix that, and the hardware identity change can make it worse. Sort the licence on the source, or accept that it lands unactivated.')
+}
 $script:Report.machine = $m
 
 # ================================================================================================
@@ -519,17 +866,123 @@ else {
   if (-not $instances.Count) { Say 'no SQL Server instance is installed on this VM' 'OK' }
   foreach ($inst in $instances) {
     $target = $(if ($inst -eq 'MSSQLSERVER') { '.' } else { '.\' + $inst })
-    $si = [ordered]@{ instance=$inst; reachable=$false; edition=''; version=''; databases=@()
-                      suspectPages=@(); neverCheckdb=@(); lastBackups=@(); totalSizeMB=0 }
+    $si = [ordered]@{ instance=$inst; reachable=$false; edition=''; version=''; versionName=''
+                      productLevel=''; updateLevel=''; licensing=''; authMode=''; installDate=''
+                      evalExpiry=''; evalDaysLeft=$null
+                      databases=@(); suspectPages=@(); neverCheckdb=@(); lastBackups=@()
+                      totalSizeMB=0; identity=$null }
     Say ('instance ' + $inst)
     try {
-      $v = Invoke-Sql -Server $target -Query "SELECT CONVERT(varchar(128),SERVERPROPERTY('Edition')) AS ed, CONVERT(varchar(128),SERVERPROPERTY('ProductVersion')) AS ver"
-      if (@($v).Count) { $si.reachable=$true; $si.edition=[string]$v[0].ed; $si.version=[string]$v[0].ver }
+      $v = Invoke-Sql -Server $target -Query @"
+SELECT CONVERT(varchar(128),SERVERPROPERTY('Edition'))            AS ed,
+       CONVERT(varchar(128),SERVERPROPERTY('ProductVersion'))     AS ver,
+       CONVERT(varchar(128),SERVERPROPERTY('ProductLevel'))       AS lvl,
+       CONVERT(varchar(128),SERVERPROPERTY('ProductUpdateLevel')) AS cu,
+       CONVERT(varchar(128),SERVERPROPERTY('IsIntegratedSecurityOnly')) AS winonly,
+       CONVERT(varchar(30),(SELECT create_date FROM sys.databases WHERE name='master'),120) AS installed
+"@
+      if (@($v).Count) {
+        $si.reachable    = $true
+        $si.edition      = [string]$v[0].ed
+        $si.version      = [string]$v[0].ver
+        $si.productLevel = [string]$v[0].lvl
+        $si.updateLevel  = [string]$v[0].cu
+        $si.authMode     = $(if ([string]$v[0].winonly -eq '1') { 'Windows only' } else { 'Windows + SQL logins' })
+        $si.installDate  = [string]$v[0].installed
+      }
     } catch {
       Risk ('SQL instance ' + $inst + ' is installed but could not be queried (' + $_.Exception.Message.Split("`n")[0] + '). Its data CANNOT be assessed before the migration, so whatever state it is in will be discovered after the move.')
       $sqlOut += $si; continue
     }
-    Say ('   edition    : ' + $si.edition + '   version ' + $si.version) 'OK'
+    # WHICH SQL SERVER IS THIS, AND IS IT A PAID ONE? SQL Server does not publish a partial
+    # product key the way Windows does - there is no readable "last 5" on the box, and this
+    # script does not go looking for one: the key lives in VLSC/CSP, not on the VM. What DOES
+    # decide the licence is the edition string, and the edition string is readable.
+    $maj = 0
+    try { $maj = [int](($si.version -split '\.')[0]) } catch {}
+    $si.versionName = switch ($maj) {
+      17 {'SQL Server 2025'} 16 {'SQL Server 2022'} 15 {'SQL Server 2019'} 14 {'SQL Server 2017'}
+      13 {'SQL Server 2016'} 12 {'SQL Server 2014'} 11 {'SQL Server 2012'} 10 {'SQL Server 2008/2008 R2'}
+      9  {'SQL Server 2005'} default {'unrecognised major version ' + [string]$maj}
+    }
+    if     ($si.edition -match 'Evaluation') { $si.licensing = 'EVALUATION - time-limited trial, 180 days from install' }
+    elseif ($si.edition -match 'Express')    { $si.licensing = 'Express - free, but capped at 10 GB per database, 1 socket / 4 cores and about 1.4 GB of RAM' }
+    elseif ($si.edition -match 'Developer')  { $si.licensing = 'Developer - free, and NOT licensed for production use' }
+    elseif ($si.edition -match 'Web')        { $si.licensing = 'Web - hoster SPLA only, not a customer-owned licence' }
+    elseif ($si.edition -match 'Enterprise|Standard|Business Intelligence|Workgroup') { $si.licensing = 'paid edition - the key is held in VLSC/CSP, it is not stored on this VM' }
+    else                                     { $si.licensing = 'could not classify from the edition string' }
+
+    Say ('   product    : ' + $si.versionName + '   version ' + $si.version + $(if ($si.productLevel) { '  ' + $si.productLevel } else { '' }) + $(if ($si.updateLevel) { ' ' + $si.updateLevel } else { '' })) 'OK'
+    Say ('   edition    : ' + $si.edition)
+    Say ('   licensing  : ' + $si.licensing) $(if ($si.edition -match 'Evaluation|Developer') {'RISK'} else {'OK'})
+    Say ('   installed  : ' + $(if ($si.installDate) { $si.installDate + '  (master database creation date)' } else { 'unreadable' }) + '   auth: ' + $si.authMode)
+    Say '   key        : SQL Server publishes no partial key. It is not readable from the VM and is not read here - the key lives in VLSC/CSP.'
+
+    if ($si.edition -match 'Evaluation') {
+      $evalMsg = 'SQL instance ' + $inst + ' is an EVALUATION edition (' + $si.edition + '). It stops accepting connections when the 180 days are up and it cannot be extended - the fix is an edition upgrade with a real key, which is a licence purchase, not a technical step.'
+      if ($si.installDate) {
+        try {
+          $exp = ([datetime]$si.installDate).AddDays(180)
+          $si.evalExpiry   = $exp.ToString('yyyy-MM-dd')
+          $si.evalDaysLeft = [math]::Round(($exp - (Get-Date)).TotalDays,0)
+          $evalMsg += ' Installed ' + $si.installDate.Substring(0,10) + ', so it expires around ' + $si.evalExpiry + ' - about ' + [string]$si.evalDaysLeft + ' days from today.'
+        } catch {}
+      }
+      Block ($evalMsg + ' Settle this BEFORE the migration: a database that stops answering a week after the cutover will be blamed on the move.')
+    } elseif ($si.edition -match 'Developer') {
+      Risk ('SQL instance ' + $inst + ' is DEVELOPER edition. It is free and fully featured, and it is NOT licensed to hold production data. If this instance is serving users, the migration moves a licensing breach into YallaCloud. Raise it commercially before the window - it is not something to discover during an audit.')
+    }
+
+    # --- WHO CAN ADMINISTER THIS INSTANCE AFTER THE MOVE? ------------------------------------
+    # The adopt needs a sysadmin login to do anything on the far side: it creates chadmin and
+    # makes it sysadmin, and the only way it can do that is because the account running it is
+    # already sysadmin - normally through BUILTIN\Administrators.
+    #
+    # On a hardened instance BUILTIN\Administrators is REMOVED from sysadmin. That is good
+    # practice and it is also the thing that makes SQLPREP refuse on the far side, AFTER the
+    # migration, with the window burning and the DBA who knows the sa password unreachable.
+    # Finding it here costs nothing; finding it there costs the window.
+    $ident = [ordered]@{ chadminWindowsAccount=$false; chadminSqlLogin=$false; chadminSysadmin=$false
+                         builtinAdminsSysadmin=$false; currentUserSysadmin=$false
+                         sysadmins=@(); verdict='UNKNOWN' }
+    try { $ident.chadminWindowsAccount = [bool](Get-CimInstance Win32_UserAccount -Filter "Name='chadmin' AND LocalAccount=TRUE" -ErrorAction Stop) } catch {}
+    try {
+      $sa = Invoke-Sql -Server $target -Query @"
+SELECT sp.name AS loginname, sp.type_desc AS logintype
+FROM sys.server_role_members rm
+JOIN sys.server_principals r  ON r.principal_id = rm.role_principal_id
+JOIN sys.server_principals sp ON sp.principal_id = rm.member_principal_id
+WHERE r.name = 'sysadmin'
+"@
+      $ident.sysadmins = @($sa | ForEach-Object { [string]$_.loginname })
+      foreach ($nm in $ident.sysadmins) {
+        if ($nm -match '\\chadmin$')                 { $ident.chadminSysadmin = $true }
+        if ($nm -eq 'BUILTIN\Administrators')        { $ident.builtinAdminsSysadmin = $true }
+      }
+      $me = Invoke-Sql -Server $target -Query "SELECT IS_SRVROLEMEMBER('sysadmin') AS issa, SUSER_SNAME() AS who"
+      if (@($me).Count) {
+        $ident.currentUserSysadmin = ([string]$me[0].issa -eq '1')
+        $ident.runningAs = [string]$me[0].who
+      }
+      $cl = Invoke-Sql -Server $target -Query "SELECT name FROM sys.server_principals WHERE name LIKE '%\chadmin' AND type IN ('U','G')"
+      $ident.chadminSqlLogin = ([bool]@($cl).Count)
+    } catch { Note ('could not read the sysadmin list on ' + $inst + ': ' + $_.Exception.Message) }
+
+    Say ('   sysadmins  : ' + $(if (@($ident.sysadmins).Count) { (@($ident.sysadmins) -join ', ') } else { '(could not read)' }))
+    Say ('   chadmin    : windows account=' + $ident.chadminWindowsAccount + '  sql login=' + $ident.chadminSqlLogin + '  sysadmin=' + $ident.chadminSysadmin)
+    Say ('   running as : ' + $ident.runningAs + '  sysadmin=' + $ident.currentUserSysadmin)
+
+    if ($ident.chadminSysadmin) {
+      $ident.verdict = 'OK'
+      Say '   chadmin already has sysadmin on this instance - the adopt has what it needs.' 'OK'
+    } elseif ($ident.builtinAdminsSysadmin -or $ident.currentUserSysadmin) {
+      $ident.verdict = 'OK-VIA-ADMINISTRATORS'
+      Say '   chadmin is not sysadmin yet, but a local administrator is - so the adopt can create it after the move.' 'OK'
+    } else {
+      $ident.verdict = 'BLOCKED'
+      Block ('SQL instance ' + $inst + ': BUILTIN\Administrators is NOT a sysadmin and neither is the account running this check. Current sysadmins are: ' + $(if (@($ident.sysadmins).Count) { (@($ident.sysadmins) -join ', ') } else { 'unreadable' }) + '. Being a Windows administrator does NOT give sysadmin on this instance, so after the migration the adopt CANNOT create chadmin, CANNOT set up the integrity checks and CANNOT take a backup - it will refuse at SQLPREP with the window already open. Get a sysadmin login arranged for YallaCloud BEFORE the move, or confirm who holds the sa credentials and that they will be available on the night.')
+    }
+    $si.identity = $ident
 
     # databases, sizes and recovery model
     try {
@@ -557,6 +1010,14 @@ ORDER BY SUM(CONVERT(bigint,mf.size)) DESC
       }
       foreach ($d in @($si.databases | Where-Object { $_.pageVerify -ne 'CHECKSUM' })) {
         Risk ('SQL database ' + $d.database + ' has PAGE_VERIFY = ' + $d.pageVerify + ', not CHECKSUM. Torn and lost writes on this database are NOT DETECTABLE - it can be damaged right now with nothing recording it, and a fast consistency check after the move cannot prove otherwise.')
+      }
+      # Express has a HARD 10 GB ceiling per database and it is enforced as a write failure, not
+      # as a warning. A database already near it will hit the wall during or just after the
+      # migration - and it will look like the migration broke the application.
+      if ($si.edition -match 'Express') {
+        foreach ($d in @($si.databases | Where-Object { [double]$_.sizeMB -gt 8192 })) {
+          Risk ('SQL EXPRESS database ' + $d.database + ' is ' + $d.sizeMB + ' MB. Express refuses to grow a data file past 10240 MB, so this one is within 2 GB of a hard stop. It will fail as an application write error rather than anything that looks like a database or migration problem. Either move this instance to Standard before the migration, or confirm with the application owner that it is not still growing.')
+        }
       }
     } catch { Note ('could not list databases on ' + $inst + ': ' + $_.Exception.Message) }
 
@@ -778,6 +1239,132 @@ try {
 } catch { Note ('could not read the installed applications: ' + $_.Exception.Message) }
 $script:Report.installedApps = @($apps)
 Say ('installed applications: ' + [string]@($apps).Count + ' recorded in the JSON (version and publisher for each)')
+# --- OFFICE / EXCEL: installed or not, version, edition, and how it is licensed ----------------
+# Checklist-adjacent and routinely missed. Office activation binds to the machine the same way
+# Windows does, and a Microsoft 365 install binds to a USER who has to sign in again on the far
+# side. Either way nobody finds out until a finance user opens Excel the morning after the
+# cutover and gets a licence prompt on a workbook they need.
+# Only PartialProductKey - the last 5 characters Office itself publishes - is read. The full key
+# is never read and never reconstructed.
+Say 'OFFICE / EXCEL' 'HEAD'
+$office = [ordered]@{ installed=$false; installType=''; version=''; platform=''; channel=''
+                      products=@(); apps=@(); licences=@(); verdict='NOT INSTALLED' }
+
+# 1. Click-to-Run: Office 2013 C2R, 2016/2019/2021/2024, and every Microsoft 365 install.
+try {
+  $c2rKey = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+  if (Test-Path -LiteralPath $c2rKey) {
+    $cc = Get-ItemProperty -LiteralPath $c2rKey -ErrorAction Stop
+    $office.installed   = $true
+    $office.installType = 'Click-to-Run'
+    $office.version     = [string]$cc.VersionToReport
+    $office.platform    = [string]$cc.Platform
+    if     ($cc.UpdateChannel) { $office.channel = [string]$cc.UpdateChannel }
+    elseif ($cc.CDNBaseUrl)    { $office.channel = [string]$cc.CDNBaseUrl }
+    foreach ($pr in (([string]$cc.ProductReleaseIds) -split ',')) {
+      if ($pr.Trim() -and ($office.products -notcontains $pr.Trim())) { $office.products += $pr.Trim() }
+    }
+  }
+} catch {}
+
+# 2. MSI installs: Office 2010 (14.0), 2013 (15.0), 2016 volume (16.0).
+foreach ($ov in @('16.0','15.0','14.0')) {
+  try {
+    $pvKey = 'HKLM:\SOFTWARE\Microsoft\Office\' + $ov + '\Common\ProductVersion'
+    if (Test-Path -LiteralPath $pvKey) {
+      $lp = [string](Get-ItemProperty -LiteralPath $pvKey -ErrorAction Stop).LastProduct
+      if ($lp) {
+        $office.installed = $true
+        if (-not $office.installType) { $office.installType = 'MSI' }
+        if (-not $office.version)     { $office.version = $lp }
+      }
+    }
+    foreach ($r in @(Get-ChildItem -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Office\' + $ov + '\Registration') -ErrorAction SilentlyContinue)) {
+      $rp = Get-ItemProperty -LiteralPath $r.PSPath -ErrorAction SilentlyContinue
+      if ($rp -and $rp.ProductName) {
+        $office.installed = $true
+        $nm = [string]$rp.ProductName
+        if ($office.products -notcontains $nm) { $office.products += $nm }
+      }
+    }
+  } catch {}
+}
+
+# 3. The applications themselves, with the file version of each exe. App Paths is where Office
+#    registers them on every version from 2010 to current, under both registry views.
+$exeMap = [ordered]@{ Excel='excel.exe'; Word='winword.exe'; Outlook='outlook.exe'
+                      PowerPoint='powerpnt.exe'; Access='msaccess.exe' }
+foreach ($appName in @($exeMap.Keys)) {
+  $exePath = ''
+  foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\',
+                      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\')) {
+    try {
+      $ak = $root + [string]$exeMap[$appName]
+      if (Test-Path -LiteralPath $ak) {
+        $dv = (Get-ItemProperty -LiteralPath $ak -ErrorAction Stop).'(default)'
+        if ($dv) { $exePath = ([string]$dv).Trim('"'); break }
+      }
+    } catch {}
+  }
+  if (-not $exePath) { continue }
+  $fileVer = ''
+  try { if (Test-Path -LiteralPath $exePath) { $fileVer = [string](Get-Item -LiteralPath $exePath -ErrorAction Stop).VersionInfo.ProductVersion } } catch {}
+  $office.installed = $true
+  $office.apps += [ordered]@{ app=$appName; version=$fileVer; path=$exePath
+                              present=[bool](Test-Path -LiteralPath $exePath) }
+}
+
+# 4. The licence state, which is what ospp.vbs reads. ApplicationID 0ff1ce15-... is Office.
+#    SoftwareLicensingProduct covers Office 2013 and later; OfficeSoftwareProtectionProduct is
+#    the Office 2010 class and is simply absent on newer machines, hence the per-class try.
+$offAppId = '0ff1ce15-a989-479d-af46-f275c6370663'
+foreach ($cls in @('SoftwareLicensingProduct','OfficeSoftwareProtectionProduct')) {
+  try {
+    foreach ($l in @(Get-CimInstance $cls -Filter ("ApplicationID='" + $offAppId + "'") -ErrorAction Stop)) {
+      $ls = [int]$l.LicenseStatus
+      if (-not $l.PartialProductKey -and $ls -eq 0) { continue }   # an unused SKU row, not an install
+      $office.licences += [ordered]@{
+        name      = [string]$l.Name
+        status    = switch ($ls) { 0 {'UNLICENSED'} 1 {'Licensed'} 2 {'OOB Grace'} 3 {'OOT Grace'} 4 {'Non-Genuine Grace'} 5 {'Notification - NOT ACTIVATED'} 6 {'Extended Grace'} default {'Unknown(' + [string]$ls + ')'} }
+        channel   = [string]$l.ProductKeyChannel
+        keyLast5  = [string]$l.PartialProductKey
+        graceDays = $(if ($l.GracePeriodRemaining -gt 0) { [math]::Round([int]$l.GracePeriodRemaining/1440,1) } else { 0 })
+      }
+    }
+  } catch {}
+}
+
+if (-not $office.installed) {
+  Say 'no Office or Excel installation found on this VM' 'OK'
+} else {
+  $office.verdict = 'INSTALLED'
+  Say ('install       : ' + $office.installType + $(if ($office.version) { '   version ' + $office.version } else { '' }) + $(if ($office.platform) { '   ' + $office.platform } else { '' }))
+  if ($office.channel)            { Say ('channel       : ' + $office.channel) }
+  if (@($office.products).Count)  { Say ('products      : ' + ((@($office.products) | Select-Object -First 8) -join ', ')) }
+  foreach ($a in @($office.apps)) { Say ('   ' + ('{0,-11} {1,-18} {2}' -f $a.app, $(if ($a.version) { $a.version } else { '(unreadable)' }), $a.path)) }
+
+  if (@($office.licences).Count) {
+    foreach ($l in @($office.licences)) {
+      Say ('   lic ' + ('{0,-44} {1,-30} channel {2}, key ends {3}' -f $l.name, $l.status, $(if ($l.channel) { $l.channel } else { '(none)' }), $(if ($l.keyLast5) { $l.keyLast5 } else { '(none)' }))) $(if ($l.status -eq 'Licensed') {'OK'} else {'RISK'})
+      if ($l.graceDays -gt 0) { Say ('       grace left ' + [string]$l.graceDays + ' days') 'RISK' }
+    }
+    foreach ($l in @($office.licences | Where-Object { $_.status -ne 'Licensed' })) {
+      Risk ('Office product "' + $l.name + '" is ' + $l.status + ' on this VM (channel ' + $(if ($l.channel) { $l.channel } else { 'none' }) + ', key ends ' + $(if ($l.keyLast5) { $l.keyLast5 } else { 'none' }) + '). It is already not properly licensed on the source, so Excel and Word will prompt on the far side too. Fix it or own it before the window, because after the move it reads as something the migration broke.')
+    }
+    foreach ($l in @($office.licences | Where-Object { $_.channel -match 'OEM' })) {
+      Risk ('Office product "' + $l.name + '" is an OEM licence (' + $l.channel + ', key ends ' + $l.keyLast5 + '). OEM Office is tied to the original hardware and does NOT transfer. Activation will drop after the move and replacing it is a purchase.')
+    }
+    foreach ($l in @($office.licences | Where-Object { $_.channel -match 'MAK' })) {
+      Risk ('Office product "' + $l.name + '" is activated with a MAK key (ends ' + $l.keyLast5 + '). The move consumes another activation from that key. Confirm it has activations left and that YallaCloud or the customer holds it.')
+    }
+    foreach ($l in @($office.licences | Where-Object { $_.channel -match 'GVLK|KMS' })) {
+      Risk ('Office product "' + $l.name + '" is KMS-activated (' + $l.channel + '). It has to reach a KMS host every 180 days. If that host lives on the source network, Office goes into reduced-functionality mode WEEKS AFTER the move while nothing looks wrong on the night. Point it at the YallaCloud KMS host during the cutover.')
+    }
+  } else {
+    Risk 'Office is installed on this VM but NO Office licence is registered on the machine - no product key and no volume licence. That is what a Microsoft 365 / subscription install looks like: the licence belongs to the USER who signed in, not to this VM. After the move each user has to sign in again before Excel will open anything, and if nobody knows which account was used, that is a help-desk queue on the first morning. Find out whose subscription this is before the window.'
+  }
+}
+$script:Report.office = $office
 
 # ================================================================================================
 # 8. THE FALLBACK - is there a backup, and can it actually be restored?

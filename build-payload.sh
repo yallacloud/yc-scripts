@@ -78,7 +78,11 @@ fi
 # Keep the standalone copies at the repo root identical to what is in the zip.
 # They drifted once and the stale root Update-YcScripts.ps1 would have installed an
 # UNVERIFIED payload and deleted .authorized_keys.baked - the last way back into a VM.
-for m in Activate-Windows.ps1 Fix-Deploy.ps1 Update-YcScripts.ps1 test-activate.ps1; do
+# Test-MigrationReadiness.ps1 is here for a reason the others are not: it is meant to run on a
+# SOURCE VM that has no payload and no C:\Scripts at all, which means it must be fetchable as a
+# single file from a URL. Inside the zip only, it was unreachable - the one machine it exists for
+# is the one machine that cannot get it.
+for m in Activate-Windows.ps1 Fix-Deploy.ps1 Update-YcScripts.ps1 test-activate.ps1 Test-MigrationReadiness.ps1; do
   [ -f "$SRC/$m" ] && cp -f "$SRC/$m" "$HERE/$m" && echo "mirrored $m"
 done
 

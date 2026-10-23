@@ -72,7 +72,7 @@ $script:Notes    = New-Object System.Collections.Generic.List[string]
 $script:Report   = [ordered]@{
   schema='ycmig.readiness/1'; host=$env:COMPUTERNAME
   generatedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
-  tool='Test-MigrationReadiness.ps1'; version='1.2.0'
+  tool='Test-MigrationReadiness.ps1'; version='1.3.0'
 }
 $script:Log = New-Object System.Collections.Generic.List[string]
 
@@ -144,8 +144,9 @@ PARAMETERS
 
 WHAT IT CHECKS
   every attached fixed volume   chkdsk /scan - ONLINE and READ-ONLY, no dismount, no repair,
-                                no reboot - plus the NTFS dirty bit, free space, disk layout
-                                and whether any disk is dynamic
+                                no reboot - plus the NTFS dirty bit, TOTAL/USED/FREE space for
+                                every drive, the physical disk layout underneath, and whether
+                                any disk is dynamic
   SQL Server, if installed      which SQL Server it is (product year, version, SP/CU level),
                                 the edition and what that edition means commercially -
                                 Evaluation, Express, Developer or a paid one - the instance
@@ -714,11 +715,15 @@ try {
 } catch {}
 
 foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
+  # USED is carried as its own number rather than left as total-minus-free. Nobody reading this
+  # report under pressure should have to do arithmetic to answer "how full is this drive".
   $row = [ordered]@{ drive=[string]$v.DeviceID; fs=[string]$v.FileSystem
                      sizeGB=[math]::Round($v.Size/1GB,1); freeGB=[math]::Round($v.FreeSpace/1GB,1)
+                     usedGB=[math]::Round(($v.Size - $v.FreeSpace)/1GB,1)
+                     usedPct=$(if ($v.Size -gt 0) { [math]::Round((($v.Size - $v.FreeSpace)/$v.Size)*100,1) } else { 0 })
                      freePct=$(if ($v.Size -gt 0) { [math]::Round(($v.FreeSpace/$v.Size)*100,1) } else { 0 })
                      dirty='unknown'; chkdsk='not run'; chkdskClean=$null; chkdskDetail='' }
-  Say ($row.drive + '  ' + [string]$row.sizeGB + ' GB total, ' + [string]$row.freeGB + ' GB free (' + [string]$row.freePct + '%)  fs=' + $row.fs)
+  Say ($row.drive + '  ' + [string]$row.sizeGB + ' GB total, ' + [string]$row.usedGB + ' GB used (' + [string]$row.usedPct + '%), ' + [string]$row.freeGB + ' GB free (' + [string]$row.freePct + '%)  fs=' + $row.fs)
 
   # The dirty bit first: if Windows has ALREADY decided this volume needs repair, no scan is
   # needed to know the answer, and running one does not change it.

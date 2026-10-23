@@ -69,23 +69,23 @@ if (-not $v.present) { Check 'no virtio reads NOT-VIRTIO' $v.verdict 'NOT-VIRTIO
 Write-Host ''
 Write-Host '=== 4. a healthy pair must stay QUIET (no banner, no flags) ===' -ForegroundColor Cyan
 $script:Flags = @()
-$okG = [ordered]@{ verdict='OK'; why='installed and running (QEMU-GA, start type Auto)'; service='QEMU-GA'; status='Running'; installed=$true; running=$true; startType='Auto'; version='110.0.2' }
+$okG = [ordered]@{ agent='qemu-guest-agent'; verdict='OK'; why='installed and running (QEMU-GA, start type Auto)'; service='QEMU-GA'; status='Running'; installed=$true; running=$true; startType='Auto'; version='110.0.2' }
 $okV = [ordered]@{ verdict='OK'; why='all 5 virtio driver(s) are at the pinned version 0.1.271-1'; present=$true; pinPackage='0.1.271-1'; pinFileVersion='100.100.104.27100'; drivers=@() }
-Write-GuestPlatformLoud -Guest $okG -Virtio $okV
+Write-GuestPlatformLoud -State ([ordered]@{ platform='KVM'; platformWhy='test'; manufacturer='QEMU'; model='Standard PC'; expectedAgent='qemu-guest-agent'; agent=$okG; virtio=$okV; leftovers=@() })
 Check 'healthy pair raises no flags' @($script:Flags).Count 0
 
 Write-Host ''
 Write-Host '=== 5. a STOPPED agent and an OLD virtio must go LOUD and flag ===' -ForegroundColor Cyan
 $script:Flags = @()
-$badG = [ordered]@{ verdict='STOPPED'; why='installed but NOT RUNNING (QEMU-GA is Stopped).'; service='QEMU-GA'; status='Stopped'; installed=$true; running=$false; startType='Disabled'; version='110.0.2' }
+$badG = [ordered]@{ agent='qemu-guest-agent'; verdict='STOPPED'; why='installed but NOT RUNNING (QEMU-GA is Stopped).'; service='QEMU-GA'; status='Stopped'; installed=$true; running=$false; startType='Disabled'; version='110.0.2' }
 $badV = [ordered]@{ verdict='DIFFERS'; why='2 of 5 virtio driver(s) are NOT at the pinned version 0.1.271-1.'
                     present=$true; pinPackage='0.1.271-1'; pinFileVersion='100.100.104.27100'
                     drivers=@([ordered]@{ driver='viostor'; fileVersion='100.100.100.20800'; state='DIFFERS-FROM-PIN' },
                               [ordered]@{ driver='netkvm';  fileVersion='100.100.100.20800'; state='DIFFERS-FROM-PIN' },
                               [ordered]@{ driver='balloon'; fileVersion='100.100.104.27100'; state='MATCHES-PIN' }) }
-Write-GuestPlatformLoud -Guest $badG -Virtio $badV
+Write-GuestPlatformLoud -State ([ordered]@{ platform='KVM'; platformWhy='test'; manufacturer='QEMU'; model='Standard PC'; expectedAgent='qemu-guest-agent'; agent=$badG; virtio=$badV; leftovers=@() })
 Check 'bad pair raises 2 flags' @($script:Flags).Count 2
-$hasAgent  = [bool](@($script:Flags) | Where-Object { $_ -match 'GUEST AGENT' })
+$hasAgent  = [bool](@($script:Flags) | Where-Object { $_ -match 'QEMU-GUEST-AGENT|GUEST AGENT' })
 $hasVirtio = [bool](@($script:Flags) | Where-Object { $_ -match 'VIRTIO' })
 Check 'the agent flag is there'  $hasAgent  $true
 Check 'the virtio flag is there' $hasVirtio $true

@@ -72,7 +72,7 @@ $script:Notes    = New-Object System.Collections.Generic.List[string]
 $script:Report   = [ordered]@{
   schema='ycmig.readiness/1'; host=$env:COMPUTERNAME
   generatedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
-  tool='Test-MigrationReadiness.ps1'; version='1.3.0'
+  tool='Test-MigrationReadiness.ps1'; version='1.4.0'
 }
 $script:Log = New-Object System.Collections.Generic.List[string]
 
@@ -145,8 +145,9 @@ PARAMETERS
 WHAT IT CHECKS
   every attached fixed volume   chkdsk /scan - ONLINE and READ-ONLY, no dismount, no repair,
                                 no reboot - plus the NTFS dirty bit, TOTAL/USED/FREE space for
-                                every drive, the physical disk layout underneath, and whether
-                                any disk is dynamic
+                                every drive, the physical disk layout underneath with MBR/GPT
+                                per disk, the system disk's style against the firmware this VM
+                                reports, and whether any disk is dynamic
   SQL Server, if installed      which SQL Server it is (product year, version, SP/CU level),
                                 the edition and what that edition means commercially -
                                 Evaluation, Express, Developer or a paid one - the instance
@@ -695,16 +696,74 @@ $script:Report.machine = $m
 Say 'EVERY ATTACHED DRIVE' 'HEAD'
 $vols = @()
 $diskRows = @()
+# PARTITION STYLE - MBR or GPT - belongs to the DISK, not the volume, and it matters twice over.
+# The target template's firmware has to match it (a UEFI template will not boot an MBR system
+# disk), and MBR cannot address past 2048 GB, so anything beyond that on an oversized MBR disk is
+# not usable and does not appear in Windows at all. Get-Disk is the Storage module, present from
+# Server 2012R2 on; where it is missing the style is derived from the partition type strings,
+# which carry 'GPT:' on a GPT disk.
+$styleByIndex = @{}
+try {
+  foreach ($gd in @(Get-Disk -ErrorAction Stop)) { $styleByIndex[[int]$gd.Number] = [string]$gd.PartitionStyle }
+} catch {
+  try {
+    foreach ($pt in @(Get-CimInstance Win32_DiskPartition -ErrorAction Stop)) {
+      $ix = [int]$pt.DiskIndex
+      if     ([string]$pt.Type -match 'GPT')          { $styleByIndex[$ix] = 'GPT' }
+      elseif (-not $styleByIndex.ContainsKey($ix))    { $styleByIndex[$ix] = 'MBR' }
+    }
+  } catch {}
+}
 try {
   foreach ($dk in @(Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Sort-Object Index)) {
-    $diskRows += [ordered]@{ index=[int]$dk.Index; model=[string]$dk.Model
+    $ix = [int]$dk.Index
+    $diskRows += [ordered]@{ index=$ix; model=[string]$dk.Model
                              sizeGB=[math]::Round($dk.Size/1GB,1)
+                             partitionStyle=$(if ($styleByIndex.ContainsKey($ix)) { [string]$styleByIndex[$ix] } else { 'UNKNOWN' })
                              partitions=[int]$dk.Partitions; interface=[string]$dk.InterfaceType }
   }
   Say ([string]@($diskRows).Count + ' physical disk(s) attached:')
-  foreach ($r in $diskRows) { Say ('   disk ' + [string]$r.index + '  ' + [string]$r.sizeGB + ' GB  ' + $r.partitions + ' partition(s)  ' + $r.model) }
+  foreach ($r in $diskRows) { Say ('   disk ' + [string]$r.index + '  ' + [string]$r.sizeGB + ' GB  ' + ([string]$r.partitionStyle).PadRight(7) + ' ' + $r.partitions + ' partition(s)  ' + $r.model) }
+  foreach ($r in @($diskRows | Where-Object { [string]$_.partitionStyle -eq 'MBR' -and [double]$_.sizeGB -gt 2048 })) {
+    Risk ('disk ' + [string]$r.index + ' is ' + [string]$r.sizeGB + ' GB but partitioned MBR. MBR cannot address past 2048 GB, so the space beyond that is NOT usable and does not show up in Windows. Anyone sizing the target from the raw disk size will provision storage this VM can never reach, and converting MBR to GPT is a separate piece of work - not something to discover inside the window.')
+  }
+  foreach ($r in @($diskRows | Where-Object { [string]$_.partitionStyle -eq 'UNKNOWN' })) {
+    Note ('the partition style of disk ' + [string]$r.index + ' could not be read, so whether the target template must be UEFI or BIOS is not established from this report.')
+  }
 } catch { Note ('could not enumerate the disks: ' + $_.Exception.Message) }
 $script:Report.disks = @($diskRows)
+
+# Which physical disk is each drive letter on? The volume rows borrow the style from the disk
+# rather than claiming one of their own, because that is where partitioning actually lives.
+$diskByLetter = @{}
+try {
+  foreach ($a in @(Get-CimInstance Win32_LogicalDiskToPartition -ErrorAction Stop)) {
+    $letter = [string]$a.Dependent.DeviceID
+    $ant    = [string]$a.Antecedent.DeviceID
+    if ($letter -and $ant -match 'Disk\s*#(\d+)') { $diskByLetter[$letter.ToUpper()] = [int]$Matches[1] }
+  }
+} catch { Note ('could not map drive letters to physical disks: ' + $_.Exception.Message) }
+
+# THE SYSTEM DISK, against the firmware this VM reports. The target template is chosen from
+# exactly these two facts, and getting them crossed is a VM that does not boot after the move.
+try {
+  $sysLetter = ([string]$env:SystemDrive).ToUpper()
+  if ($diskByLetter.ContainsKey($sysLetter)) {
+    $sysIx  = [int]$diskByLetter[$sysLetter]
+    $sysRow = @($diskRows | Where-Object { $_.index -eq $sysIx }) | Select-Object -First 1
+    if ($sysRow) {
+      $script:Report.systemDisk = [ordered]@{ drive=$sysLetter; disk=$sysIx
+                                              partitionStyle=[string]$sysRow.partitionStyle
+                                              bootMode=[string]$m.bootMode }
+      Say ('system drive  : ' + $sysLetter + ' on disk ' + [string]$sysIx + ', ' + [string]$sysRow.partitionStyle + ', firmware ' + [string]$m.bootMode)
+      if ([string]$m.bootMode -eq 'UEFI' -and [string]$sysRow.partitionStyle -eq 'MBR') {
+        Risk ('this VM reports UEFI firmware but its SYSTEM DISK is MBR. Those two do not normally go together, so one of the readings is wrong - and the target template is picked from exactly these two facts. Confirm the firmware on the source console BEFORE the template is chosen: a UEFI template handed an MBR disk, or the reverse, is a VM that does not boot and a window spent working out why.')
+      } elseif ([string]$m.bootMode -eq 'BIOS' -and [string]$sysRow.partitionStyle -eq 'GPT') {
+        Risk ('this VM reports BIOS firmware with a GPT system disk. It boots today, but the target has to be built the same way - state which it is when the template is chosen rather than letting it default, because the default will not always be this one.')
+      }
+    }
+  }
+} catch {}
 
 # Dynamic disks do not survive most migration paths intact. Worth knowing before, never during.
 try {
@@ -717,13 +776,21 @@ try {
 foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
   # USED is carried as its own number rather than left as total-minus-free. Nobody reading this
   # report under pressure should have to do arithmetic to answer "how full is this drive".
+  $dl   = ([string]$v.DeviceID).ToUpper()
+  $dix  = $(if ($diskByLetter.ContainsKey($dl)) { [int]$diskByLetter[$dl] } else { -1 })
+  $dsty = 'UNKNOWN'
+  if ($dix -ge 0) {
+    $dr = @($diskRows | Where-Object { $_.index -eq $dix }) | Select-Object -First 1
+    if ($dr) { $dsty = [string]$dr.partitionStyle }
+  }
   $row = [ordered]@{ drive=[string]$v.DeviceID; fs=[string]$v.FileSystem
+                     disk=$dix; partitionStyle=$dsty
                      sizeGB=[math]::Round($v.Size/1GB,1); freeGB=[math]::Round($v.FreeSpace/1GB,1)
                      usedGB=[math]::Round(($v.Size - $v.FreeSpace)/1GB,1)
                      usedPct=$(if ($v.Size -gt 0) { [math]::Round((($v.Size - $v.FreeSpace)/$v.Size)*100,1) } else { 0 })
                      freePct=$(if ($v.Size -gt 0) { [math]::Round(($v.FreeSpace/$v.Size)*100,1) } else { 0 })
                      dirty='unknown'; chkdsk='not run'; chkdskClean=$null; chkdskDetail='' }
-  Say ($row.drive + '  ' + [string]$row.sizeGB + ' GB total, ' + [string]$row.usedGB + ' GB used (' + [string]$row.usedPct + '%), ' + [string]$row.freeGB + ' GB free (' + [string]$row.freePct + '%)  fs=' + $row.fs)
+  Say ($row.drive + '  ' + [string]$row.sizeGB + ' GB total, ' + [string]$row.usedGB + ' GB used (' + [string]$row.usedPct + '%), ' + [string]$row.freeGB + ' GB free (' + [string]$row.freePct + '%)  fs=' + $row.fs + '  ' + $(if ($dix -ge 0) { 'disk ' + [string]$dix } else { 'disk ?' }) + ' (' + $dsty + ')')
 
   # The dirty bit first: if Windows has ALREADY decided this volume needs repair, no scan is
   # needed to know the answer, and running one does not change it.
@@ -1388,15 +1455,34 @@ Say 'THE FALLBACK - BACKUPS, AND WHETHER THEY RESTORE (checklist items 6-9)' 'HE
 
 # --- backup agents on the box -----------------------------------------------------------------
 $agents = @()
+# EVERY product found is reported, not the first one: a VM carrying two backup agents is normal
+# in an estate that has changed vendor and never finished decommissioning the old one, and that
+# is itself a finding (see below).
 $agentPatterns = @{
-  'Acronis'   = 'acronis'
-  'Veeam'     = 'veeam'
-  'Commvault' = 'commvault|simpana'
-  'Veritas'   = 'veritas|backup exec'
-  'Rubrik'    = 'rubrik'
-  'Cohesity'  = 'cohesity'
-  'Azure/MARS'= 'microsoft azure recovery|obengine'
+  'Acronis'                = 'acronis'
+  'Veeam'                  = 'veeam'
+  'Commvault'              = 'commvault|simpana'
+  'Veritas'                = 'veritas|backup exec|netbackup'
+  'Rubrik'                 = 'rubrik'
+  'Cohesity'               = 'cohesity'
+  'Azure/MARS'             = 'microsoft azure recovery|obengine'
+  'Windows Server Backup'  = 'wbengine|windows server backup|sdrsvc'
+  'Datto'                  = 'datto'
+  'N-able / Cove'          = 'n-able|nable|cove data|backupfp'
+  'Nakivo'                 = 'nakivo'
+  'Altaro / Hornetsecurity'= 'altaro|hornetsecurity'
+  'Arcserve'               = 'arcserve'
+  'Zerto'                  = 'zerto'
+  'Dell Avamar / Networker'= 'avamar|avagent|networker|nsrexecd'
+  'IBM Spectrum Protect'   = 'spectrum protect|dsmcad|dsmsched'
+  'Synology Active Backup' = 'synology|activebackup'
+  'Macrium'                = 'macrium'
+  'Bacula / Bareos'        = 'bacula|bareos'
+  'Proxmox Backup'         = 'proxmox backup'
+  'Iperius'                = 'iperius'
+  'Carbonite / EVault'     = 'carbonite|evault'
 }
+$script:Report.unrecognisedBackupServices = @()
 try {
   $all = @(Get-Service -ErrorAction Stop)
   foreach ($k in $agentPatterns.Keys) {
@@ -1410,10 +1496,36 @@ try {
       Risk ($k + ' is installed on this VM but NONE of its services are running. Whatever protection it is supposed to be providing, it is not providing it right now - and this is the fallback the migration is relying on.')
     }
   }
+
+  # TWO OR MORE backup products on one machine is its own finding. They all drive the same VSS
+  # stack, and when two of them snapshot the same volume the loser gets a crash-consistent copy
+  # while still reporting success.
+  if (@($agents).Count -gt 1) {
+    Risk ([string]@($agents).Count + ' DIFFERENT backup products are installed on this VM at the same time: ' + ((@($agents) | ForEach-Object { $_.product + ' (' + $_.running + '/' + $_.services + ' running)' }) -join ', ') + '. They share one VSS stack, so when two of them snapshot the same volume the loser takes a crash-consistent copy and still reports success. Establish WHICH ONE is the migration fallback and that its last restore test passed - the newest or the loudest is not necessarily the live one, and a decommissioned agent nobody removed looks exactly like a working one in a service list.')
+  }
+
+  # The list above cannot be complete. A backup product nobody recognised is worse than none:
+  # it is protection somebody is counting on that this report would otherwise not mention.
+  $known = ((@($agentPatterns.Values)) -join '|')
+  $maybe = @($all | Where-Object {
+    $t = $_.Name + ' ' + $_.DisplayName
+    $t -match '(?i)backup|replicat|snapshot|disaster recover' -and
+    $t -notmatch ('(?i)' + $known) -and
+    $_.Name -notmatch '(?i)^(VSS|swprv|vmicvss|BITS)$'
+  })
+  if (@($maybe).Count) {
+    $script:Report.unrecognisedBackupServices = @(@($maybe) | ForEach-Object { $_.Name + ' (' + $_.DisplayName + ') = ' + $_.Status })
+    Say ('possible backup software NOT in the known list: ' + ((@($maybe) | ForEach-Object { $_.Name }) -join ', ')) 'RISK'
+    Risk ('service(s) that look like backup software but are not on this check''s known list were found: ' + ((@($maybe) | Select-Object -First 5 | ForEach-Object { $_.Name + '=' + $_.Status }) -join ', ') + '. Identify what they are before the window. If one of them is what actually protects this VM, then the fallback has not been assessed by this report at all - and "no backup agent found" would have been the wrong conclusion.')
+  }
 } catch { Note ('could not enumerate the backup agents: ' + $_.Exception.Message) }
 if (-not @($agents).Count) {
-  Risk 'no backup agent (Acronis, Veeam, Commvault, Veritas, Rubrik, Cohesity, Azure) was found on this VM. If the migration fallback is a platform-level snapshot rather than an in-guest agent, confirm that snapshot exists and is restorable before the window.'
-  Say 'no in-guest backup agent found' 'RISK'
+  if (@($script:Report.unrecognisedBackupServices).Count) {
+    Say 'no RECOGNISED backup agent found - see the unidentified services above' 'RISK'
+  } else {
+    Risk 'no in-guest backup agent was found on this VM, and nothing that looks like backup software either. If the migration fallback is a platform-level snapshot rather than an in-guest agent, confirm that snapshot exists and is restorable before the window.'
+    Say 'no in-guest backup agent found' 'RISK'
+  }
 }
 $script:Report.backupAgents = @($agents)
 

@@ -48,6 +48,34 @@ if [ -n "$NEWCAT" ]; then
   echo "stamped yc-payload-version.txt = $NEWCAT"
 fi
 
+# ENTRY-COUNT FLOOR. 2026-10-24: a source tree that had silently extracted to ZERO files was
+# built into a 36,791-byte payload holding ONE script, and the zip and its sidecar were
+# overwritten with it before anyone looked. Update-YcScripts.ps1 does a FULL OVERWRITE of
+# C:\Scripts, so that payload would have emptied C:\Scripts on every VM that pulled it.
+# Nothing downstream of here checks the count, so it is checked here, before the zip is touched.
+NEWCOUNT=$(find "$SRC" -type f | wc -l | tr -d ' ')
+OLDCOUNT=$(python3 - "$ZIP" <<'PYEOF' 2>/dev/null || echo 0
+import sys, zipfile
+try:
+    with zipfile.ZipFile(sys.argv[1]) as z:
+        print(len([n for n in z.namelist() if not n.endswith('/')]))
+except Exception:
+    print(0)
+PYEOF
+)
+echo "source tree: $NEWCOUNT files   (payload being replaced: $OLDCOUNT)"
+if [ "$NEWCOUNT" -lt 100 ]; then
+  echo "REFUSING TO BUILD: the source tree has only $NEWCOUNT files. A real payload is 150+." >&2
+  echo "  Check that \$SRC is the tree you think it is and that the extract actually worked." >&2
+  echo "  Override with YC_ALLOW_SMALL_PAYLOAD=1 only if you know why it is small." >&2
+  [ "${YC_ALLOW_SMALL_PAYLOAD:-0}" = "1" ] || exit 1
+fi
+if [ "$OLDCOUNT" -gt 0 ] && [ "$NEWCOUNT" -lt $(( OLDCOUNT * 80 / 100 )) ]; then
+  echo "REFUSING TO BUILD: $NEWCOUNT files is less than 80% of the $OLDCOUNT in the payload you" >&2
+  echo "  are replacing. A payload that loses a fifth of its files is a mistake, not a release." >&2
+  echo "  Override with YC_ALLOW_SMALL_PAYLOAD=1 if files were genuinely removed on purpose." >&2
+  [ "${YC_ALLOW_SMALL_PAYLOAD:-0}" = "1" ] || exit 1
+fi
 python3 - "$SRC" "$ZIP" <<'PY'
 import sys, os, zipfile, hashlib
 src, out = sys.argv[1], sys.argv[2]

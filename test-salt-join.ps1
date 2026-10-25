@@ -45,10 +45,11 @@ $script:Evidence = @{}
 # defining the stubs with "global:" does NOT work - that was the first version of this test, and
 # it passed six checks that had never run the code they named.
 Invoke-Expression (Grab 'Invoke-Salt')
+Invoke-Expression (Grab 'Get-SaltMasterForThisHost')
 Invoke-Expression ((Grab 'Test-TcpReachable')   -replace 'function Test-TcpReachable \{',   'function Real-TcpReachable {')
 Invoke-Expression ((Grab 'Get-SaltMinionState') -replace 'function Get-SaltMinionState \{', 'function Real-SaltMinionState {')
 
-$SaltMaster  = 'salt.example.invalid'
+$SaltMaster  = 'salt.example.invalid'   # set, so the scenarios below do not depend on this host's IPs
 $SaltJoinUrl = 'https://repo.example.invalid/salt/join.ps1'
 $SkipSalt    = $false
 
@@ -108,12 +109,12 @@ T 'the flag says no state will run' (Flagged 'NO STATE EVER RUNS') ''
 T 'returns 3' ($rc -eq 3) ([string]$rc)
 
 Write-Host ''
-Write-Host '=== 4. repo unreachable - the join must NOT be attempted ===' -ForegroundColor Cyan
+Write-Host '=== 4. mirror unreachable - reported, and the retry task handles it ===' -ForegroundColor Cyan
 Set-Scenario -P4505 $true -P4506 $true -Repo $false
 $rc = Invoke-Salt
-T 'action is blocked' ($script:Evidence['salt'].action -eq 'blocked') ([string]$script:Evidence['salt'].action)
+T 'the mirror being down is reported, not fatal'  ($script:Evidence['salt'].repoReachable -eq $false) ([string]$script:Evidence['salt'].repoReachable)
 T 'returns 3' ($rc -eq 3) ([string]$rc)
-T 'prints the manual one-liner so it can be done by hand' (Flagged 'irm https://repo\.example\.invalid') ''
+T 'and the flag says the retry task fixes it by itself' (Flagged 'retry task will keep trying') ''
 T 'nothing claims the minion is running' (-not $script:Evidence['salt'].after.running) ''
 
 Write-Host ''
@@ -141,7 +142,54 @@ T 'returns 3' ($rc -eq 3) ([string]$rc)
 T 'still never terminal' ($rc -notin @(1,4,5,6)) ([string]$rc)
 
 Write-Host ''
-Write-Host '=== 8. the phase is wired into the run, not just defined ===' -ForegroundColor Cyan
+Write-Host '=== 8. the master is DERIVED, not hardcoded (STACK4-54 s0) ===' -ForegroundColor Cyan
+$SaltMaster = ''
+$derived = Get-SaltMasterForThisHost
+T 'with no -SaltMaster it derives one'   ([bool]$derived) $derived
+T 'and it is one of the two real names'  ($derived -in @('salt.mgmt.yallacloud.net','salt.oasisstack.io')) $derived
+$SaltMaster = 'salt.override.invalid'
+T '-SaltMaster wins when given'          ((Get-SaltMasterForThisHost) -eq 'salt.override.invalid') (Get-SaltMasterForThisHost)
+$SaltMaster = 'salt.example.invalid'
+
+Write-Host ''
+Write-Host '=== 9. the one-line result is what decides the verdict (STACK4-54 s00) ===' -ForegroundColor Cyan
+foreach ($case in @(
+    @{ line='JOINED acme-web01'; want='JOINED'; id='acme-web01' },
+    @{ line='CONFIGURED acme-web01'; want='CONFIGURED'; id='' },
+    @{ line='WAITING: not in CloudStack uuid=937feded-1111-2222-3333-444455556666 macs=06:aa:bb:cc:dd:ee'; want='WAITING'; id='' },
+    @{ line='FAILED: could not download the installer'; want='FAILED'; id='' }
+  )) {
+  $l = $case.line
+  $hit = ''
+  if ($l -match '^(JOINED|CONFIGURED|WAITING|FAILED)') { $hit = $Matches[1] }
+  T ('recognises ' + $case.want)  ($hit -eq $case.want) $hit
+  if ($case.want -eq 'JOINED') {
+    $gotId = ''
+    if ($l -match '^JOINED\s+(\S+)') { $gotId = $Matches[1] }
+    T 'and captures the minion id the master chose' ($gotId -eq $case.id) $gotId
+  }
+  if ($case.want -eq 'WAITING') {
+    $u=''; $m=''
+    if ($l -match 'uuid=(\S+)') { $u = $Matches[1] }
+    if ($l -match 'macs=(\S+)') { $m = $Matches[1] }
+    T 'and captures the uuid for manual.yaml' ($u -eq '937feded-1111-2222-3333-444455556666') $u
+    T 'and the MACs'                          ($m -eq '06:aa:bb:cc:dd:ee') $m
+  }
+}
+T 'WAITING is NOT judged by whether a service appeared' ($src -match "WAITING is a\s*\n?\s*#\s*legitimate outcome" -or $src -match 'legitimate outcome') ''
+T 'the phase explains why it does not call Salt-Register directly' ($src -match 'reactor DELETES a key whose id') ''
+T 'CONFIGURED is handled and is NOT reported as joined' ($src.IndexOf("-match '^CONFIGURED'") -gt 0) ''
+T 'CONFIGURED says the key is not proven accepted'      ($src -match 'has NOT been proven accepted') ''
+T 'the join exit code is recorded'                      ($src.IndexOf('$st.joinExit =') -gt 0) ''
+
+Write-Host ''
+Write-Host '=== 9b. the retry task join.ps1 registers is EXPECTED, not foreign ===' -ForegroundColor Cyan
+T "'YallaCloud Salt Join' is in OurTaskNames" ($src -match "'YallaCloud Salt Join'\)") ''
+T 'so VERIFY cannot flag it as a task we did not create' ($src -match 'self-healing task') ''
+T 'and the phase reports that the VM retries itself'     ($src -match 'does not need a second visit') ''
+
+Write-Host ''
+Write-Host '=== 10. the phase is wired into the run, not just defined ===' -ForegroundColor Cyan
 T 'SALT is in AllPhases'                 ($src -match '\$AllPhases = @\(''SURVEY''.*''SALT''') ''
 T 'SALT is in the dispatcher'             ($src -match '''SALT''\s*\{\s*\$rc = Invoke-Salt') ''
 T 'SALT is in the dispatched guard list'  ($src -match '''TASKS'',''SALT'',''NOTIFY'',''VERIFY''') ''
@@ -149,7 +197,9 @@ T 'SALT runs between TASKS and NOTIFY'    ($src.IndexOf("'TASKS','SALT','NOTIFY'
 T 'the outcome leaves the VM for ychook'  ($src -match 'salt='' \+ \[string\]\$sl\.action') ''
 T '-Help documents the phase'             ($src -match '(?m)^  SALT       hands this machine') ''
 T '-Report mode cannot reach it'          ($src -match 'if \(\$Report\) \{ \$phases = @\(''SURVEY'',''SQL''\) \}') ''
-T 'the join never runs in-process (an exit in it would kill the adopt)' ($src -match '-NoProfile'',''-ExecutionPolicy'',''Bypass'',''-File'',\s*\$tmp' -or $src -match '-ExecutionPolicy Bypass -File \$tmp') ''
+T 'it calls the house command salt-join, not its own fetch' ($src.IndexOf("Invoke-YcCommand -Script 'Salt-Join.ps1'") -gt 0) ''
+T 'it refuses when Salt-Join.ps1 is not in the payload'    ($src.IndexOf("'Salt-Join.ps1')))") -gt 0 -or $src.IndexOf("Salt-Join.ps1 is not in") -gt 0) ''
+T 'the wait is bounded and does not decide the outcome'    ($src.IndexOf('SaltWaitSec') -gt 0 -and $src.IndexOf('retries every 15 min regardless') -gt 0) ''
 
 Write-Host ''
 Write-Host ('RESULT: ' + [string]$pass + ' passed, ' + [string]$fail + ' failed') -ForegroundColor $(if($fail -eq 0){'Green'}else{'Red'})

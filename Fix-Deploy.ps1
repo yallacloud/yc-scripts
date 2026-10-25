@@ -65,7 +65,7 @@ param(
 Start-YcLog 'fix-deploy'
 $ErrorActionPreference = 'Continue'
 
-$AllFixes = @('lockout','gateway','tls','console','cbinit','sqlrename')
+$AllFixes = @('lockout','gateway','tls','console','cbinit','sqlrename','salt')
 
 if($Help){
 @"
@@ -95,6 +95,11 @@ THE FIXES:
   console   LogonUI LastLoggedOnUser / LastLoggedOnSAMUser = .\Administrator, so the console
             lands on the account whose password the deployment hands out. Mostly a vCenter
             problem. Applies to: every template.
+  salt      Joins the YallaCloud Salt master with no token and no names (salt-join, STACK4-54):
+            starts the one-line join in the background as the task "YallaCloud Salt Join", which
+            installs Salt 3008 if missing, joins as <cloudstack-domain>-<vm-name> and retries
+            every 15 min until JOINED. Never fails the deployment. Skipped when already joined or
+            when C:\ProgramData\YallaCloud\salt\no-join exists. Applies to: every template.
   cbinit    Adds the cloudbase-init NetworkConfigPlugin if the template shipped without it.
             Without that plugin cloudbase-init NEVER applies the IP, netmask, gateway, routes
             or DNS that CloudStack puts in the config drive. On a network with a virtual
@@ -797,6 +802,30 @@ if($run -contains 'sqlrename'){
         catch{ Write-YcLog ('  could not remove the empty ' + $od.FullName + ': ' + $_.Exception.Message) 'WARN' }
       }
     }
+  }
+}
+
+# ===========================================================================
+# FIX 7 - join the YallaCloud Salt master (zero input, STACK4-54 s17)
+# salt-join only STARTS the join (scheduled task); the result lands in its own log. A guest
+# without egress yet must not turn a good deployment into exit 2, so this fix never counts
+# as a failure - the task retries every 15 minutes until it joins.
+# ===========================================================================
+if($run -contains 'salt'){
+  Write-YcLog '--- salt: joining the YallaCloud Salt master (zero input) ---'
+  $sj = 'C:\Scripts\Salt-Join.ps1'
+  if(-not (Test-Path -LiteralPath $sj)){
+    Write-YcLog '  salt: Salt-Join.ps1 is not in this payload - skipped' 'WARN'
+  } elseif($Report){
+    $o = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sj -Report *>&1)
+    $o | ForEach-Object { Write-YcLog ('  salt-join: ' + $_) }
+    if($o -match 'WOULD start'){ $script:Would++ }   # already joined / opted out = nothing would change
+  } else {
+    $o = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sj *>&1)
+    $rc = $LASTEXITCODE
+    $o | ForEach-Object { Write-YcLog ('  salt-join: ' + $_) }
+    if($rc -ne 0){ Write-YcLog ('  salt: salt-join exit ' + $rc + ' - not counted as a deployment failure; run salt-join -Status') 'WARN' }
+    elseif($o -match 'join started'){ $script:Changed++ }   # already joined / opted out = no change
   }
 }
 

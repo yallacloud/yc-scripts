@@ -76,6 +76,21 @@ if [ "$OLDCOUNT" -gt 0 ] && [ "$NEWCOUNT" -lt $(( OLDCOUNT * 80 / 100 )) ]; then
   echo "  Override with YC_ALLOW_SMALL_PAYLOAD=1 if files were genuinely removed on purpose." >&2
   [ "${YC_ALLOW_SMALL_PAYLOAD:-0}" = "1" ] || exit 1
 fi
+# MANIFEST.sha256 drifted off MANIFEST.json once and stayed wrong for a whole payload
+# generation. Regenerate it from the file every build; a hash nobody maintains is worse
+# than no hash, because it reads like a guarantee.
+#
+# THIS RUNS BEFORE THE ZIP IS BUILT, and that is the whole point. It used to run after, which
+# meant the regenerated hash only reached the NEXT payload - so the one build where MANIFEST.json
+# actually changed shipped a MANIFEST.sha256 describing the previous manifest. Exactly the drift
+# the block was added to prevent, reintroduced by its position. Caught 2026-10-25 on the build
+# that moved the salt-minion pin to 3008.3: the zip carried e252f83e... for a file that hashes
+# to 88b4de1e...
+if [ -f "$SRC/MANIFEST.json" ]; then
+  ( cd "$SRC" && sha256sum MANIFEST.json > MANIFEST.sha256 )
+  echo "regenerated MANIFEST.sha256 (before zipping, so this build carries it)"
+fi
+
 python3 - "$SRC" "$ZIP" <<'PY'
 import sys, os, zipfile, hashlib
 src, out = sys.argv[1], sys.argv[2]
@@ -95,13 +110,6 @@ for dp, _, fns in os.walk(src):
 z.close()
 print(out, os.path.getsize(out), 'bytes')
 PY
-# MANIFEST.sha256 drifted off MANIFEST.json once and stayed wrong for a whole payload
-# generation. Regenerate it from the file every build; a hash nobody maintains is worse
-# than no hash, because it reads like a guarantee.
-if [ -f "$SRC/MANIFEST.json" ]; then
-  ( cd "$SRC" && sha256sum MANIFEST.json > MANIFEST.sha256 )
-  echo "regenerated MANIFEST.sha256"
-fi
 
 # Keep the standalone copies at the repo root identical to what is in the zip.
 # They drifted once and the stale root Update-YcScripts.ps1 would have installed an

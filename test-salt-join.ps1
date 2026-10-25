@@ -200,6 +200,11 @@ T '-Report mode cannot reach it'          ($src -match 'if \(\$Report\) \{ \$pha
 T 'it calls the house command salt-join, not its own fetch' ($src.IndexOf("Invoke-YcCommand -Script 'Salt-Join.ps1'") -gt 0) ''
 T 'it refuses when Salt-Join.ps1 is not in the payload'    ($src.IndexOf("'Salt-Join.ps1')))") -gt 0 -or $src.IndexOf("Salt-Join.ps1 is not in") -gt 0) ''
 T 'the wait is bounded and does not decide the outcome'    ($src.IndexOf('SaltWaitSec') -gt 0 -and $src.IndexOf('retries every 15 min regardless') -gt 0) ''
+T 'a CONFIGURED line with leading spaces is still matched' ($src.IndexOf('s*(JOINED|CONFIGURED|WAITING:|FAILED:)') -gt 0) ''
+T 'and the reason for that is written down'               ($src.IndexOf('four leading spaces') -gt 0) ''
+T 'INSTALLED / NOT INSTALLED is its own log line'         ($src.IndexOf('salt-minion   : INSTALLED') -gt 0 -and $src.IndexOf('salt-minion   : NOT INSTALLED') -gt 0) ''
+T 'a minion off the 3008 line is flagged'                 ($src.IndexOf('not on the 3008 LTS line') -gt 0) ''
+T 'install state and version leave the VM for ychook'     ($src.IndexOf('saltInstalled=') -gt 0 -and $src.IndexOf('saltVersion=') -gt 0) ''
 
 Write-Host ''
 Write-Host ('RESULT: ' + [string]$pass + ' passed, ' + [string]$fail + ' failed') -ForegroundColor $(if($fail -eq 0){'Green'}else{'Red'})

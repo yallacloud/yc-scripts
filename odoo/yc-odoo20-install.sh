@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.5  (2026-10-26 20:25 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.6  (2026-10-26 20:45 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -69,7 +69,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.5
+VER=1.4.6
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -197,15 +197,16 @@ say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=
 umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" ACRONIS_TOKEN "$ACRONIS_TOKEN" > "$NOTIFY_ENV"; umask 022
 cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 #!/usr/bin/env python3
-# yc-notify v1.3.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
+# yc-notify v1.4.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
 # (other team, yallacloud01, contract YCERP-01 - NOT ychook). Same event shape as the Windows
 # C-Scripts payload so the ERP matches it by vmId = SMBIOS UUID.
 #   yc-notify -t vm.deploy.completed -T "OK BUILD odoo combined" -p 3 -g white_check_mark,odoo \
 #             -l "url  https://..." -f area=odoo -s odooAdminPassword=... [--steps "NET+ OS+"] \
 #             [--failed-step PG --error "why"]
 #   yc-notify --test      send a test event to both channels      yc-notify --show   settings (no secrets)
-# -l lines go to ntfy AND the webhook; -f fields go to the webhook; -s fields are SECRETS:
-# webhook only, and only when WEBHOOK_SEND_SECRETS=yes. ntfy never gets a secret.
+# -l lines go to ntfy AND the webhook; -f fields (info) go to the webhook "fields"; -s group.key=value are
+# SECRETS: webhook "credentials" section only (e.g. -s vm.password=x -> credentials.vm.password), and only
+# when WEBHOOK_SEND_SECRETS=yes. ntfy never gets a secret.
 # Settings: /etc/yallacloud/odoo.conf.env (switches) + notify.env (secrets, root 600). Failed webhook posts wait in
 # /var/lib/yallacloud/notify-queue and go first on the next call (event.delivery.queued).
 # Log: /var/log/yc-notify.log; full webhook bodies + ERP answers: /var/log/yc-notify.events.jsonl (600). Best effort: always exits 0 unless the arguments are wrong.
@@ -364,15 +365,17 @@ def send_webhook(c, a, fx):
         if '=' in kv:
             k, v = kv.split('=', 1)
             fields[k] = v
+    creds = {}                              # every user/password in ONE section, grouped: vm / odoo / database
     if c.get('WEBHOOK_SEND_SECRETS', 'yes') == 'yes':
         for kv in (a.secret or []):
             if '=' in kv:
                 k, v = kv.split('=', 1)
-                fields[k] = v
+                grp, _, key = k.rpartition('.')
+                (creds.setdefault(grp, {}) if grp else creds)[key] = v
     ev = dict(fx)
-    vmpw = fields.pop('vmPassword', '')     # CloudStack root password: the contract's top-level field
-    ev.update({'type': a.type, 'steps': a.steps or '', 'extra': a.title, 'fields': fields,
-               'saPassword': '', 'vmPassword': vmpw})
+    ev.update({'type': a.type, 'steps': a.steps or '', 'extra': a.title, 'fields': fields})
+    if creds:
+        ev['credentials'] = creds
     if a.line:
         fields.setdefault('summary', ' | '.join(x.strip() for x in a.line[:6]))
     if a.failed_step:
@@ -1400,7 +1403,16 @@ rm -f "$INFO/INSTALL-FAILED"; touch "$INFO/INSTALLED"
 # Side effect: CloudStack "reset password / reset SSH key" from the UI no longer reaches this VM.
 [ "$DISABLE_CLOUD_INIT" = yes ] && touch /etc/cloud/cloud-init.disabled
 STEPS="$STEPS $STEP+"; STEP=DONE
-TLS=-; [ "$ROLE" != db ] && TLS=$(case "$URL" in https://*) [ -f "/etc/yallacloud/ssl/${URL#https://}/TYPE" ] && echo paid || echo "free (Let's Encrypt)";; *) echo "none - http only";; esac)
+CERT=-; CERT_EXP=""; CRT_FILE=""
+if [ "$ROLE" != db ]; then
+  case "$URL" in
+    https://*) H=${URL#https://}
+      if [ -f "/etc/yallacloud/ssl/$H/TYPE" ]; then CERT="paid ($(openssl x509 -noout -issuer -in "/etc/yallacloud/ssl/$H/cert.pem" 2>/dev/null | sed 's/.*O *= *//; s/,.*//'))"; CRT_FILE=/etc/yallacloud/ssl/$H/cert.pem
+      else CERT="free (Let's Encrypt)"; CRT_FILE=/etc/letsencrypt/live/$H/cert.pem; fi
+      CERT_EXP=$(date -u -d "$(openssl x509 -noout -enddate -in "$CRT_FILE" 2>/dev/null | cut -d= -f2)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null);;
+    *) CERT="none - http only";;
+  esac
+fi
 [ -n "$DOMAIN" ] && [ "${URL#https://}" = "$URL" ] && warn "DOMAIN $DOMAIN given but no certificate (DNS not pointing at $URL_IP yet?) - run: odoo-domain $DOMAIN"
 SVC=""; for u in $([ "$ROLE" != db ] && echo odoo nginx) $([ "$ROLE" != app ] && echo "postgresql@$PG_VERSION-main"); do systemctl is-active --quiet "$u" || SVC="$SVC $u"; done
 [ -n "$SVC" ] && warn "not running:$SVC"
@@ -1408,15 +1420,17 @@ RES=SUCCESS; PRI=3; TAG=white_check_mark; [ -n "$WARNS" ] && { RES="SUCCESS with
 echo "$RES $(date '+%F %T %Z') steps:$STEPS${WARNS:+ warnings: $WARNS}" > "$STATUS"
 ADD_SALT=off; [ "$ENABLE_SALT" = yes ] && ADD_SALT="joining (own message follows)"
 ADD_ACR=off; [ "$ENABLE_ACRONIS" = yes ] && { [ -n "$ACRONIS_TOKEN" ] && ADD_ACR="installing $ACRONIS_REGION (own message follows)" || ADD_ACR="skipped - no token"; }
-SEC=(); [ "$ROLE" != db ] && SEC+=(-s odooAdminUser=admin -s odooAdminPassword="$ADMIN_PASS" -s odooMasterPassword="$MASTER_PASS")
-SEC+=(-s dbUser=odoo -s dbPassword="$DB_PASS" -s dbHost="${DB_HOST:-${PRIV_NIC:-$BIND_IP}}")
-[ -n "$VM_PASS" ] && SEC+=(-s vmPassword="$VM_PASS" -s vmUser=root)
+# credentials section of the webhook: vm / odoo / database (only with WEBHOOK_SEND_SECRETS=yes)
+SEC=(-s vm.user=root -s vm.password="${VM_PASS:-}" -s vm.sshHost="$URL_IP" -s vm.sshPort="$SSH_PORT")
+[ "$ROLE" != db ] && SEC+=(-s odoo.url="$URL" -s odoo.adminUser=admin -s odoo.adminPassword="$ADMIN_PASS" -s odoo.masterPassword="$MASTER_PASS")
+SEC+=(-s database.engine=postgresql -s database.version="$PG_VERSION" -s database.host="${DB_HOST:-${PRIV_NIC:-$BIND_IP}}" -s database.port=5432
+      -s database.name="${ODOO_DB:-}" -s database.user=odoo -s database.password="$DB_PASS")
 N -t vm.deploy.completed -T "OK BUILD odoo $ROLE${WARNS:+ (warnings)}" -p "$PRI" -g "$TAG,odoo" --steps "$STEPS" \
-  -l "result  $RES" -l "url     ${URL:-- (db only)}" -l "tls     $TLS" -l "ip      $BIND_IP  url ip $URL_IP  ssh $SSH_PORT" \
+  -l "result  $RES" -l "url     ${URL:-- (db only)}" -l "cert    $CERT${CERT_EXP:+  until $CERT_EXP}" -l "ip      $BIND_IP  url ip $URL_IP  ssh $SSH_PORT" \
   -l "odoo    $(dpkg-query -W -f='${Version}' odoo 2>/dev/null || echo -)   pg $PG_VERSION   db ${ODOO_DB:-none}" \
   -l "backup  $BACKUP_DIR daily $BACKUP_TIME keep ${BACKUP_KEEP_DAYS}d" ${WARNS:+-l "warn    $WARNS"} \
   -l "addons  salt ${ADD_SALT}  acronis ${ADD_ACR}" -l "creds   /root/odoo-info/handover.txt (yallacloud --secrets)" \
-  -f area=odoo -f role="$ROLE" -f status=completed -f url="$URL" -f domain="$DOMAIN" -f tls="$TLS" -f odooVersion="$(dpkg-query -W -f='${Version}' odoo 2>/dev/null)" \
+  -f area=odoo -f role="$ROLE" -f status=completed -f url="$URL" -f domain="$DOMAIN" -f certificate="$CERT" -f certificateExpires="$CERT_EXP" -f odooVersion="$(dpkg-query -W -f='${Version}' odoo 2>/dev/null)" \
   -f pgVersion="$PG_VERSION" -f sshPort="$SSH_PORT" -f backupDir="$BACKUP_DIR" -f backupKeepDays="$BACKUP_KEEP_DAYS" -f warnings="$WARNS" -f installer="$VER" -f salt="$ADD_SALT" -f acronis="$ADD_ACR" "${SEC[@]}"
 # add-ons in the background: they report on their own (vm.salt.* / vm.acronis.*) into the same log
 for a in salt acronis; do

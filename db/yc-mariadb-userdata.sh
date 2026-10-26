@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-mariadb-userdata.sh  v1.0.1  (2026-10-26 16:30 IST)  YallaCloud / OasisStack
+# yc-mariadb-userdata.sh  v1.0.2  (2026-10-26 19:45 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: MariaDB database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Paste in CloudStack: Add Instance > Advanced > Userdata. Edit ONLY the block below.
@@ -30,7 +30,7 @@ BINLOG_DAYS="7"
 PUBLIC_IP=""               # behind NAT/port-forward: public IP clients use (blank = auto)
 GATEWAY=""                 # private VM behind a firewall: firewall LAN IP (blank = auto .1/.254/.2)
 SSH_PORT=""                # blank = 3222 on a public IP, 22 on a private IP
-SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yallacloud-ops"
+SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== guest"
                            # root authorized_keys: one OpenSSH line (ssh-rsa/ssh-ed25519 ...), blank = none
 TZ_SET="Asia/Dubai"
 LOCALE_SET="en_US.UTF-8"
@@ -40,6 +40,7 @@ ACRONIS_REGION="AE"        # AE | SG
 NTFY_URL="https://ntfy.sh/9890122212"                          # status only, never secrets
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""      # ERP webhook X-Webhook-Secret (blank = webhook off)
+CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal (cloudPortal / cloudVmUrl in the webhook)
 INSTALLER_REF="main"       # advanced: git branch/tag of yallacloud/yc-scripts
 # ======================================================
 
@@ -51,7 +52,7 @@ case "$ENGINE" in mariadb|mysql) ;; *) fail "ENGINE='$ENGINE' - must be mariadb 
 
 # answers for the installer (it validates everything again; re-run: yc-db-install)
 umask 077; mkdir -p /etc/yallacloud
-for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET; do
+for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL; do
   printf '%s=%q\n' "$v" "${!v}"
 done > /etc/yallacloud/db.conf.env
 umask 022

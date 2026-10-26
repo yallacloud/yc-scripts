@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.4  (2026-10-26 19:30 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.5  (2026-10-26 19:45 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -37,7 +37,7 @@ BINLOG_DAYS="7"
 PUBLIC_IP=""                # NAT / port-forward: the public IP clients use (blank = auto)
 GATEWAY=""                  # private VM behind a firewall: firewall LAN IP (blank = auto .1/.254/.2)
 SSH_PORT=""                 # blank = 3222 on a public IP, 22 on a private IP
-SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yallacloud-ops"   # root authorized_keys (one OpenSSH line, blank = none)
+SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== guest"   # root authorized_keys (one OpenSSH line, blank = none)
 TZ_SET="Asia/Dubai"
 LOCALE_SET="en_US.UTF-8"
 SALT_JOIN="yes"             # join salt.oasisstack.io (zero-input join.sh)
@@ -46,6 +46,7 @@ ACRONIS_REGION="AE"         # AE | SG
 NTFY_URL="https://ntfy.sh/9890122212"   # no secrets are ever sent here
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""       # blank = ERP webhook skipped (carries the credentials)
+CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # portal this VM came from (cloudPortal / cloudVmUrl in the webhook)
 # advanced
 APT_MIRRORS="ae.archive.ubuntu.com archive.ubuntu.com"
 PASS_URL="https://pass.oasisstack.io/?len=16"
@@ -53,8 +54,8 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.4
-KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
+VER=1.0.5
+KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
 INFO=/root/yc-db
@@ -298,7 +299,8 @@ fi
 SALT_JOIN=$(low "$SALT_JOIN"); case "$SALT_JOIN" in yes|no) ;; *) warn "SALT_JOIN '$SALT_JOIN' invalid - yes"; SALT_JOIN=yes;; esac
 ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
 ACRONIS_REGION=$(printf '%s' "$ACRONIS_REGION" | tr 'a-z' 'A-Z' | tr -d '[:space:]'); case "$ACRONIS_REGION" in AE|SG) ;; *) warn "ACRONIS_REGION '$ACRONIS_REGION' invalid - AE"; ACRONIS_REGION=AE;; esac
-for v in NTFY_URL ERP_WEBHOOK_URL; do [ -z "${!v}" ] || [[ "${!v}" =~ ^https?://[^[:space:]]+$ ]] || { warn "$v invalid - disabled"; printf -v "$v" '%s' ""; }; done
+CLOUDSTACK_URL=${CLOUDSTACK_URL%/}
+for v in NTFY_URL ERP_WEBHOOK_URL CLOUDSTACK_URL; do [ -z "${!v}" ] || [[ "${!v}" =~ ^https?://[^[:space:]]+$ ]] || { warn "$v invalid - disabled"; printf -v "$v" '%s' ""; }; done
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 [[ "$REPO_URL" =~ ^https?:// ]] || REPO_URL="https://repo.oasisstack.io/db"
 [ -n "$APT_MIRRORS" ] || APT_MIRRORS="ae.archive.ubuntu.com archive.ubuntu.com"
@@ -319,6 +321,7 @@ SMBIOS=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)
 ZONE=$(md availability-zone)
 VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$(md instance-id)}; VM_UUID=$(printf '%s' "${VM_UUID:-$SMBIOS}" | tr 'A-Z' 'a-z')
 OFFERING=$(md service-offering)
+CLOUD_ID=$(md cloud-identifier)
 TENANT=""; TENANT_SRC=""
 PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
 facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout
@@ -330,7 +333,9 @@ d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or None, "smbiosUuid":
      "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
      "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
      "hostname": e("VM_NAME"), "ip": e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": e("HOST_PUB") or None,
-     "zone": e("ZONE") or None, "cloud": "YallaCloud", "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
+     "zone": e("ZONE") or None, "cloud": "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
+     "cloudPortal": e("CLOUDSTACK_URL") or None,
+     "cloudVmUrl": (e("CLOUDSTACK_URL") + "/#/vm/" + e("VM_UUID")) if e("CLOUDSTACK_URL") and e("VM_UUID") else None, "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
      "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
      "warnings": int(e("WARNS") or 0), "installer": "yc-db-install " + e("VER"),
      "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
@@ -345,7 +350,7 @@ if e("W") == "yes":
 print(json.dumps(d))
 PY
 }
-export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER VM_NAME VM_UUID OFFERING TENANT TENANT_SRC SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS
+export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER VM_NAME VM_UUID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS
 RESULT=RUNNING
 finish(){
   local rc=$? title prio tags msg typ j
@@ -795,6 +800,7 @@ cat <<EOF
 created     : $(date '+%F %T %Z')   installer yc-db-install $VER
 vm          : $VM_NAME   ($PRETTY_NAME)
 tenant      : ${TENANT:--} (CloudStack domain)   vm uuid ${VM_UUID:--}   offering ${OFFERING:--}
+portal      : ${CLOUDSTACK_URL:--}${CLOUDSTACK_URL:+/#/vm/$VM_UUID}
 engine      : $ENGINE $DB_REAL_VERSION$([ -n "$FALLBACK" ] && echo "   (OS package fallback - vendor repo failed)")
 host        : private ${HOST_PRIV:--}   public ${HOST_PUB:--}
 port        : $DB_PORT   (allowed from: $DB_ALLOW)

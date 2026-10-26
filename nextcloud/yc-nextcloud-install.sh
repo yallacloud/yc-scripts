@@ -875,6 +875,58 @@ ISSUER=$(echo | timeout 10 openssl s_client -connect "${FQDN}:443" -servername "
          | openssl x509 -noout -issuer 2>/dev/null | sed 's/issuer=//')
 APPSTORE=$(curl -sS -o /dev/null -m 15 -w '%{http_code}' https://apps.nextcloud.com/ 2>/dev/null)
 
+# --------------------------------------- 15b. the 'yallacloud' info command
+# A read-only catalogue so a tech or client sees the whole picture on the box:
+# access, versions, services, cron, TLS, storage, backup/retention status.
+cat > /usr/local/bin/yallacloud <<'YCEOF'
+#!/bin/bash
+# yallacloud - YallaCloud Nextcloud catalogue (read-only). Subcommands: info|cron|backup|secrets
+CFG=/etc/yallacloud/nextcloud.conf; OUT=/root/yc-handover.json; NCROOT=/var/www/nextcloud
+[ -f "$CFG" ] && . "$CFG"
+occ(){ sudo -u www-data php "$NCROOT/occ" "$@" 2>/dev/null; }
+hr(){ printf '%s\n' "------------------------------------------------------------"; }
+PORTSFX=""; [ -n "${HTTPS_PORT:-}" ] && [ "$HTTPS_PORT" != "443" ] && PORTSFX=":$HTTPS_PORT"
+case "${1:-info}" in
+  secrets)
+    [ "$(id -u)" = 0 ] || { echo "run as root: sudo yallacloud secrets"; exit 1; }
+    [ -f "$OUT" ] && cat "$OUT" || echo "no handover file at $OUT" ;;
+  cron)
+    echo "Nextcloud background jobs mode: $(occ config:app:get core backgroundjobs_mode || echo cron)"
+    echo "www-data crontab:"; crontab -u www-data -l 2>/dev/null | sed 's/^/  /'
+    echo "certbot renew timer:"; systemctl list-timers 'certbot*' --no-pager 2>/dev/null | sed -n '1,3p' ;;
+  backup)
+    echo "Backups: NOT configured by default on this host."
+    echo "Data dir: ${DATA_PATH:-/nc_data}   Database: nextcloud (use mysqldump)."
+    echo "To add: back up ${DATA_PATH:-/nc_data} + a nightly mysqldump (e.g. restic/borg or PBS),"
+    echo "set a retention policy, and record it here. Nextcloud data is in ${DATA_PATH:-/nc_data}." ;;
+  *)
+    hr; echo " YallaCloud Nextcloud - ${FQDN:-unknown}"; hr
+    echo " URL        : https://${FQDN}${PORTSFX}/"
+    echo " Admin user : ${ADMIN_USER:-admin}  (password: sudo yallacloud secrets)"
+    echo " SSH        : port $(ss -ltn 2>/dev/null | grep -qE ':3222 ' && echo 3222 || echo 22)   sudo user: ${SUDO_USER_NAME:-chadmin}"
+    echo " Data dir   : ${DATA_PATH:-/nc_data}   Security tier: ${TIER:-standard}"
+    hr; echo " Versions"
+    echo "   OS       : $(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")"
+    echo "   Nextcloud: $(occ status | awk -F': ' '/versionstring/{print $2}')"
+    echo "   PHP      : $(php -v 2>/dev/null | head -1 | awk '{print $2}')"
+    echo "   nginx    : $(nginx -v 2>&1 | sed 's#.*/##')"
+    echo "   MariaDB  : $(mysql --no-defaults -u root -N -e 'SELECT VERSION();' 2>/dev/null)"
+    echo "   Redis    : $(redis-server --version 2>/dev/null | awk '{print $3}' | sed 's/v=//')"
+    hr
+    echo " Services   : nginx=$(systemctl is-active nginx) php-fpm=$(systemctl is-active "php${PHPV:-8.3}-fpm" 2>/dev/null) mariadb=$(systemctl is-active mariadb) redis=$(systemctl is-active redis-server)"
+    echo " TLS cert   : $(echo | openssl s_client -connect 127.0.0.1:${HTTPS_PORT:-443} -servername "${FQDN}" 2>/dev/null | openssl x509 -noout -issuer -enddate 2>/dev/null | tr '\n' ' ')"
+    echo " Storage    : $(df -h "${DATA_PATH:-/nc_data}" 2>/dev/null | awk 'NR==2{print $3" used / "$2" ("$5" full)"}')"
+    hr
+    echo " Config     : $CFG"
+    echo " Handover   : $OUT   (sudo yallacloud secrets)"
+    echo " Logs       : /var/log/yc-nextcloud-install.log"
+    echo " More       : yallacloud cron | yallacloud backup | yallacloud secrets"
+    hr ;;
+esac
+YCEOF
+chmod 755 /usr/local/bin/yallacloud
+say "  'yallacloud' command installed - run it for the full picture (sudo yallacloud secrets for passwords)"
+
 cat > "$OUT" <<EOF
 {
   "fqdn": "${FQDN}",

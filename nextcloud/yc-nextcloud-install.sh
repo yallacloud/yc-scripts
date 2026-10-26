@@ -1034,13 +1034,13 @@ fi
 # socket can leave NOTHING listening - locking you out of a box that looks
 # perfectly healthy. Drop socket activation and run sshd as a plain service:
 # one source of truth for the port, and a listener that survives a restart.
+mkdir -p /run/sshd   # 24.04: privsep dir is absent until ssh.service first starts; sshd -t/-T need it
 sshd -t || die "sshd configuration is invalid - refusing to touch a working sshd"
 systemctl disable --now ssh.socket >/dev/null 2>&1 || true
 rm -rf /etc/systemd/system/ssh.socket.d
 systemctl mask ssh.socket >/dev/null 2>&1 || true
 systemctl daemon-reload
 systemctl enable ssh.service >/dev/null 2>&1
-mkdir -p /run/sshd   # privsep dir sshd -t/-T need; unmasking the socket can leave it missing
 systemctl restart ssh.service || die "sshd would not start on port ${SSH_PORT}"
 sleep 1
 ss -ltn | grep -qE "[:.]${SSH_PORT}[[:space:]]" \
@@ -1048,7 +1048,6 @@ ss -ltn | grep -qE "[:.]${SSH_PORT}[[:space:]]" \
 # Confirm pubkey is effective, but RETRY - sshd -T can momentarily fail right after a
 # restart (privsep dir not yet recreated), and that is not a reason to fail a finished
 # build: the port is already proven listening above and password auth stays on.
-mkdir -p /run/sshd
 _pk=no
 for _i in 1 2 3 4 5; do
   sshd -T 2>/dev/null | grep -qi '^pubkeyauthentication yes' && { _pk=yes; break; }

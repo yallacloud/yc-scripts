@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.2  (2026-10-26 17:05 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.3  (2026-10-26 17:25 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -53,7 +53,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.2
+VER=1.0.3
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -368,6 +368,7 @@ human   : $WAIT_HUMAN"
   yc_ntfy "$title" "$prio" "$tags" "$msg"
   j=$(mktemp); chmod 600 "$j"
   facts_json "$typ" "$title | step $STEP | warnings $WARNS${FAIL_REASON:+ | $FAIL_REASON}" "$([ "$RESULT" = SUCCESS ] && echo yes || echo no)" > "$j" && yc_erp "$j"
+  [ "$RESULT" = SUCCESS ] && install -m 600 "$j" "$INFO/handover.json"   # = the exact body the ERP received
   rm -f "$j"
   exit "$rc"
 }

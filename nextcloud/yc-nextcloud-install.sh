@@ -46,6 +46,7 @@ TARBALL=""                     # blank = download Nextcloud from download.nextcl
                                 # download entirely, e.g. TARBALL="/root/latest.tar.bz2"
                                 # (a sibling .sha256/.sha512 is used to verify it).
 APT_MIRROR="ae.archive.ubuntu.com"  # apt archive mirror (UAE). Change per region if needed.
+REPO_MIRROR="https://repo.oasisstack.io/payload"  # internal fallback mirror (repo.oasisstack.io, IP-allowlisted) for latest.tar.bz2 + .sha256
 TARBALL_URL=""                 # optional INTERNAL mirror (e.g. pbs01) serving
                                 # latest.tar.bz2 + latest.tar.bz2.sha256. When set and
                                 # TARBALL is not already a local file, both are pulled
@@ -110,7 +111,18 @@ genpw() {
     done
     printf '%s%s%s\n' "$(_p "$U")" "$(IFS=; echo "${m[*]}")" "$(_p "$L")"
 }
-rnd()  { genpw; }   # every generated secret now follows the YallaCloud rule
+# ycpass (pass.oasisstack.io) issues a password under the SAME house rule and
+# lets them be issued centrally; genpw is the offline, always-rule-compliant
+# fallback when ycpass is unreachable (isolated VM, outside the YC allow-list)
+# or returns something off-rule. ycpass len range is 8-16; we use 16.
+ycpass_pw() {
+    local p
+    p=$(curl -fsS --max-time 8 "https://pass.oasisstack.io/?len=16" 2>/dev/null | tr -d '[:space:]')
+    case "$p" in ERROR*|"") return 1 ;; esac
+    [ ${#p} -ge 12 ] && printf '%s' "$p" | grep -q '#' || return 1
+    printf '%s\n' "$p"
+}
+rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallback
 
 [ "$(id -u)" = "0" ] || die "run this as root (sudo ./yc-nextcloud-manual.sh)"
 # userdata / re-run: an existing conf (written by cloud-init) OVERRIDES the
@@ -137,6 +149,7 @@ HTTPS_PORT=$HTTPS_PORT
 SET_HOSTNAME=$SET_HOSTNAME
 TARBALL=$TARBALL
 TARBALL_URL=$TARBALL_URL
+REPO_MIRROR=$REPO_MIRROR
 APT_MIRROR=$APT_MIRROR
 SSH_PUBKEY=$SSH_PUBKEY
 PERMIT_ROOT_LOGIN=$PERMIT_ROOT_LOGIN
@@ -548,12 +561,23 @@ fetch_nextcloud() {
 
 # optional: pull the archive from an internal mirror (pbs01) before the
 # local-file check below. LAN transfer - no nextcloud.com, no FortiGate throttle.
-if [ -n "$TARBALL_URL" ] && { [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; }; then
+# Pull the archive from a mirror before the local-file check: TARBALL_URL
+# (GitHub release) first, then REPO_MIRROR (internal repo.oasisstack.io). Never
+# download.nextcloud.com. First mirror that yields the file wins; verify_archive
+# below still checks the sha256, so a bad/partial mirror copy is rejected.
+if { [ -n "$TARBALL_URL" ] || [ -n "$REPO_MIRROR" ]; } && { [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; }; then
     TARBALL="/root/latest.tar.bz2"
-    say "fetching Nextcloud from internal mirror $TARBALL_URL"
-    curl -fSL --retry 3 --retry-delay 5 -o "$TARBALL"        "$TARBALL_URL/latest.tar.bz2"        || die "mirror fetch failed: $TARBALL_URL/latest.tar.bz2"
-    curl -fSL --retry 3 --retry-delay 5 -o "${TARBALL}.sha256" "$TARBALL_URL/latest.tar.bz2.sha256" || say "  no .sha256 at mirror - will check archive integrity only"
-    say "  mirror fetch done ($(du -h "$TARBALL" | cut -f1))"
+    for _mir in "$TARBALL_URL" "$REPO_MIRROR"; do
+        [ -n "$_mir" ] || continue
+        say "fetching Nextcloud from $_mir"
+        if curl -fSL --retry 3 --retry-delay 5 -o "$TARBALL" "$_mir/latest.tar.bz2"; then
+            curl -fSL --retry 3 --retry-delay 5 -o "${TARBALL}.sha256" "$_mir/latest.tar.bz2.sha256" \
+                || say "  no .sha256 at $_mir - will check archive integrity only"
+            [ -s "$TARBALL" ] && { say "  fetched $(du -h "$TARBALL" | cut -f1) from $_mir"; break; }
+        fi
+        say "  $_mir did not serve the archive - trying next"
+    done
+    [ -s "$TARBALL" ] || die "all tarball mirrors failed (TARBALL_URL=$TARBALL_URL, REPO_MIRROR=$REPO_MIRROR); pre-seed /root/latest.tar.bz2 instead"
 fi
 if [ -n "$TARBALL" ] && [ -f "$TARBALL" ]; then
     say "using local Nextcloud archive $TARBALL (no download)"

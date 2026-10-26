@@ -84,6 +84,10 @@ CS_PORTAL_URL=""               # CloudStack portal URL, e.g. https://cloudstack.
 CS_DOMAIN=""                   # CloudStack domain/tenant that owns this VM
 CS_ACCOUNT=""                  # CloudStack account that owns this VM
 CS_INSTANCE=""                 # CloudStack internal instance name (i-2-xxxx); deployer-supplied, else the UUID
+CS_ROOT_PASS=""                # root password SET BY CLOUDSTACK (password-enabled template). The guest
+                                # cannot read it - the password-reset client consumes it at first boot
+                                # and never persists the plaintext - so the deployer/portal passes it here
+                                # (from the deployVirtualMachine API response) to include it in the webhook.
 VM_NAME=""                     # CloudStack VM display name (blank = auto-detect from cloud-init)
 
 # --- integrations (Salt minion + Acronis backup agent) ---
@@ -164,7 +168,7 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 VMID=$(cat /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
 VM_UUID="$VMID"   # CloudStack instance UUID == SMBIOS product_uuid
 # VM name + instance id: deployer vars (VM_NAME) win; else best-effort from cloud-init metadata.
-: "${VM_NAME:=}"; : "${VM_INSTANCE:=}"; : "${CS_INSTANCE:=}"; : "${CS_PORTAL_URL:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"
+: "${VM_NAME:=}"; : "${VM_INSTANCE:=}"; : "${CS_INSTANCE:=}"; : "${CS_PORTAL_URL:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 if command -v cloud-init >/dev/null 2>&1; then
   [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.name 2>/dev/null)
   [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.'local-hostname' 2>/dev/null)
@@ -179,7 +183,7 @@ notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, no
 }
 notify_webhook(){  # $1 type $2 extra - FULL JSON incl. credentials, X-Webhook-Secret
   [ "${NOTIFY_WEBHOOK:-no}" = yes ] && [ -n "${WEBHOOK_URL:-}" ] || return 0
-  curl -fsS --max-time 15 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} -d "{\"type\":\"$1\",\"cloud\":\"cloudstack\",\"product\":\"nextcloud\",\"vmId\":\"${VMID}\",\"smbiosUuid\":\"${VMID}\",\"vmUuid\":\"${VM_UUID:-}\",\"vmName\":\"${VM_NAME:-}\",\"vmInstance\":\"${VM_INSTANCE:-}\",\"csPortalUrl\":\"${CS_PORTAL_URL:-}\",\"csDomain\":\"${CS_DOMAIN:-}\",\"csAccount\":\"${CS_ACCOUNT:-}\",\"hostname\":\"$(hostname)\",\"fqdn\":\"${FQDN}\",\"ip\":\"${NET_IP:-}\",\"publicIp\":\"${PUBLIC_IP:-}\",\"shape\":\"${NET_SHAPE:-}\",\"url\":\"https://${FQDN}${PORTSFX:-}/\",\"ssl\":\"${SSL_STATUS:-}\",\"ncVersion\":\"${NC_VERSION:-}\",\"adminUser\":\"${ADMIN_USER:-}\",\"adminPassword\":\"${ADMIN_PASS:-}\",\"dbName\":\"${DB_NAME:-}\",\"dbUser\":\"${DB_USER:-}\",\"dbPassword\":\"${DB_PASS:-}\",\"redisPassword\":\"${REDIS_PASS:-}\",\"sudoUser\":\"${SUDO_USER_NAME:-}\",\"sshPort\":\"${SSH_PORT:-}\",\"dataPath\":\"${DATA_PATH:-}\",\"extra\":\"$2\",\"utc\":\"$(date -u +%FT%TZ)\"}" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
+  curl -fsS --max-time 15 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} -d "{\"type\":\"$1\",\"cloud\":\"cloudstack\",\"product\":\"nextcloud\",\"vmId\":\"${VMID}\",\"smbiosUuid\":\"${VMID}\",\"vmUuid\":\"${VM_UUID:-}\",\"vmName\":\"${VM_NAME:-}\",\"vmInstance\":\"${VM_INSTANCE:-}\",\"csPortalUrl\":\"${CS_PORTAL_URL:-}\",\"csDomain\":\"${CS_DOMAIN:-}\",\"csAccount\":\"${CS_ACCOUNT:-}\",\"hostname\":\"$(hostname)\",\"fqdn\":\"${FQDN}\",\"ip\":\"${NET_IP:-}\",\"publicIp\":\"${PUBLIC_IP:-}\",\"shape\":\"${NET_SHAPE:-}\",\"url\":\"https://${FQDN}${PORTSFX:-}/\",\"ssl\":\"${SSL_STATUS:-}\",\"ncVersion\":\"${NC_VERSION:-}\",\"adminUser\":\"${ADMIN_USER:-}\",\"adminPassword\":\"${ADMIN_PASS:-}\",\"dbName\":\"${DB_NAME:-}\",\"dbUser\":\"${DB_USER:-}\",\"dbPassword\":\"${DB_PASS:-}\",\"redisPassword\":\"${REDIS_PASS:-}\",\"sudoUser\":\"${SUDO_USER_NAME:-}\",\"sudoPassword\":\"${SUDO_PASS:-}\",\"rootUser\":\"root\",\"rootPassword\":\"${CS_ROOT_PASS:-}\",\"sshPort\":\"${SSH_PORT:-}\",\"dataPath\":\"${DATA_PATH:-}\",\"extra\":\"$2\",\"utc\":\"$(date -u +%FT%TZ)\"}" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
 }
 build_deploy_log(){  # $1 = SUCCESS|FAILED - ONE merged log: installer + cloud-init
   local DPL=/var/log/yc-nextcloud-deploy.log
@@ -225,6 +229,7 @@ CS_PORTAL_URL=$CS_PORTAL_URL
 CS_DOMAIN=$CS_DOMAIN
 CS_ACCOUNT=$CS_ACCOUNT
 CS_INSTANCE=$CS_INSTANCE
+CS_ROOT_PASS="$CS_ROOT_PASS"
 VM_NAME="$VM_NAME"
 JOIN_SALT=$JOIN_SALT
 ACRONIS_TOKEN=$ACRONIS_TOKEN
@@ -1270,6 +1275,8 @@ cat > "$OUT" <<EOF
   "admin_password": "${ADMIN_PASS}",
   "sudo_user": "${SUDO_USER_NAME}",
   "sudo_password": "${SUDO_PASS}",
+  "root_user": "root",
+  "root_password": "${CS_ROOT_PASS:-set by CloudStack (password-enabled template); see the deploy response / portal}",
   "ssh_port": ${SSH_PORT},
   "ssh_mode": "service (ssh.socket masked)",
   "ssh_pubkey_auth": "enabled",

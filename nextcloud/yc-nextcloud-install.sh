@@ -87,6 +87,10 @@ SSH_PORT_OVERRIDE=""            # blank = 3222 if the VM has a public IP, else 2
 GATEWAY_OVERRIDE=""             # blank = auto (tries .1, then .254, then .2).
                                 # set to your firewall's LAN IP, e.g. 172.30.30.1,
                                 # if auto-detect picks the wrong one.
+PUBLIC_IP=""                    # optional: the PUBLIC IP that reaches this VM (the
+                                # firewall's public IP when behind NAT). Used only for
+                                # the sslip.io FQDN fallback and the webhook. Blank =
+                                # auto (the VM's own IP when it is already public).
 # ============================================================================
 #
 #  >>> FIREWALL / NAT CASE (private IP like 172.30.30.3) <
@@ -168,7 +172,7 @@ build_deploy_log(){  # $1 = SUCCESS|FAILED - ONE merged log: installer + cloud-i
   } > "$DPL" 2>/dev/null || true
   chmod 600 "$DPL" 2>/dev/null || true
 }
-case "$FQDN" in cloud.example.com|"") die "edit FQDN in the CONFIG block first";; esac
+case "$FQDN" in cloud.example.com|"") FQDN=""; FQDN_AUTO=yes ;; *) FQDN_AUTO=no ;; esac
 : "${HTTPS_PORT:=443}"           # blank -> standard 443 (nginx listen needs a port)
 : "${PERMIT_ROOT_LOGIN:=yes}"
 : "${SSH_PUBKEY:=}"
@@ -204,6 +208,7 @@ SSH_PUBKEY=$SSH_PUBKEY
 PERMIT_ROOT_LOGIN=$PERMIT_ROOT_LOGIN
 DISABLE_CLOUD_INIT=$DISABLE_CLOUD_INIT
 REBOOT_AFTER=$REBOOT_AFTER
+PUBLIC_IP=$PUBLIC_IP
 EOF
 chmod 600 "$CFG"
 
@@ -317,7 +322,16 @@ EOF
 }
 
 stabilise_network
-PUBLIC_IP=""; [ "${IS_PUBLIC:-0}" = 1 ] && PUBLIC_IP="$NET_IP"
+[ -n "${PUBLIC_IP:-}" ] || { [ "${IS_PUBLIC:-0}" = 1 ] && PUBLIC_IP="$NET_IP"; }
+# FQDN fallback: no domain given -> a working sslip.io name off the reachable IP, so the
+# box always comes up named (and gets a real LE cert when that IP is public). Switch to
+# the paid domain later in one step:  yc-nc-domain <your-domain> --le
+if [ "${FQDN_AUTO:-no}" = yes ]; then
+    _ipn="${PUBLIC_IP:-$NET_IP}"
+    FQDN="$(printf '%s' "$_ipn" | tr '.' '-').sslip.io"
+    sed -i "s|^FQDN=.*|FQDN=$FQDN|" "$CFG" 2>/dev/null || echo "FQDN=$FQDN" >> "$CFG"
+    say "no FQDN given - using sslip.io fallback $FQDN (change later: yc-nc-domain <domain> --le)"
+fi
 notify_ntfy "Nextcloud: creating ${FQDN}" "Deploying on ${NET_IP} (${NET_SHAPE})" default "package,hourglass"
 notify_webhook "vm.deploy.started" "network ${NET_SHAPE}"
 PRIV_IP="$NET_IP"
@@ -467,9 +481,9 @@ cat > /usr/local/bin/yc-nc-domain <<'YCEOF'
 #!/bin/bash
 # yc-nc-domain <new-fqdn> - change the Nextcloud domain end to end
 # (config, nginx server_name, occ trusted_domains + overwrite.cli.url, hostname).
-# Does NOT issue the cert - run 'yc-nc-ssl le' (free) or 'yc-nc-ssl import/from-pfx' (paid) after.
+# Optional 2nd arg --le also issues a free Let's Encrypt cert in the same step.
 set -euo pipefail
-new="${1:?usage: yc-nc-domain <new-fqdn>}"
+new="${1:?usage: yc-nc-domain <new-fqdn> [--le]}"
 CFG=/etc/yallacloud/nextcloud.conf; . "$CFG"; old="$FQDN"
 NCROOT=/var/www/nextcloud; occ(){ sudo -u www-data php "$NCROOT/occ" "$@"; }
 PORTSFX=""; [ -n "${HTTPS_PORT:-}" ] && [ "$HTTPS_PORT" != 443 ] && PORTSFX=":$HTTPS_PORT"
@@ -480,7 +494,9 @@ occ config:system:set trusted_domains 0 --value="$new"
 if [ "${SET_HOSTNAME:-yes}" = yes ]; then hostnamectl set-hostname "$new" 2>/dev/null || true; fi
 nginx -t && systemctl reload nginx
 echo "domain changed: $old -> $new"
-echo "next: yc-nc-ssl le   (free LE)   OR   yc-nc-ssl import <fullchain.pem> <privkey.pem>   (paid)"
+if [ "${2:-}" = "--le" ]; then yc-nc-ssl le; else
+  echo "next: yc-nc-ssl le (free)  OR  yc-nc-ssl import <fullchain.pem> <privkey.pem> (paid)  OR re-run with --le"
+fi
 YCEOF
 chmod 755 /usr/local/bin/yc-nc-domain
 cat > /usr/local/bin/yc-nc-ssl <<'YCEOF'

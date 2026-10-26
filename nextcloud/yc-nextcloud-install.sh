@@ -80,7 +80,7 @@ WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn t
 # CloudStack context for the webhook - the deployer/portal supplies these (the guest
 # cannot know its own tenant/portal); they are reported so the ERP knows exactly where
 # the VM came from. All optional.
-CS_PORTAL_URL=""               # CloudStack portal URL, e.g. https://dxb01.oasisstack.io
+CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"  # CloudStack portal (cloudPortal + cloudVmUrl in the webhook)
 CS_DOMAIN=""                   # CloudStack domain/tenant that owns this VM
 CS_ACCOUNT=""                  # CloudStack account that owns this VM
 CS_INSTANCE=""                 # CloudStack internal instance name (i-2-xxxx); deployer-supplied, else the UUID
@@ -165,25 +165,81 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 [ -f "$CFG" ] && . "$CFG"
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"
-VMID=$(cat /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
-VM_UUID="$VMID"   # CloudStack instance UUID == SMBIOS product_uuid
-# VM name + instance id: deployer vars (VM_NAME) win; else best-effort from cloud-init metadata.
-: "${VM_NAME:=}"; : "${VM_INSTANCE:=}"; : "${CS_INSTANCE:=}"; : "${CS_PORTAL_URL:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
-if command -v cloud-init >/dev/null 2>&1; then
-  [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.name 2>/dev/null)
-  [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.'local-hostname' 2>/dev/null)
-  [ -n "$VM_INSTANCE" ] || VM_INSTANCE=$(cloud-init query ds.meta_data.'instance-id' 2>/dev/null)
-fi
-case "$VM_NAME"     in null|"<no value>"|*[Ee]rror*) VM_NAME="";; esac
-case "$VM_INSTANCE" in null|"<no value>"|*[Ee]rror*) VM_INSTANCE="";; esac
-[ -n "$CS_INSTANCE" ] && VM_INSTANCE="$CS_INSTANCE"   # deployer-supplied libvirt name (i-2-xxxx) wins over the UUID
-notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, no secrets
+VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
+NC_IVER="1.1.7"
+: "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
+: "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
+# --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
+md(){ local k="$1" v s
+  v=$(python3 -c "import json,sys;d=json.load(open('/run/cloud-init/instance-data.json'));print(d.get('ds',{}).get('meta_data',{}).get(sys.argv[1],'') or '')" "$k" 2>/dev/null)
+  if [ -z "$v" ]; then
+    for s in $(grep -hoE 'SERVER_ADDRESS=[0-9.]+' /run/systemd/netif/leases/* 2>/dev/null | cut -d= -f2) $(ip -4 route show default 2>/dev/null | awk '{print $3}'); do
+      v=$(curl -fs --max-time 3 "http://$s/latest/meta-data/$k" 2>/dev/null) && [ -n "$v" ] && break
+    done
+  fi
+  printf '%s' "$v" | tr -d '\r\n'; }
+# tenant = CloudStack domain, from the Salt who-file keyed by sha256 of the SMBIOS UUID / a MAC
+yc_tenant(){ local k w
+  for k in "$VMID" $(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | sort -u); do
+    [ -n "$k" ] || continue
+    w=$(curl -fsS -m 10 "https://repo.oasisstack.io/salt/who/$(printf '%s' "$k" | sha256sum | cut -c1-64)" 2>/dev/null) || continue
+    case "$w" in *tenant=*) printf '%s' "$w" | sed -n 's/^tenant=//p' | tr -d '\r '; return 0;; esac
+  done; return 1; }
+# capture facts once (deployer VM_NAME/CS_INSTANCE/CS_DOMAIN win over metadata)
+VM_NAME="${VM_NAME:-$(md local-hostname)}"; VM_NAME="${VM_NAME:-$(hostname -s)}"
+ZONE=$(md availability-zone); OFFERING=$(md service-offering); CLOUD_ID=$(md cloud-identifier)
+VM_UUID=$(md vm-id); VM_UUID="${VM_UUID:-$(md instance-id)}"; VM_UUID=$(printf '%s' "${VM_UUID:-$VMID}" | tr 'A-Z' 'a-z')
+INSTANCE_ID="${CS_INSTANCE:-$(md instance-id)}"
+if TENANT=$(yc_tenant); then TENANT_SRC="salt-who"; else TENANT="${CS_DOMAIN:-}"; [ -n "$CS_DOMAIN" ] && TENANT_SRC="config" || TENANT_SRC=""; fi
+export VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
+notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
-  curl -fsS --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source}" -d "$2" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
+  curl -fsS --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source}" --data-binary "$2
+host    $(hostname)  ${NET_IP:-}${PUBLIC_IP:+  public ${PUBLIC_IP}}
+vm      ${VM_NAME:--}  uuid ${VM_UUID:--}${ZONE:+  zone ${ZONE}}
+tenant  ${TENANT:-not published yet}  (${TENANT_SRC:--})  ${CLOUDSTACK_URL:-}" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
 }
-notify_webhook(){  # $1 type $2 extra - FULL JSON incl. credentials, X-Webhook-Secret
+notify_webhook(){  # $1 type $2 extra [$3 with-secrets:yes|no] - house YCERP-01 envelope, X-Webhook-Secret
   [ "${NOTIFY_WEBHOOK:-no}" = yes ] && [ -n "${WEBHOOK_URL:-}" ] || return 0
-  curl -fsS --max-time 15 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} -d "{\"type\":\"$1\",\"cloud\":\"cloudstack\",\"product\":\"nextcloud\",\"vmId\":\"${VMID}\",\"smbiosUuid\":\"${VMID}\",\"vmUuid\":\"${VM_UUID:-}\",\"vmName\":\"${VM_NAME:-}\",\"vmInstance\":\"${VM_INSTANCE:-}\",\"csPortalUrl\":\"${CS_PORTAL_URL:-}\",\"csDomain\":\"${CS_DOMAIN:-}\",\"csAccount\":\"${CS_ACCOUNT:-}\",\"hostname\":\"$(hostname)\",\"fqdn\":\"${FQDN}\",\"ip\":\"${NET_IP:-}\",\"publicIp\":\"${PUBLIC_IP:-}\",\"shape\":\"${NET_SHAPE:-}\",\"url\":\"https://${FQDN}${PORTSFX:-}/\",\"ssl\":\"${SSL_STATUS:-}\",\"ncVersion\":\"${NC_VERSION:-}\",\"adminUser\":\"${ADMIN_USER:-}\",\"adminPassword\":\"${ADMIN_PASS:-}\",\"dbName\":\"${DB_NAME:-}\",\"dbUser\":\"${DB_USER:-}\",\"dbPassword\":\"${DB_PASS:-}\",\"redisPassword\":\"${REDIS_PASS:-}\",\"sudoUser\":\"${SUDO_USER_NAME:-}\",\"sudoPassword\":\"${SUDO_PASS:-}\",\"rootUser\":\"root\",\"rootPassword\":\"${CS_ROOT_PASS:-}\",\"sshPort\":\"${SSH_PORT:-}\",\"dataPath\":\"${DATA_PATH:-}\",\"extra\":\"$2\",\"utc\":\"$(date -u +%FT%TZ)\"}" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
+  local j; j=$(mktemp); chmod 600 "$j"
+  WTYPE="$1" WEXTRA="$2" WSEC="${3:-no}" python3 - > "$j" <<'PY'
+import json,os,time,socket
+e=os.environ.get
+def osr():
+    d={}
+    try:
+        for l in open('/etc/os-release'):
+            if '=' in l:
+                k,v=l.rstrip().split('=',1); d[k]=v.strip('"')
+    except OSError: pass
+    return d
+o=osr(); PORTSFX=e("PORTSFX") or ""; CU=e("CLOUDSTACK_URL") or ""; VU=e("VM_UUID") or ""
+d={"type":e("WTYPE"),"extra":e("WEXTRA"),
+ "vmId":e("VMID") or None,"smbiosUuid":e("VMID") or None,"identitySource":"smbios",
+ "vmName":e("VM_NAME") or None,"vmUuid":VU or None,"instanceId":e("INSTANCE_ID") or None,
+ "vmIdMismatch":bool(VU and e("VMID") and VU!=e("VMID")),
+ "hostname":socket.gethostname(),"fqdn":e("FQDN") or None,
+ "ip":e("NET_IP") or None,"publicIp":e("PUBLIC_IP") or None,"shape":e("NET_SHAPE") or None,
+ "zone":e("ZONE") or None,"cloud":"YallaCloud","cloudIdentifier":e("CLOUD_ID") or None,
+ "cloudPortal":CU or None,"cloudVmUrl":(CU+"/#/vm/"+VU) if CU and VU else None,
+ "tenant":e("TENANT") or None,"tenantSource":e("TENANT_SRC") or None,"serviceOffering":e("OFFERING") or None,
+ "os":o.get("PRETTY_NAME","Linux"),"osVersion":o.get("VERSION_ID","")+" / "+os.uname().release,
+ "catalogue":"nextcloud-"+(e("NC_VERSION") or ""),"area":"nextcloud",
+ "installer":"yc-nextcloud-install "+(e("NC_IVER") or ""),
+ "utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+ "app":{"url":"https://%s%s/"%(e("FQDN") or "",PORTSFX),"tls":e("SSL_STATUS") or "",
+   "ncVersion":e("NC_VERSION") or "","sshPort":e("SSH_PORT") or "","dataPath":e("DATA_PATH") or "",
+   "dbName":e("DB_NAME") or ""}}
+if e("WSEC")=="yes":
+  d["credentials"]={"rootUser":"root","rootPassword":e("CS_ROOT_PASS") or "",
+   "adminUser":e("ADMIN_USER") or "","adminPassword":e("ADMIN_PASS") or "",
+   "dbUser":e("DB_USER") or "","dbPassword":e("DB_PASS") or "",
+   "redisPassword":e("REDIS_PASS") or "",
+   "sudoUser":e("SUDO_USER_NAME") or "","sudoPassword":e("SUDO_PASS") or ""}
+print(json.dumps(d))
+PY
+  curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} --data-binary @"$j" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
+  rm -f "$j"
 }
 build_deploy_log(){  # $1 = SUCCESS|FAILED - ONE merged log: installer + cloud-init
   local DPL=/var/log/yc-nextcloud-deploy.log
@@ -225,7 +281,7 @@ NTFY_TOPIC=$NTFY_TOPIC
 NOTIFY_WEBHOOK=$NOTIFY_WEBHOOK
 WEBHOOK_URL=$WEBHOOK_URL
 WEBHOOK_SECRET=$WEBHOOK_SECRET
-CS_PORTAL_URL=$CS_PORTAL_URL
+CLOUDSTACK_URL=$CLOUDSTACK_URL
 CS_DOMAIN=$CS_DOMAIN
 CS_ACCOUNT=$CS_ACCOUNT
 CS_INSTANCE=$CS_INSTANCE
@@ -1191,9 +1247,11 @@ if [ "${JOIN_SALT:-yes}" = yes ]; then
       say "  salt: joined (the master assigns the minion id: <domain>-<vmname>)"
     else
       say "  salt: join.sh failed (repo.oasisstack.io unreachable here?) - skipped, join later"
+      notify_webhook "vm.salt.failed" "salt join.sh failed (apt/mirror); 15-min retry cron set" no
     fi
   else
     say "  salt: master salt.oasisstack.io:4506 unreachable - skipping join (re-run join.sh when the path is open)"
+    notify_webhook "vm.salt.failed" "salt master salt.oasisstack.io:4506 unreachable" no
   fi
 else
   say "salt join disabled (JOIN_SALT=no)"
@@ -1339,7 +1397,7 @@ fi
 say "all services healthy, all ports listening"
 NC_VERSION=$(sudo -u www-data php /var/www/nextcloud/occ status 2>/dev/null | awk -F': ' '/versionstring/{print $2}')
 notify_ntfy "Nextcloud: finished ${FQDN}" "READY https://${FQDN}${PORTSFX}/  ip ${NET_IP}  ssl ${SSL_STATUS}  nc ${NC_VERSION}  ssh ${SSH_PORT}" default "white_check_mark,rocket"
-notify_webhook "vm.deploy.completed" "install ok"
+notify_webhook "vm.deploy.completed" "install ok" yes
 build_deploy_log SUCCESS
 say "deploy log: /var/log/yc-nextcloud-deploy.log (installer + cloud-init merged)"
 

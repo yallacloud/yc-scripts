@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.2  (2026-10-26 16:30 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.3  (2026-10-26 19:35 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -33,7 +33,7 @@ PG_VERSION="18"              # PGDG major 16-19
 PUBLIC_IP=""                 # NAT case: public IP forwarded to this VM (blank = auto)
 GATEWAY=""                   # private VM behind a firewall: its LAN IP (blank = auto: .1/.254/.2)
 SSH_PORT=""                  # blank = 3222 on a public IP, 22 on private
-SSH_PUBKEYS="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yallacloud-admin"   # root authorized_keys: OpenSSH public keys, one per line (blank = none)
+SSH_PUBKEYS="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== guest"   # root authorized_keys: OpenSSH public keys, one per line (blank = none)
 # -- 4. OS
 TZ_SET="Asia/Dubai"
 LOCALE_SET="en_US.UTF-8"
@@ -52,6 +52,8 @@ ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""            # X-Webhook-Secret - REQUIRED by the ERP; paste at deploy time
 ERP_WEBHOOK_TOKEN=""             # optional Authorization: Bearer <jwt>
 WEBHOOK_SEND_SECRETS="yes"       # put the Odoo/DB passwords in the webhook fields (never in ntfy)
+CLOUDSTACK_URL="http://10.15.0.100:8080/client"   # CloudStack portal this VM comes from (sent as cloudstackUrl)
+CS_TENANT=""                     # CloudStack domain/tenant; blank = auto from the Salt inventory (ROOT = admin)
 # -- 7. add-ons, run in the background after the deploy (never block or fail it)
 ENABLE_SALT="yes"                # join the YallaCloud Salt master (zero-input, STACK4-54)
 SALT_JOIN_URL="https://repo.oasisstack.io/salt/join.sh"
@@ -66,7 +68,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.2
+VER=1.4.3
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -154,6 +156,8 @@ fi
 _k=""; while IFS= read -r l; do l=$(printf '%s' "$l" | tr -d '\r'); [ -z "$l" ] && continue
   if [[ "$l" =~ ^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp(256|384|521)|sk-[a-z0-9@.-]+)\ [A-Za-z0-9+/]+=*(\ [^[:cntrl:]]*)?$ ]]; then _k+="$l"$'\n'; else warn "SSH_PUBKEYS: skipped a line that is not an OpenSSH public key (${l:0:30}...)"; fi
 done <<< "$SSH_PUBKEYS"; SSH_PUBKEYS=${_k%$'\n'}
+[[ "$CLOUDSTACK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "CLOUDSTACK_URL '$CLOUDSTACK_URL' invalid - default"; CLOUDSTACK_URL=http://10.15.0.100:8080/client; }
+[ -z "$CS_TENANT" ] || [[ "$CS_TENANT" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { warn "CS_TENANT '$CS_TENANT' invalid - auto"; CS_TENANT=""; }
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 case "$DISABLE_CLOUD_INIT" in yes|no) ;; *) DISABLE_CLOUD_INIT=yes;; esac
 [ -z "$GATEWAY" ] || ip4 "$GATEWAY" || { warn "GATEWAY '$GATEWAY' invalid - auto"; GATEWAY=""; }
@@ -192,7 +196,7 @@ say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=
 umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" ACRONIS_TOKEN "$ACRONIS_TOKEN" > "$NOTIFY_ENV"; umask 022
 cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 #!/usr/bin/env python3
-# yc-notify v1.0.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
+# yc-notify v1.1.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
 # (other team, yallacloud01, contract YCERP-01 - NOT ychook). Same event shape as the Windows
 # C-Scripts payload so the ERP matches it by vmId = SMBIOS UUID.
 #   yc-notify -t vm.deploy.completed -T "OK BUILD odoo combined" -p 3 -g white_check_mark,odoo \
@@ -204,7 +208,7 @@ cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 # Settings: /etc/yallacloud/odoo.conf.env (switches) + notify.env (secrets, root 600). Failed webhook posts wait in
 # /var/lib/yallacloud/notify-queue and go first on the next call (event.delivery.queued).
 # Log: /var/log/yc-notify.log. Best effort: always exits 0 unless the arguments are wrong.
-import argparse, datetime, glob, json, os, shlex, socket, ssl, subprocess, sys, time, urllib.request
+import argparse, datetime, glob, hashlib, json, os, shlex, socket, ssl, subprocess, sys, time, urllib.request
 
 CONF = '/etc/yallacloud/notify.env'          # secrets only: ERP_WEBHOOK_SECRET, ERP_WEBHOOK_TOKEN, NTFY_TOKEN
 MAIN = '/etc/yallacloud/odoo.conf.env'       # switches + URLs (ENABLE_NTFY, NTFY_TOPIC, ...)
@@ -250,6 +254,30 @@ def sh(cmd):
         return ''
 
 
+def tenant(f):
+    """CloudStack DOMAIN (ROOT = admin) from the Salt inventory who-file, keyed by sha256 of the
+    SMBIOS UUID or a MAC; cached in vm-facts.env once found (the master publishes every 5 min)."""
+    if f.get('TENANT'):
+        return f['TENANT'], f.get('TENANT_SRC', 'config')
+    keys = [f.get('SMBIOS_UUID', '')] + sh("cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | sort -u").split()
+    for k in [x for x in keys if x]:
+        try:
+            u = 'https://repo.oasisstack.io/salt/who/' + hashlib.sha256(k.lower().encode()).hexdigest()
+            with urllib.request.urlopen(u, timeout=8) as r:
+                for line in r.read(4096).decode('utf-8', 'replace').splitlines():
+                    if line.startswith('tenant='):
+                        t = line[7:].strip()
+                        try:
+                            with open(FACTS, 'a', encoding='utf-8') as fh:
+                                fh.write('TENANT=%s\nTENANT_SRC=salt-who\n' % shlex.quote(t))
+                        except OSError:
+                            pass
+                        return t, 'salt-who'
+        except Exception:
+            continue
+    return '', ''
+
+
 def facts():
     f = envfile(FACTS)
     try:
@@ -261,6 +289,8 @@ def facts():
     st = os.statvfs('/')
     now = datetime.datetime.now().astimezone()
     tz = sh('timedatectl show -p Timezone --value') or ''
+    f.setdefault('SMBIOS_UUID', uuid)
+    ten, tsrc = tenant(f)
     return {
         'vmId': uuid, 'smbiosUuid': uuid, 'hostname': socket.gethostname(),
         'identitySource': 'smbios', 'cloud': CLOUD,
@@ -268,6 +298,11 @@ def facts():
         'vmIdMismatch': bool(f.get('MD_VMID')) and f.get('MD_VMID', '').lower() != uuid,
         'routerVmId': f.get('MD_VMID', '') if f.get('MD_VMID', '').lower() != uuid else '',
         'vmName': f.get('MD_NAME', ''),
+        'vmUuid': (f.get('MD_VMID') or f.get('MD_INSTANCE') or uuid).lower(),
+        'instanceId': f.get('MD_INSTANCE', ''),
+        'tenant': ten or None, 'tenantSource': tsrc or None,
+        'serviceOffering': f.get('MD_OFFERING', ''),
+        'cloudstackUrl': f.get('CS_URL', ''),
         'ip': ip, 'publicIp': f.get('PUBLIC', ''),
         'utc': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'lastUpdated': now.strftime('%Y-%m-%d %H:%M:%S %z') + (' ' + tz.split('/')[-1] if tz else ''),
@@ -302,7 +337,8 @@ def send_ntfy(c, a, fx):
     lines += ['host    %s  %s%s' % (fx['hostname'], fx['ip'], ('  public ' + fx['publicIp']) if fx['publicIp'] else ''),
               'os      %s' % fx['os'],
               'time    %s  (%s)' % (fx['lastUpdated'], fx['utc']),
-              'vm      %s%s' % (fx['vmName'] or '-', ('  zone ' + fx['zone']) if fx['zone'] else ''),
+              'vm      %s  uuid %s%s' % (fx['vmName'] or '-', fx['vmUuid'] or '-', ('  zone ' + fx['zone']) if fx['zone'] else ''),
+              'tenant  %s  (%s)  %s' % (fx['tenant'] or 'not published yet', fx['tenantSource'] or '-', fx['cloudstackUrl'] or ''),
               'by      yc-notify / %s  log /var/log/yc-odoo-deploy.log' % (fx['payload'] or '-')]
     h = {'Title': ascii_hdr(a.title + ' - ' + fx['hostname']), 'Priority': str(a.priority),
          'Tags': ascii_hdr(a.tags or 'yallacloud'), 'Content-Type': 'text/plain; charset=utf-8'}
@@ -413,7 +449,7 @@ chmod 755 /usr/local/sbin/yc-notify
 save_cfg(){   # effective answers, no secrets (those live in secrets.env / notify.env)
   local v; umask 077
   for v in ROLE DOMAIN LE_EMAIL DB_HOST APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEYS TZ_SET LOCALE_SET APT_MIRRORS \
-           BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL WEBHOOK_SEND_SECRETS \
+           BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT \
            ENABLE_SALT SALT_JOIN_URL ENABLE_ACRONIS ACRONIS_REGION ACRONIS_SETUP_URL \
            PASS_URL DISABLE_CLOUD_INIT ODOO_DEB_URL REPO_URL; do printf '%s=%q\n' "$v" "${!v}"; done > "$CFG"
   umask 022; }
@@ -519,7 +555,8 @@ timedatectl set-timezone "$TZ_SET" 2>/dev/null || true   # before START, so its 
 PUB_URL_IP=""; is_priv "$URL_IP" || PUB_URL_IP=$URL_IP
 { printf '%s=%q\n' SMBIOS_UUID "$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)" BIND_IP "$BIND_IP" PUBLIC "$PUB_URL_IP" \
     MD_NAME "$(md local-hostname)" MD_VMID "$(md vm-id)" MD_INSTANCE "$(md instance-id)" MD_ZONE "$(md availability-zone)" \
-    MD_OFFERING "$(md service-offering)" INSTALLER_VERSION "$VER"; } > /etc/yallacloud/vm-facts.env
+    MD_OFFERING "$(md service-offering)" INSTALLER_VERSION "$VER" CS_URL "$CLOUDSTACK_URL"
+  [ -n "$CS_TENANT" ] && printf '%s=%q\n' TENANT "$CS_TENANT" TENANT_SRC config; } > /etc/yallacloud/vm-facts.env
 N -t vm.deploy.started -T "START BUILD odoo $ROLE" -p 2 -g hourglass_flowing_sand,odoo \
   -l "role    $ROLE  ($([ "$ROLE" = combined ] && echo 'DB + Odoo' || { [ "$ROLE" = db ] && echo 'PostgreSQL only'; } || echo "Odoo, DB on $DB_HOST"))" \
   -l "ip      $BIND_IP  url ip $URL_IP" -l "domain  ${DOMAIN:-<sslip / ip>}" -l "pg      $PG_VERSION   tz $TZ_SET   ssh $SSH_PORT" \

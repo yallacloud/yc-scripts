@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.0  (2026-10-26 17:00 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.1  (2026-10-26 16:30 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -37,6 +37,7 @@ BINLOG_DAYS="7"
 PUBLIC_IP=""                # NAT / port-forward: the public IP clients use (blank = auto)
 GATEWAY=""                  # private VM behind a firewall: firewall LAN IP (blank = auto .1/.254/.2)
 SSH_PORT=""                 # blank = 3222 on a public IP, 22 on a private IP
+SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yallacloud-ops"   # root authorized_keys (one OpenSSH line, blank = none)
 TZ_SET="Asia/Dubai"
 LOCALE_SET="en_US.UTF-8"
 SALT_JOIN="yes"             # join salt.oasisstack.io (zero-input join.sh)
@@ -52,8 +53,8 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.0
-KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
+VER=1.0.1
+KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
 INFO=/root/yc-db
@@ -458,6 +459,17 @@ SSHD=/etc/ssh/sshd_config.d/00-yallacloud.conf
 printf 'Port %s\nPermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nUsePAM yes\n' "$SSH_PORT" > "$SSHD"
 rm -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
 [ -f /root/.ssh/authorized_keys ] && sed -i -E 's/^.*(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9-]+@openssh\.com) /\1 /' /root/.ssh/authorized_keys
+SSH_PUBKEY=$(printf '%s' "$SSH_PUBKEY" | tr -d '\r\n')
+if [ -n "$SSH_PUBKEY" ]; then
+  kf=$(mktemp); printf '%s\n' "$SSH_PUBKEY" > "$kf"
+  SSH_KEY_FP=$(ssh-keygen -lf "$kf" 2>/dev/null | awk '{print $2" "$NF}'); rm -f "$kf"
+  [ -n "$SSH_KEY_FP" ] || { warn "SSH_PUBKEY is not a valid OpenSSH public key line - not installed"; SSH_PUBKEY=""; }
+fi
+if [ -n "$SSH_PUBKEY" ]; then
+  install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+  grep -qF "$(echo "$SSH_PUBKEY" | awk '{print $2}')" /root/.ssh/authorized_keys || echo "$SSH_PUBKEY" >> /root/.ssh/authorized_keys
+  restorecon -R /root/.ssh 2>/dev/null; say "ssh key installed for root: $SSH_KEY_FP"
+fi
 printf 'disable_root: false\nssh_pwauth: true\n' > /etc/cloud/cloud.cfg.d/99-yallacloud.cfg 2>/dev/null || true
 [ "$OSF" = el ] && [ "$SSH_PORT" != 22 ] && { semanage port -a -t ssh_port_t -p tcp "$SSH_PORT" 2>/dev/null || semanage port -m -t ssh_port_t -p tcp "$SSH_PORT" 2>/dev/null || true; }
 install -d -m 755 /run/sshd
@@ -778,7 +790,7 @@ cat <<EOF
 note        : '#' in a password is written %23 inside a URI.$([ "$ENGINE" = mysql ] && echo " Old clients without TLS need allowPublicKeyRetrieval=true (caching_sha2_password).")
 
 -- server ----------------------------------------------------------------------
-ssh         : port $SSH_PORT, root + password (CloudStack password)
+ssh         : port $SSH_PORT, root + password (CloudStack password)${SSH_KEY_FP:+ + key $SSH_KEY_FP}
 datadir     : $DATADIR on $(findmnt -no SOURCE --target $DATADIR)
 backups     : $RETENTION   (yallacloud backup)
 binlog      : $BINLOG $([ "$BINLOG" = yes ] && echo "(${BINLOG_DAYS} days)")

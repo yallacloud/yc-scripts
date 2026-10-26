@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.6  (2026-10-26 20:45 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.8  (2026-10-26 21:20 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -54,7 +54,7 @@ ERP_WEBHOOK_TOKEN=""             # optional Authorization: Bearer <jwt>
 WEBHOOK_SEND_SECRETS="yes"       # put the Odoo/DB passwords in the webhook fields (never in ntfy)
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal this VM comes from (sent as cloudstackUrl)
 CS_TENANT=""                     # CloudStack domain/tenant; blank = auto from the Salt inventory (ROOT = admin)
-ROOT_PW_FROM_CLOUDSTACK="yes"    # root = the password CloudStack shows after deploy (the template's linked cloud-config overrides it)
+ROOT_PW_FROM_CLOUDSTACK="yes"    # root = the CloudStack password (ConfigDrive on a private IP, VR on a public IP), else generated; chadmin gets its own
 # -- 7. add-ons, run in the background after the deploy (never block or fail it)
 ENABLE_SALT="yes"                # join the YallaCloud Salt master (zero-input, STACK4-54)
 SALT_JOIN_URL="https://repo.oasisstack.io/salt/join.sh"
@@ -69,7 +69,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.6
+VER=1.4.8
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -554,6 +554,22 @@ genpw(){
   pw_ok "$p" || return 1
   printf '%s\n' "$p"
 }
+# CloudStack VM password (password-enabled template). PRIVATE IP = isolated network without a VR:
+# CloudStack writes it to the ConfigDrive (CD labelled config-2, cloudstack/password/vm_password.txt).
+# PUBLIC IP = VR network: the VR password server answers ONCE and cloud-init has already taken it; it
+# keeps it in combined-cloud-config.json for this boot only (/run is tmpfs). Sets CS_PASS + CS_PASS_SRC.
+cs_vm_password(){ local d m; CS_PASS=""; CS_PASS_SRC=""
+  d=$(blkid -L config-2 2>/dev/null || true)
+  if [ -n "$d" ] && m=$(mktemp -d 2>/dev/null); then
+    if mount -o ro "$d" "$m" 2>/dev/null; then
+      CS_PASS=$(tr -d '\r\n' < "$m/cloudstack/password/vm_password.txt" 2>/dev/null || true); umount "$m" 2>/dev/null || true
+    fi; rmdir "$m" 2>/dev/null || true
+  fi
+  case "$CS_PASS" in saved_password|bad_request) CS_PASS="";; esac
+  [ -n "$CS_PASS" ] && { CS_PASS_SRC=configdrive; return 0; }
+  CS_PASS=$(python3 -c "import json;print(json.load(open('/run/cloud-init/combined-cloud-config.json')).get('password') or '')" 2>/dev/null || true)
+  [ -n "$CS_PASS" ] && CS_PASS_SRC=virtual-router
+  return 0; }
 LIBEOF
 . "$LIB"
 
@@ -690,20 +706,27 @@ systemctl enable --now fail2ban >/dev/null 2>&1; systemctl restart fail2ban
 
 # == 4. secrets
 step SECRETS
-# root password: a password-enabled template gets it from the CloudStack password server, but the
-# template's linked cloud-config (chpasswd users: chadmin/ubuntu/root) runs after and replaces it.
-# cloud-init keeps the CloudStack value in combined-cloud-config.json (root only): put it back on root.
-VM_PASS=""
+# root password: the template has none of its own and its linked cloud-config (chpasswd chadmin/ubuntu/
+# root) replaces CloudStack's. So root = the CloudStack password (cs_vm_password: ConfigDrive on a private
+# IP, VR on a public IP), else the one of an earlier run, else generated. chadmin gets its own (owner
+# 2026-10-26). Both go to the webhook credentials (WEBHOOK_SEND_SECRETS) and the handover file.
+VM_PASS=""; VM_PASS_SRC=""; SUDO_USER_NAME=chadmin; SUDO_PASS=""
+[ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"     # passwords of an earlier run are kept
 if [ "$ROOT_PW_FROM_CLOUDSTACK" = yes ]; then
-  VM_PASS=$(python3 -c "import json;print(json.load(open('/run/cloud-init/combined-cloud-config.json')).get('password') or '')" 2>/dev/null)
-  if [ -n "$VM_PASS" ]; then printf 'root:%s\n' "$VM_PASS" | chpasswd && say "root password = the CloudStack deploy password" || warn "could not set the CloudStack root password"
-  else say "no CloudStack password for this VM (template not password-enabled, or VM reset) - root password unchanged"; fi
+  cs_vm_password
+  if [ -n "$CS_PASS" ]; then VM_PASS=$CS_PASS; VM_PASS_SRC=$CS_PASS_SRC
+  elif [ -n "$VM_PASS" ]; then VM_PASS_SRC=earlier-run
+  else VM_PASS=$(genpw) || die "password generation failed (local and pass.oasisstack.io)"; VM_PASS_SRC=generated; fi
+  printf 'root:%s\n' "$VM_PASS" | chpasswd && say "root password set (source: $VM_PASS_SRC)" || warn "could not set the root password"
+  if id "$SUDO_USER_NAME" >/dev/null 2>&1; then
+    : "${SUDO_PASS:=$(genpw)}"
+    [ -n "$SUDO_PASS" ] && printf '%s:%s\n' "$SUDO_USER_NAME" "$SUDO_PASS" | chpasswd && say "$SUDO_USER_NAME password set (own, generated)" || warn "could not set the $SUDO_USER_NAME password"
+  else SUDO_PASS=""; fi
 fi
-[ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"
 : "${DB_PASS:=$(genpw)}"; : "${MASTER_PASS:=$(genpw)}"; : "${ADMIN_PASS:=$(genpw)}"
 for v in DB_PASS MASTER_PASS ADMIN_PASS; do [ -n "${!v}" ] || die "password generation failed (local and pass.oasisstack.io)"; done
 umask 077
-printf "DB_PASS='%s'\nMASTER_PASS='%s'\nADMIN_PASS='%s'\n" "$DB_PASS" "$MASTER_PASS" "$ADMIN_PASS" > "$INFO/secrets.env"
+printf "DB_PASS='%s'\nMASTER_PASS='%s'\nADMIN_PASS='%s'\nVM_PASS='%s'\nSUDO_PASS='%s'\n" "$DB_PASS" "$MASTER_PASS" "$ADMIN_PASS" "$VM_PASS" "$SUDO_PASS" > "$INFO/secrets.env"
 umask 022
 
 # == 5. PostgreSQL (db / combined)
@@ -1278,7 +1301,8 @@ umask 077
 {
 echo "YallaCloud Odoo 20 - $(hostname) - $(date '+%F %T %Z')"
 echo "role        : $ROLE"
-echo "ssh         : root@${URL_IP} -p $SSH_PORT  password: ${VM_PASS:-<template / unchanged>}  (key: SSH_PUBKEYS)"
+echo "ssh         : root@${URL_IP} -p $SSH_PORT  password: ${VM_PASS:-<template / unchanged>}  (${VM_PASS_SRC:-unchanged}; key: SSH_PUBKEYS)"
+[ -n "$SUDO_PASS" ] && echo "sudo user   : $SUDO_USER_NAME / $SUDO_PASS"
 if [ "$ROLE" != db ]; then
 echo "odoo url    : $URL"
 echo "odoo login  : admin / $ADMIN_PASS        (database: ${ODOO_DB:-none})"
@@ -1422,6 +1446,7 @@ ADD_SALT=off; [ "$ENABLE_SALT" = yes ] && ADD_SALT="joining (own message follows
 ADD_ACR=off; [ "$ENABLE_ACRONIS" = yes ] && { [ -n "$ACRONIS_TOKEN" ] && ADD_ACR="installing $ACRONIS_REGION (own message follows)" || ADD_ACR="skipped - no token"; }
 # credentials section of the webhook: vm / odoo / database (only with WEBHOOK_SEND_SECRETS=yes)
 SEC=(-s vm.user=root -s vm.password="${VM_PASS:-}" -s vm.sshHost="$URL_IP" -s vm.sshPort="$SSH_PORT")
+[ -n "$SUDO_PASS" ] && SEC+=(-s vm.sudoUser="$SUDO_USER_NAME" -s vm.sudoPassword="$SUDO_PASS")
 [ "$ROLE" != db ] && SEC+=(-s odoo.url="$URL" -s odoo.adminUser=admin -s odoo.adminPassword="$ADMIN_PASS" -s odoo.masterPassword="$MASTER_PASS")
 SEC+=(-s database.engine=postgresql -s database.version="$PG_VERSION" -s database.host="${DB_HOST:-${PRIV_NIC:-$BIND_IP}}" -s database.port=5432
       -s database.name="${ODOO_DB:-}" -s database.user=odoo -s database.password="$DB_PASS")
@@ -1431,7 +1456,7 @@ N -t vm.deploy.completed -T "OK BUILD odoo $ROLE${WARNS:+ (warnings)}" -p "$PRI"
   -l "backup  $BACKUP_DIR daily $BACKUP_TIME keep ${BACKUP_KEEP_DAYS}d" ${WARNS:+-l "warn    $WARNS"} \
   -l "addons  salt ${ADD_SALT}  acronis ${ADD_ACR}" -l "creds   /root/odoo-info/handover.txt (yallacloud --secrets)" \
   -f area=odoo -f role="$ROLE" -f status=completed -f url="$URL" -f domain="$DOMAIN" -f certificate="$CERT" -f certificateExpires="$CERT_EXP" -f odooVersion="$(dpkg-query -W -f='${Version}' odoo 2>/dev/null)" \
-  -f pgVersion="$PG_VERSION" -f sshPort="$SSH_PORT" -f backupDir="$BACKUP_DIR" -f backupKeepDays="$BACKUP_KEEP_DAYS" -f warnings="$WARNS" -f installer="$VER" -f salt="$ADD_SALT" -f acronis="$ADD_ACR" "${SEC[@]}"
+  -f pgVersion="$PG_VERSION" -f sshPort="$SSH_PORT" -f backupDir="$BACKUP_DIR" -f backupKeepDays="$BACKUP_KEEP_DAYS" -f warnings="$WARNS" -f installer="$VER" -f vmPasswordSource="${VM_PASS_SRC:-}" -f salt="$ADD_SALT" -f acronis="$ADD_ACR" "${SEC[@]}"
 # add-ons in the background: they report on their own (vm.salt.* / vm.acronis.*) into the same log
 for a in salt acronis; do
   systemd-run --quiet --collect --unit "yc-addon-$a-$(date +%s)" /usr/local/sbin/yc-addons "$a" || warn "could not start add-on $a (run: yc-addons $a)"

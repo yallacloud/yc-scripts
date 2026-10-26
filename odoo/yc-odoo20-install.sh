@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-odoo20-install.sh  v1.2.0  (2026-10-26 15:05 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.3.0  (2026-10-26 15:30 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -33,6 +33,7 @@ DISABLE_CLOUD_INIT="yes"     # stops CloudStack re-running cloud-init every boot
 PUBLIC_IP=""                 # NAT case: public IP forwarded to this VM (blank = auto)
 GATEWAY=""                   # private VM behind a firewall: its LAN IP (blank = auto: .1/.254/.2)
 ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-latest/odoo_20.0.latest_all.deb"
+REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================
 
 CFG=/etc/yallacloud/odoo.conf.env
@@ -61,7 +62,7 @@ if [ -n "$DOMAIN" ]; then
   elif ! fqdn "$DOMAIN"; then warn "DOMAIN '$DOMAIN' is not a valid name - using sslip.io"; DOMAIN=""; fi
 fi
 [ -z "$LE_EMAIL" ] || [[ "$LE_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$ ]] || { warn "LE_EMAIL '$LE_EMAIL' invalid - no email"; LE_EMAIL=""; }
-pw_safe(){ [[ "$1" =~ ^[A-Za-z0-9#@%+=._,:-]{8,64}$ ]]; }   # no quotes, spaces, \ $ ` (SQL + config safe)
+pw_safe(){ [[ "$1" =~ ^[A-Za-z0-9#]{8,64}$ ]]; }   # house rule: # is the only special character
 if [ "$ROLE" = app ]; then
   [ -n "$DB_HOST" ] || die "ROLE=app needs DB_HOST (private IP of the db VM, from its handover.txt)"
   ip4 "$DB_HOST" || fqdn "$DB_HOST" || die "DB_HOST='$DB_HOST' is not an IPv4 address or host name"
@@ -69,7 +70,7 @@ if [ "$ROLE" = app ]; then
 else
   [ -n "$DB_HOST" ] && { warn "DB_HOST ignored on ROLE=$ROLE (local PostgreSQL)"; DB_HOST=""; }
 fi
-[ -z "$DB_PASS" ] || pw_safe "$DB_PASS" || die "DB_PASS: 8-64 chars of A-Z a-z 0-9 # @ % + = . _ , : - only"
+[ -z "$DB_PASS" ] || pw_safe "$DB_PASS" || die "DB_PASS: 8-64 chars of A-Z a-z 0-9 and # only (# is the only special character allowed)"
 if [ -n "$APP_ALLOW" ]; then
   ip4 "$APP_ALLOW" && APP_ALLOW="$APP_ALLOW/32"
   aa_ip=${APP_ALLOW%/*}; aa_m=${APP_ALLOW##*/}
@@ -90,6 +91,7 @@ case "$DISABLE_CLOUD_INIT" in yes|no) ;; *) DISABLE_CLOUD_INIT=yes;; esac
 if [ -n "$PUBLIC_IP" ]; then
   ip4 "$PUBLIC_IP" || { warn "PUBLIC_IP '$PUBLIC_IP' invalid - auto"; PUBLIC_IP=""; }
 fi
+[[ "$REPO_URL" =~ ^https?:// ]] || REPO_URL="https://repo.oasisstack.io/odoo"
 [[ "$ODOO_DEB_URL" =~ ^https?:// ]] || ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-latest/odoo_20.0.latest_all.deb"
 say "config: ROLE=$ROLE DOMAIN=${DOMAIN:-<sslip>} DB_HOST=${DB_HOST:--} DB_PASS=$([ -n "$DB_PASS" ] && echo set || echo generate) APP_ALLOW=${APP_ALLOW:-auto} ODOO_DB=${ODOO_DB:-none} PG=$PG_VERSION TZ=$TZ_SET SSH=${SSH_PORT:-auto} PUBLIC_IP=${PUBLIC_IP:-auto} GATEWAY=${GATEWAY:-auto}"
 
@@ -122,8 +124,17 @@ detect_ips(){
   [ -n "${PUBLIC_IP:-}" ] && URL_IP=$PUBLIC_IP   # NAT/firewall public IP, set by hand
   PRIV_CIDR=$(ip -o -4 route show scope link | awk -v s="$PRIV_NIC" '$0 ~ "src "s {print $1; exit}')
 }
+# fetch URL OUT [nosha]: download, then check against URL.sha256 (unless nosha). 0 = file OK.
+fetch(){
+  rm -f "$2" "$2.sha256"
+  curl -fsSL --retry 3 --connect-timeout 20 --speed-limit 10240 --speed-time 120 -o "$2" "$1" || { echo "fetch failed: $1" >&2; return 1; }
+  [ "${3:-}" = nosha ] && return 0
+  curl -fsSL --retry 3 --connect-timeout 20 -o "$2.sha256" "$1.sha256" || { echo "no sha256: $1" >&2; return 1; }
+  [ "$(sha256sum "$2" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$2.sha256")" ] || { echo "sha256 mismatch: $1" >&2; return 1; }
+}
 # YallaCloud password rule (STACK4-52): 8-16 chars, first A-Z, last a-z, >=2 '#'
-# (only symbol), >=1 digit, no O 0 o I l 1. pass.oasisstack.io first, local fallback.
+# (the ONLY special character), >=1 digit, both cases, no O 0 o I l 1. Local CSPRNG generator
+# first (same code as the Nextcloud installer); pass.oasisstack.io is the fallback; both checked.
 genpw_local(){
   local U="ABCDEFGHJKLMNPQRSTUVWXYZ" L="abcdefghijkmnpqrstuvwxyz" D="23456789" len=${1:-16}
   local A="${U}${L}${D}#" i j t n
@@ -161,8 +172,9 @@ fix_gateway(){   # $1 = forced gateway (GATEWAY), blank = auto
   echo "gateway: nothing answers on ${cands// /, } for $dev ($ip)"; return 1
 }
 genpw(){
-  local p; p=$(curl -fs --max-time 8 "${PASS_URL:-https://pass.oasisstack.io/?len=16}" 2>/dev/null | tr -d '\r\n')
-  pw_ok "$p" || p=$(genpw_local 16)
+  local p; p=$(genpw_local 16)
+  pw_ok "$p" || p=$(curl -fs --max-time 8 "${PASS_URL:-https://pass.oasisstack.io/?len=16}" 2>/dev/null | tr -d '\r\n')
+  pw_ok "$p" || return 1
   printf '%s\n' "$p"
 }
 LIBEOF
@@ -256,6 +268,7 @@ systemctl enable --now fail2ban >/dev/null 2>&1; systemctl restart fail2ban
 # == 4. secrets
 [ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"
 : "${DB_PASS:=$(genpw)}"; : "${MASTER_PASS:=$(genpw)}"; : "${ADMIN_PASS:=$(genpw)}"
+for v in DB_PASS MASTER_PASS ADMIN_PASS; do [ -n "${!v}" ] || die "password generation failed (local and pass.oasisstack.io)"; done
 umask 077
 printf "DB_PASS='%s'\nMASTER_PASS='%s'\nADMIN_PASS='%s'\n" "$DB_PASS" "$MASTER_PASS" "$ADMIN_PASS" > "$INFO/secrets.env"
 umask 022
@@ -324,20 +337,19 @@ ufw --force enable >/dev/null
 odoo_install(){
   # wkhtmltopdf: patched-Qt build (Ubuntu's own breaks PDF header/footer). Jammy build runs on noble.
   if ! wkhtmltopdf -V 2>/dev/null | grep -q 0.12.6; then
-    curl -fsSL --retry 3 -o /tmp/wkhtmltox.deb https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb || die "wkhtmltox download failed"
+    fetch https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb /tmp/wkhtmltox.deb nosha \
+      || fetch "$REPO_URL/wkhtmltox_0.12.6.1-3.jammy_amd64.deb" /tmp/wkhtmltox.deb || die "wkhtmltox download failed (GitHub and $REPO_URL)"
     apt-get -y -q install /tmp/wkhtmltox.deb || die "wkhtmltox install failed"
   fi
   # Odoo .deb: GitHub release mirror first (nightly.odoo.com is unreliable), checked by .sha256;
   # fallback = nightly apt repo over http (key pinned by fingerprint, apt checks Release.gpg).
   local pkg=odoo
   if ! dpkg -s odoo >/dev/null 2>&1; then
-    say "downloading Odoo deb (~330 MB) from $ODOO_DEB_URL"
-    if curl -fsSL --retry 3 --connect-timeout 20 --speed-limit 10240 --speed-time 120 -o /tmp/odoo.deb "$ODOO_DEB_URL" \
-       && curl -fsSL --retry 3 -o /tmp/odoo.deb.sha256 "$ODOO_DEB_URL.sha256" \
-       && [ "$(sha256sum /tmp/odoo.deb | cut -d' ' -f1)" = "$(cut -d' ' -f1 /tmp/odoo.deb.sha256)" ]; then
+    say "downloading Odoo deb (~330 MB): GitHub, then $REPO_URL"
+    if fetch "$ODOO_DEB_URL" /tmp/odoo.deb || fetch "$REPO_URL/odoo_20.0.latest_all.deb" /tmp/odoo.deb; then
       chmod 644 /tmp/odoo.deb; pkg=/tmp/odoo.deb; say "odoo deb sha256 ok"
     else
-      warn "GitHub odoo deb failed or sha256 mismatch - fallback nightly.odoo.com"
+      warn "GitHub and $REPO_URL odoo deb failed - last fallback nightly.odoo.com"
       curl -fsSL http://nightly.odoo.com/odoo.key | gpg --dearmor --yes -o /usr/share/keyrings/odoo.gpg || die "odoo key"
       gpg --show-keys --with-colons /usr/share/keyrings/odoo.gpg | grep -q '^fpr:::::::::5D134C924CB06330DCEFE2A1DEF2A2198183CBB5:' || die "odoo key fingerprint mismatch"
       echo "deb [signed-by=/usr/share/keyrings/odoo.gpg] http://nightly.odoo.com/20.0/nightly/deb/ ./" > /etc/apt/sources.list.d/odoo.list
@@ -513,6 +525,7 @@ DISABLE_CLOUD_INIT=$DISABLE_CLOUD_INIT
 PUBLIC_IP=$PUBLIC_IP
 GATEWAY=$GATEWAY
 ODOO_DEB_URL=$ODOO_DEB_URL
+REPO_URL=$REPO_URL
 EOF
 chmod 600 "$CFG"
 
@@ -551,7 +564,7 @@ echo "  Credentials: /root/odoo-info/handover.txt   Full picture: yallacloud"; e
 EOF
 chmod 755 /etc/update-motd.d/99-yallacloud-odoo
 # == 9b. 'yallacloud' command: the whole picture of this server for a tech or the client
-echo "yc-odoo20-install v1.2.0 installed $(date '+%F %T %Z')" > /etc/yallacloud/odoo.version
+echo "yc-odoo20-install v1.3.0 installed $(date '+%F %T %Z')" > /etc/yallacloud/odoo.version
 cat > /usr/local/sbin/yallacloud <<'YCEOF'
 #!/bin/bash
 # yallacloud - what is installed here and how it is set up (STACK4-61). --secrets also prints passwords (root).

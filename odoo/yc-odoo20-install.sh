@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-odoo20-install.sh  v1.1.0  (2026-10-26 14:25 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.2.0  (2026-10-26 15:05 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -31,6 +31,7 @@ SSH_PORT=""                  # blank = 3222 on a public IP, 22 on private
 PASS_URL="https://pass.oasisstack.io/?len=16"
 DISABLE_CLOUD_INIT="yes"     # stops CloudStack re-running cloud-init every boot
 PUBLIC_IP=""                 # NAT case: public IP forwarded to this VM (blank = auto)
+GATEWAY=""                   # private VM behind a firewall: its LAN IP (blank = auto: .1/.254/.2)
 ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-latest/odoo_20.0.latest_all.deb"
 # ================
 
@@ -85,11 +86,12 @@ if [ -n "$SSH_PORT" ]; then
 fi
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 case "$DISABLE_CLOUD_INIT" in yes|no) ;; *) DISABLE_CLOUD_INIT=yes;; esac
+[ -z "$GATEWAY" ] || ip4 "$GATEWAY" || { warn "GATEWAY '$GATEWAY' invalid - auto"; GATEWAY=""; }
 if [ -n "$PUBLIC_IP" ]; then
   ip4 "$PUBLIC_IP" || { warn "PUBLIC_IP '$PUBLIC_IP' invalid - auto"; PUBLIC_IP=""; }
 fi
 [[ "$ODOO_DEB_URL" =~ ^https?:// ]] || ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-latest/odoo_20.0.latest_all.deb"
-say "config: ROLE=$ROLE DOMAIN=${DOMAIN:-<sslip>} DB_HOST=${DB_HOST:--} DB_PASS=$([ -n "$DB_PASS" ] && echo set || echo generate) APP_ALLOW=${APP_ALLOW:-auto} ODOO_DB=${ODOO_DB:-none} PG=$PG_VERSION TZ=$TZ_SET SSH=${SSH_PORT:-auto} PUBLIC_IP=${PUBLIC_IP:-auto}"
+say "config: ROLE=$ROLE DOMAIN=${DOMAIN:-<sslip>} DB_HOST=${DB_HOST:--} DB_PASS=$([ -n "$DB_PASS" ] && echo set || echo generate) APP_ALLOW=${APP_ALLOW:-auto} ODOO_DB=${ODOO_DB:-none} PG=$PG_VERSION TZ=$TZ_SET SSH=${SSH_PORT:-auto} PUBLIC_IP=${PUBLIC_IP:-auto} GATEWAY=${GATEWAY:-auto}"
 
 # == shared helper library
 cat > "$LIB" <<'LIBEOF'
@@ -131,6 +133,33 @@ genpw_local(){
   printf '%s%s%s\n' "$(_p "$U")" "$(IFS=; echo "${m[*]}")" "$(_p "$L")"
 }
 pw_ok(){ [[ "$1" =~ ^[A-Z][A-HJ-NP-Za-km-np-z2-9#]{6,14}[a-z]$ ]] && [[ "$1" == *#*#* ]] && [[ "$1" =~ [2-9] ]]; }
+# gateway fix: a private VM behind a tenant firewall gets CloudStack's declared SDN gateway
+# (often .254, nothing answers there) while the firewall is on .1. Public / VR networks: untouched.
+gw_ok(){ ping -c 2 -W 2 -I "$2" "$1" >/dev/null 2>&1 || ip neigh show "$1" dev "$2" 2>/dev/null | grep -qE 'REACHABLE|STALE|DELAY|PERMANENT'; }
+fix_gateway(){   # $1 = forced gateway (GATEWAY), blank = auto
+  local dev ip gw c cands
+  dev=$(ip -4 route show default | awk '{print $5; exit}'); [ -n "$dev" ] || dev=$(ip -o -4 addr show scope global | awk '{print $2; exit}')
+  ip=$(ip -o -4 addr show dev "$dev" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+  gw=$(ip -4 route show default dev "$dev" 2>/dev/null | awk '{print $3; exit}')
+  [ -n "$ip" ] || return 1
+  if [ -n "${1:-}" ]; then cands=$1
+  else
+    [[ "$ip" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]] || { echo "gateway: public $ip via ${gw:-none} - nothing to fix"; return 0; }
+    [ -n "$gw" ] && gw_ok "$gw" "$dev" && { echo "gateway: $gw answers (VR or firewall) - ok"; return 0; }
+    cands="${ip%.*}.1 ${ip%.*}.254 ${ip%.*}.2"
+  fi
+  for c in $cands; do
+    [ -z "${1:-}" ] && [ "$c" = "$gw" ] && continue
+    gw_ok "$c" "$dev" || continue
+    ip route replace default via "$c" dev "$dev" || continue
+    mkdir -p /etc/netplan
+    printf 'network:\n  version: 2\n  ethernets:\n    %s:\n      routes:\n        - to: default\n          via: %s\n' "$dev" "$c" > /etc/netplan/99-yallacloud-gateway.yaml
+    chmod 600 /etc/netplan/99-yallacloud-gateway.yaml
+    echo "gateway: declared ${gw:-none} dead on $dev ($ip) - default route now via $c (persisted in netplan 99-yallacloud-gateway.yaml)"
+    return 0
+  done
+  echo "gateway: nothing answers on ${cands// /, } for $dev ($ip)"; return 1
+}
 genpw(){
   local p; p=$(curl -fs --max-time 8 "${PASS_URL:-https://pass.oasisstack.io/?len=16}" 2>/dev/null | tr -d '\r\n')
   pw_ok "$p" || p=$(genpw_local 16)
@@ -141,7 +170,9 @@ LIBEOF
 
 # == 1. network + IPs
 say "waiting for network"
-for i in $(seq 1 60); do ip -4 route show default | grep -q . && break; sleep 2; done
+for _ in $(seq 1 30); do ip -o -4 addr show scope global | grep -q . && break; sleep 2; done
+say "$(fix_gateway "$GATEWAY")" || true
+ip -4 route show default | grep -q . || die "no default route - set GATEWAY= to the firewall LAN IP"
 detect_ips
 [ -n "$BIND_IP" ] || die "no IPv4 address on any NIC"
 [ -z "$SSH_PORT" ] && { [ -n "$PUB_NIC" ] && SSH_PORT=3222 || SSH_PORT=22; }
@@ -480,6 +511,7 @@ SSH_PORT=$SSH_PORT
 PASS_URL="$PASS_URL"
 DISABLE_CLOUD_INIT=$DISABLE_CLOUD_INIT
 PUBLIC_IP=$PUBLIC_IP
+GATEWAY=$GATEWAY
 ODOO_DEB_URL=$ODOO_DEB_URL
 EOF
 chmod 600 "$CFG"
@@ -519,7 +551,7 @@ echo "  Credentials: /root/odoo-info/handover.txt   Full picture: yallacloud"; e
 EOF
 chmod 755 /etc/update-motd.d/99-yallacloud-odoo
 # == 9b. 'yallacloud' command: the whole picture of this server for a tech or the client
-echo "yc-odoo20-install v1.1.0 installed $(date '+%F %T %Z')" > /etc/yallacloud/odoo.version
+echo "yc-odoo20-install v1.2.0 installed $(date '+%F %T %Z')" > /etc/yallacloud/odoo.version
 cat > /usr/local/sbin/yallacloud <<'YCEOF'
 #!/bin/bash
 # yallacloud - what is installed here and how it is set up (STACK4-61). --secrets also prints passwords (root).

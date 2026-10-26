@@ -76,6 +76,11 @@ NOTIFY_WEBHOOK="no"            # yes|no - POST full JSON incl. credentials (need
 WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"  # YallaCloud ERP webhook (changeable)
 WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn the webhook on
 
+# --- integrations (Salt minion + Acronis backup agent) ---
+JOIN_SALT="yes"                # yes|no - join this VM to the YallaCloud Salt master (ycsalt01)
+ACRONIS_TOKEN=""               # Acronis registration token; EMPTY = skip Acronis entirely
+ACRONIS_REGION="AE"            # AE|SG - Acronis datacenter region
+
 # --- overrides (leave blank to auto-detect) ---------------------------------
 SSH_PORT_OVERRIDE=""            # blank = 3222 if the VM has a public IP, else 22.
                                 # behind a firewall (private IP) leave blank -> 22.
@@ -191,6 +196,9 @@ NTFY_TOPIC=$NTFY_TOPIC
 NOTIFY_WEBHOOK=$NOTIFY_WEBHOOK
 WEBHOOK_URL=$WEBHOOK_URL
 WEBHOOK_SECRET=$WEBHOOK_SECRET
+JOIN_SALT=$JOIN_SALT
+ACRONIS_TOKEN=$ACRONIS_TOKEN
+ACRONIS_REGION=$ACRONIS_REGION
 APT_MIRROR=$APT_MIRROR
 SSH_PUBKEY=$SSH_PUBKEY
 PERMIT_ROOT_LOGIN=$PERMIT_ROOT_LOGIN
@@ -1111,6 +1119,31 @@ NC_VER=$($O status 2>/dev/null | awk '/versionstring/{print $3}')
 ISSUER=$(echo | timeout 10 openssl s_client -connect "${FQDN}:443" -servername "$FQDN" 2>/dev/null \
          | openssl x509 -noout -issuer 2>/dev/null | sed 's/issuer=//')
 APPSTORE=$(curl -sS -o /dev/null -m 15 -w '%{http_code}' https://apps.nextcloud.com/ 2>/dev/null)
+
+# --------------------------------------- 15c. Salt minion join + Acronis agent
+# Both pull from repo.oasisstack.io (IP-allowlisted). A failure here NEVER aborts
+# the Nextcloud build - it is logged and the deploy continues.
+if [ "${JOIN_SALT:-yes}" = yes ]; then
+  say "joining the YallaCloud Salt master (ycsalt01) via repo.oasisstack.io/salt/join.sh"
+  if curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh >>"$LOG" 2>&1; then
+    say "  salt: join.sh ran (the master assigns the minion id: <domain>-<vmname>)"
+  else
+    say "  salt: join could not run (repo.oasisstack.io unreachable here?) - skipped, join later"
+  fi
+else
+  say "salt join disabled (JOIN_SALT=no)"
+fi
+if [ -n "${ACRONIS_TOKEN:-}" ]; then
+  say "installing + registering the Acronis backup agent (region ${ACRONIS_REGION:-AE})"
+  _acr_ntfy=""; [ "${NOTIFY_NTFY:-yes}" = yes ] && [ -n "${NTFY_URL:-}" ] && [ -n "${NTFY_TOPIC:-}" ] && _acr_ntfy="--ntfy ${NTFY_URL%/}/${NTFY_TOPIC}"
+  if curl -fsSL --max-time 60 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s -- --token "$ACRONIS_TOKEN" --region "${ACRONIS_REGION:-AE}" $_acr_ntfy >>"$LOG" 2>&1; then
+    say "  acronis: setup ran (see the log for registered/already-registered status)"
+  else
+    say "  acronis: setup failed (token/region/egress) - continuing without it"
+  fi
+else
+  say "acronis skipped (no ACRONIS_TOKEN provided)"
+fi
 
 # --------------------------------------- 15b. the 'yallacloud' info command
 # A read-only catalogue so a tech or client sees the whole picture on the box:

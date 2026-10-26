@@ -263,7 +263,8 @@ if e("WSEC")=="yes":
    "sudoUser":e("SUDO_USER_NAME") or "","sudoPassword":e("SUDO_PASS") or ""}
 print(json.dumps(d))
 PY
-  curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} --data-binary @"$j" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
+  curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} --data-binary @"$j" "${WEBHOOK_URL}" >/root/yc-webhook-$1.resp 2>&1 || true
+  install -m 600 "$j" "/root/yc-webhook-$1.json"  # root-only copy of what was sent (same secrets as yc-handover.json)
   rm -f "$j"
 }
 build_deploy_log(){  # $1 = SUCCESS|FAILED - ONE merged log: installer + cloud-init

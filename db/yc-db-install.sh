@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.3  (2026-10-26 17:25 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.4  (2026-10-26 19:30 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -53,7 +53,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.3
+VER=1.0.4
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -94,7 +94,10 @@ md(){
   local k="$1" v="" s
   v=$(python3 -c "import json,sys;d=json.load(open('/run/cloud-init/instance-data.json'));print(d.get('ds',{}).get('meta_data',{}).get(sys.argv[1],'') or '')" "$k" 2>/dev/null)
   if [ -z "$v" ]; then
-    for s in $(ip -4 route show default | awk '{print $3}'); do
+    # the VR answers metadata on the DHCP server address (shared networks: NOT the gateway)
+    for s in $(grep -hoE 'SERVER_ADDRESS=[0-9.]+' /run/systemd/netif/leases/* 2>/dev/null | cut -d= -f2) \
+             $(nmcli -g DHCP4.OPTION device show 2>/dev/null | grep -oE 'dhcp_server_identifier = [0-9.]+' | awk '{print $3}') \
+             $(ip -4 route show default | awk '{print $3}'); do
       v=$(curl -fs --max-time 3 "http://$s/latest/meta-data/$k" 2>/dev/null) && [ -n "$v" ] && break
     done
   fi
@@ -162,6 +165,15 @@ fix_gateway(){   # $1 = forced gateway, blank = auto
     return 0
   done
   echo "gateway: nothing answers on ${cands// /, } for $dev ($ip)"; return 1
+}
+# CloudStack tenant (domain; ROOT = admin) from the Salt inventory "who" file, keyed by sha256 of SMBIOS UUID or a MAC
+yc_tenant(){
+  local k w
+  for k in $(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null) $(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | sort -u); do
+    w=$(curl -fsS -m 10 "https://repo.oasisstack.io/salt/who/$(printf '%s' "$k" | sha256sum | cut -c1-64)" 2>/dev/null) || continue
+    case "$w" in *tenant=*) printf '%s\n' "$w" | sed -n 's/^tenant=//p' | tr -d '\r '; return 0;; esac
+  done
+  return 1
 }
 # Salt master reachability with default tools only (getent, timeout, bash /dev/tcp). Prints the reason, rc 0 = both ports open
 SALT_MASTER=salt.oasisstack.io
@@ -305,12 +317,18 @@ say "config: ENGINE=$ENGINE $DB_VERSION PORT=$DB_PORT ALLOW=${DB_ALLOW:-auto} AD
 VM_NAME=$(md local-hostname); VM_NAME=${VM_NAME:-$(hostname -s)}
 SMBIOS=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)
 ZONE=$(md availability-zone)
+VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$(md instance-id)}; VM_UUID=$(printf '%s' "${VM_UUID:-$SMBIOS}" | tr 'A-Z' 'a-z')
+OFFERING=$(md service-offering)
+TENANT=""; TENANT_SRC=""
 PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
 facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout
   T="$1" S="$2" W="$3" python3 - <<'PY'
 import json, os, time
 e = os.environ.get
 d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or None, "smbiosUuid": e("SMBIOS") or None,
+     "vmName": e("VM_NAME"), "vmUuid": e("VM_UUID") or None,
+     "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
+     "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
      "hostname": e("VM_NAME"), "ip": e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": e("HOST_PUB") or None,
      "zone": e("ZONE") or None, "cloud": "YallaCloud", "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
      "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
@@ -327,7 +345,7 @@ if e("W") == "yes":
 print(json.dumps(d))
 PY
 }
-export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER VM_NAME SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS
+export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER VM_NAME VM_UUID OFFERING TENANT TENANT_SRC SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS
 RESULT=RUNNING
 finish(){
   local rc=$? title prio tags msg typ j
@@ -346,7 +364,7 @@ finish(){
     for f in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
       [ -f "$f" ] && { echo "========== merged: $f (last 400 lines) =========="; tail -n 400 "$f"; }; done
   } >> "$LOG" 2>/dev/null
-  msg="vm      : $VM_NAME
+  msg="vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
 ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
 engine  : $ENGINE ${DB_REAL_VERSION:-$DB_VERSION} port $DB_PORT
 allow   : ${DB_ALLOW:-?}
@@ -388,8 +406,10 @@ if [ -z "$DB_ALLOW" ]; then
   else DB_ALLOW=$PRIV_CIDR; fi
 fi
 export HOST_PRIV HOST_PUB PUB_NIC
+TENANT=$(yc_tenant) && TENANT_SRC="salt-inventory (CloudStack domain)" || { TENANT=""; say "tenant: not published yet (Salt inventory syncs every 5 min) - webhook sends null"; }
+say "vm: $VM_NAME uuid ${VM_UUID:-?} smbios ${SMBIOS:-?} tenant ${TENANT:-?} offering ${OFFERING:-?}"
 say "ips: private=${HOST_PRIV:-none} public=${HOST_PUB:-none} (nic ${PUB_NIC:-none}, static-nat ${MD_PUB:-none}) subnet=${PRIV_CIDR:-none} allow=$DB_ALLOW ssh=$SSH_PORT"
-yc_ntfy "RUN $ENGINE $VM_NAME" 2 "hourglass,db" "vm      : $VM_NAME
+yc_ntfy "RUN $ENGINE $VM_NAME" 2 "hourglass,db" "vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
 ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
 engine  : $ENGINE $DB_VERSION port $DB_PORT
 os      : $PRETTY_NAME
@@ -774,6 +794,7 @@ cat <<EOF
 ==================== YallaCloud database server - handover ====================
 created     : $(date '+%F %T %Z')   installer yc-db-install $VER
 vm          : $VM_NAME   ($PRETTY_NAME)
+tenant      : ${TENANT:--} (CloudStack domain)   vm uuid ${VM_UUID:--}   offering ${OFFERING:--}
 engine      : $ENGINE $DB_REAL_VERSION$([ -n "$FALLBACK" ] && echo "   (OS package fallback - vendor repo failed)")
 host        : private ${HOST_PRIV:--}   public ${HOST_PUB:--}
 port        : $DB_PORT   (allowed from: $DB_ALLOW)

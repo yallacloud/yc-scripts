@@ -191,12 +191,29 @@ ZONE=$(md availability-zone); OFFERING=$(md service-offering); CLOUD_ID=$(md clo
 VM_UUID=$(md vm-id); VM_UUID="${VM_UUID:-$(md instance-id)}"; VM_UUID=$(printf '%s' "${VM_UUID:-$VMID}" | tr 'A-Z' 'a-z')
 INSTANCE_ID="${CS_INSTANCE:-$(md instance-id)}"
 if TENANT=$(yc_tenant); then TENANT_SRC="salt-who"; else TENANT="${CS_DOMAIN:-}"; [ -n "$CS_DOMAIN" ] && TENANT_SRC="config" || TENANT_SRC=""; fi
-# CloudStack root password: deployer CS_ROOT_PASS wins; else read what cloud-init captured THIS boot
-# (/run is tmpfs, gone after reboot). The KVM v263 template's linked cloud-config chpasswd OVERWRITES
-# root's password, so set it back from that value - then the portal-shown password actually works.
-[ -n "$CS_ROOT_PASS" ] || CS_ROOT_PASS=$(python3 -c "import json;print(json.load(open('/run/cloud-init/combined-cloud-config.json')).get('password','') or '')" 2>/dev/null)
-[ -n "$CS_ROOT_PASS" ] && printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
-export VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
+# root password on a password-enabled CloudStack template (the template itself has no password;
+# CloudStack assigns one). Resolve in order: deployer var -> what cloud-init captured this boot
+# (VR password server; public / VR networks) -> the ConfigDrive vm_password.txt (isolated / private-IP
+# / LAN networks with no reachable VR) -> generate our own if CloudStack provided none. Then ALWAYS
+# reset root to it, because the KVM v263 template's linked cloud-config chpasswd leaves root on a
+# default - so the password the portal shows and the webhook reports is the real, working one.
+CS_ROOT_SRC="config"
+if [ -z "$CS_ROOT_PASS" ]; then
+  CS_ROOT_PASS=$(python3 -c "import json;print(json.load(open('/run/cloud-init/combined-cloud-config.json')).get('password','') or '')" 2>/dev/null)
+  [ -n "$CS_ROOT_PASS" ] && CS_ROOT_SRC="cloudstack (metadata)"
+fi
+if [ -z "$CS_ROOT_PASS" ]; then
+  for _d in $(blkid -t LABEL=config-2 -o device 2>/dev/null; blkid -L config-2 2>/dev/null); do
+    _m=$(mktemp -d)
+    mount -o ro "$_d" "$_m" 2>/dev/null && { CS_ROOT_PASS=$(tr -d '\r\n' < "$_m"/cloudstack/password/vm_password.txt 2>/dev/null); umount "$_m" 2>/dev/null; }
+    rmdir "$_m" 2>/dev/null
+    [ -n "$CS_ROOT_PASS" ] && { CS_ROOT_SRC="cloudstack (configdrive)"; break; }
+  done
+  case "$CS_ROOT_PASS" in saved_password|bad_request) CS_ROOT_PASS="";; esac
+fi
+if [ -z "$CS_ROOT_PASS" ]; then CS_ROOT_PASS=$(rnd 18); CS_ROOT_SRC="generated (no CloudStack password found)"; fi
+printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
+export VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
   curl -fsS --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source}" --data-binary "$2
@@ -236,7 +253,7 @@ d={"type":e("WTYPE"),"extra":e("WEXTRA"),
    "ncVersion":e("NC_VERSION") or "","sshPort":e("SSH_PORT") or "","dataPath":e("DATA_PATH") or "",
    "dbName":e("DB_NAME") or ""}}
 if e("WSEC")=="yes":
-  d["credentials"]={"rootUser":"root","rootPassword":e("CS_ROOT_PASS") or "",
+  d["credentials"]={"rootUser":"root","rootPassword":e("CS_ROOT_PASS") or "","rootPasswordSource":e("CS_ROOT_SRC") or "",
    "adminUser":e("ADMIN_USER") or "","adminPassword":e("ADMIN_PASS") or "",
    "dbUser":e("DB_USER") or "","dbPassword":e("DB_PASS") or "",
    "redisPassword":e("REDIS_PASS") or "",

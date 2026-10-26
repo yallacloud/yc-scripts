@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.4  (2026-10-26 19:55 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.5  (2026-10-26 20:25 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -52,8 +52,9 @@ ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""            # X-Webhook-Secret - REQUIRED by the ERP; paste at deploy time
 ERP_WEBHOOK_TOKEN=""             # optional Authorization: Bearer <jwt>
 WEBHOOK_SEND_SECRETS="yes"       # put the Odoo/DB passwords in the webhook fields (never in ntfy)
-CLOUDSTACK_URL="http://10.15.0.100:8080/client"   # CloudStack portal this VM comes from (sent as cloudstackUrl)
+CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal this VM comes from (sent as cloudstackUrl)
 CS_TENANT=""                     # CloudStack domain/tenant; blank = auto from the Salt inventory (ROOT = admin)
+ROOT_PW_FROM_CLOUDSTACK="yes"    # root = the password CloudStack shows after deploy (the template's linked cloud-config overrides it)
 # -- 7. add-ons, run in the background after the deploy (never block or fail it)
 ENABLE_SALT="yes"                # join the YallaCloud Salt master (zero-input, STACK4-54)
 SALT_JOIN_URL="https://repo.oasisstack.io/salt/join.sh"
@@ -68,7 +69,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.4
+VER=1.4.5
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -156,7 +157,7 @@ fi
 _k=""; while IFS= read -r l; do l=$(printf '%s' "$l" | tr -d '\r'); [ -z "$l" ] && continue
   if [[ "$l" =~ ^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp(256|384|521)|sk-[a-z0-9@.-]+)\ [A-Za-z0-9+/]+=*(\ [^[:cntrl:]]*)?$ ]]; then _k+="$l"$'\n'; else warn "SSH_PUBKEYS: skipped a line that is not an OpenSSH public key (${l:0:30}...)"; fi
 done <<< "$SSH_PUBKEYS"; SSH_PUBKEYS=${_k%$'\n'}
-[[ "$CLOUDSTACK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "CLOUDSTACK_URL '$CLOUDSTACK_URL' invalid - default"; CLOUDSTACK_URL=http://10.15.0.100:8080/client; }
+[[ "$CLOUDSTACK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "CLOUDSTACK_URL '$CLOUDSTACK_URL' invalid - default"; CLOUDSTACK_URL=https://dxb01.oasisstack.io/client; }
 [ -z "$CS_TENANT" ] || [[ "$CS_TENANT" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { warn "CS_TENANT '$CS_TENANT' invalid - auto"; CS_TENANT=""; }
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 case "$DISABLE_CLOUD_INIT" in yes|no) ;; *) DISABLE_CLOUD_INIT=yes;; esac
@@ -180,7 +181,7 @@ if [ "$ENABLE_WEBHOOK" = yes ]; then
   [[ "$ERP_WEBHOOK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "ERP_WEBHOOK_URL '$ERP_WEBHOOK_URL' invalid - webhook off"; ENABLE_WEBHOOK=no; }
   [ -n "$ERP_WEBHOOK_SECRET$ERP_WEBHOOK_TOKEN" ] || warn "ERP_WEBHOOK_SECRET is blank - the ERP will refuse the events (set it and run: yc-notify --test)"
 fi
-yn ENABLE_SALT yes; yn ENABLE_ACRONIS yes
+yn ENABLE_SALT yes; yn ENABLE_ACRONIS yes; yn ROOT_PW_FROM_CLOUDSTACK yes
 [[ "$SALT_JOIN_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "SALT_JOIN_URL '$SALT_JOIN_URL' invalid - default"; SALT_JOIN_URL=https://repo.oasisstack.io/salt/join.sh; }
 [[ "$ACRONIS_SETUP_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "ACRONIS_SETUP_URL invalid - default"; ACRONIS_SETUP_URL=https://repo.oasisstack.io/acronis/acronis-setup.sh; }
 ACRONIS_REGION=$(printf '%s' "$ACRONIS_REGION" | tr 'a-z' 'A-Z' | tr -d '[:space:]')
@@ -196,7 +197,7 @@ say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=
 umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" ACRONIS_TOKEN "$ACRONIS_TOKEN" > "$NOTIFY_ENV"; umask 022
 cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 #!/usr/bin/env python3
-# yc-notify v1.2.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
+# yc-notify v1.3.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
 # (other team, yallacloud01, contract YCERP-01 - NOT ychook). Same event shape as the Windows
 # C-Scripts payload so the ERP matches it by vmId = SMBIOS UUID.
 #   yc-notify -t vm.deploy.completed -T "OK BUILD odoo combined" -p 3 -g white_check_mark,odoo \
@@ -369,8 +370,9 @@ def send_webhook(c, a, fx):
                 k, v = kv.split('=', 1)
                 fields[k] = v
     ev = dict(fx)
+    vmpw = fields.pop('vmPassword', '')     # CloudStack root password: the contract's top-level field
     ev.update({'type': a.type, 'steps': a.steps or '', 'extra': a.title, 'fields': fields,
-               'saPassword': '', 'vmPassword': ''})
+               'saPassword': '', 'vmPassword': vmpw})
     if a.line:
         fields.setdefault('summary', ' | '.join(x.strip() for x in a.line[:6]))
     if a.failed_step:
@@ -461,7 +463,7 @@ chmod 755 /usr/local/sbin/yc-notify
 save_cfg(){   # effective answers, no secrets (those live in secrets.env / notify.env)
   local v; umask 077
   for v in ROLE DOMAIN LE_EMAIL DB_HOST APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEYS TZ_SET LOCALE_SET APT_MIRRORS \
-           BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT \
+           BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT ROOT_PW_FROM_CLOUDSTACK \
            ENABLE_SALT SALT_JOIN_URL ENABLE_ACRONIS ACRONIS_REGION ACRONIS_SETUP_URL \
            PASS_URL DISABLE_CLOUD_INIT ODOO_DEB_URL REPO_URL; do printf '%s=%q\n' "$v" "${!v}"; done > "$CFG"
   umask 022; }
@@ -685,6 +687,15 @@ systemctl enable --now fail2ban >/dev/null 2>&1; systemctl restart fail2ban
 
 # == 4. secrets
 step SECRETS
+# root password: a password-enabled template gets it from the CloudStack password server, but the
+# template's linked cloud-config (chpasswd users: chadmin/ubuntu/root) runs after and replaces it.
+# cloud-init keeps the CloudStack value in combined-cloud-config.json (root only): put it back on root.
+VM_PASS=""
+if [ "$ROOT_PW_FROM_CLOUDSTACK" = yes ]; then
+  VM_PASS=$(python3 -c "import json;print(json.load(open('/run/cloud-init/combined-cloud-config.json')).get('password') or '')" 2>/dev/null)
+  if [ -n "$VM_PASS" ]; then printf 'root:%s\n' "$VM_PASS" | chpasswd && say "root password = the CloudStack deploy password" || warn "could not set the CloudStack root password"
+  else say "no CloudStack password for this VM (template not password-enabled, or VM reset) - root password unchanged"; fi
+fi
 [ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"
 : "${DB_PASS:=$(genpw)}"; : "${MASTER_PASS:=$(genpw)}"; : "${ADMIN_PASS:=$(genpw)}"
 for v in DB_PASS MASTER_PASS ADMIN_PASS; do [ -n "${!v}" ] || die "password generation failed (local and pass.oasisstack.io)"; done
@@ -1264,7 +1275,7 @@ umask 077
 {
 echo "YallaCloud Odoo 20 - $(hostname) - $(date '+%F %T %Z')"
 echo "role        : $ROLE"
-echo "ssh         : root@${URL_IP} -p $SSH_PORT  (password = CloudStack root password)"
+echo "ssh         : root@${URL_IP} -p $SSH_PORT  password: ${VM_PASS:-<template / unchanged>}  (key: SSH_PUBKEYS)"
 if [ "$ROLE" != db ]; then
 echo "odoo url    : $URL"
 echo "odoo login  : admin / $ADMIN_PASS        (database: ${ODOO_DB:-none})"
@@ -1399,6 +1410,7 @@ ADD_SALT=off; [ "$ENABLE_SALT" = yes ] && ADD_SALT="joining (own message follows
 ADD_ACR=off; [ "$ENABLE_ACRONIS" = yes ] && { [ -n "$ACRONIS_TOKEN" ] && ADD_ACR="installing $ACRONIS_REGION (own message follows)" || ADD_ACR="skipped - no token"; }
 SEC=(); [ "$ROLE" != db ] && SEC+=(-s odooAdminUser=admin -s odooAdminPassword="$ADMIN_PASS" -s odooMasterPassword="$MASTER_PASS")
 SEC+=(-s dbUser=odoo -s dbPassword="$DB_PASS" -s dbHost="${DB_HOST:-${PRIV_NIC:-$BIND_IP}}")
+[ -n "$VM_PASS" ] && SEC+=(-s vmPassword="$VM_PASS" -s vmUser=root)
 N -t vm.deploy.completed -T "OK BUILD odoo $ROLE${WARNS:+ (warnings)}" -p "$PRI" -g "$TAG,odoo" --steps "$STEPS" \
   -l "result  $RES" -l "url     ${URL:-- (db only)}" -l "tls     $TLS" -l "ip      $BIND_IP  url ip $URL_IP  ssh $SSH_PORT" \
   -l "odoo    $(dpkg-query -W -f='${Version}' odoo 2>/dev/null || echo -)   pg $PG_VERSION   db ${ODOO_DB:-none}" \

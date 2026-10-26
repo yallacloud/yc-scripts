@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.1  (2026-10-26 16:25 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.2  (2026-10-26 16:30 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -22,7 +22,7 @@ set -uo pipefail
 # -- 1. layout
 ROLE="combined"              # combined | db | app
 DOMAIN=""                    # blank = <public-ip>.sslip.io (or plain IP if private)
-LE_EMAIL=""                  # Let's Encrypt contact (blank = register without email)
+LE_EMAIL="bilalinamdar@gmail.com"   # Let's Encrypt contact (blank = register without email)
 # -- 2. database
 DB_HOST=""                   # app only: private IP of the db VM
 DB_PASS=""                   # db/app: blank on db = generated; app = paste from db handover
@@ -66,7 +66,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.1
+VER=1.4.2
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info

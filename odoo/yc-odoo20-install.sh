@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.10  (2026-10-26 22:00 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.11  (2026-10-26 21:20 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -70,7 +70,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.10
+VER=1.4.11
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -1468,7 +1468,7 @@ ADD_ACR=off; [ "$ENABLE_ACRONIS" = yes ] && { [ -n "$ACRONIS_TOKEN" ] && ADD_ACR
 SEC=(-s vm.user=root -s vm.password="${VM_PASS:-}" -s vm.passwordSource="${VM_PASS_SRC:-unchanged}" -s vm.passwordUsers="${VM_PASS_SET:-}" -s vm.sshHost="$URL_IP" -s vm.sshPort="$SSH_PORT")
 [ -n "${SUDO_PASS:-}" ] && SEC+=(-s vm.sudoUser="$SUDO_USER_NAME" -s vm.sudoPassword="$SUDO_PASS")
 [ "$ROLE" != db ] && SEC+=(-s odoo.url="$URL" -s odoo.adminUser=admin -s odoo.adminPassword="$ADMIN_PASS" -s odoo.masterPassword="$MASTER_PASS")
-SEC+=(-s database.engine=postgresql -s database.version="$PG_VERSION" -s database.host="${DB_HOST:-${PRIV_NIC:-$BIND_IP}}" -s database.port=5432
+SEC+=(-s database.engine=postgresql -s database.version="$PG_VERSION" -s database.host="$([ "$ROLE" = combined ] && echo localhost || echo "${DB_HOST:-${PRIV_NIC:-$BIND_IP}}")" -s database.port=5432
       -s database.name="${ODOO_DB:-}" -s database.user=odoo -s database.password="$DB_PASS")
 N -t vm.deploy.completed -T "OK BUILD odoo $ROLE${WARNS:+ (warnings)}" -p "$PRI" -g "$TAG,odoo" --steps "$STEPS" \
   -l "result  $RES" -l "url     ${URL:-- (db only)}" -l "cert    $CERT${CERT_EXP:+  until $CERT_EXP}" -l "ip      $BIND_IP  url ip $URL_IP  ssh $SSH_PORT" \

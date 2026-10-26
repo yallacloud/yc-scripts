@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.8  (2026-10-26 20:50 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.9  (2026-10-26 21:45 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -70,7 +70,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.8
+VER=1.4.9
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -728,6 +728,9 @@ if [ "$ROOT_PW_FROM_CLOUDSTACK" = yes ]; then
   umask 077; printf 'VM_PASS=%q\nVM_PASS_SRC=%q\nVM_PASS_SET=%q\n' "$VM_PASS" "$VM_PASS_SRC" "$VM_PASS_SET" > "$INFO/vm-password.env"; umask 022
   say "VM password ($VM_PASS_SRC) set for: ${VM_PASS_SET:-nobody}"
 fi
+# The template's cloud-config gives 'ubuntu' the fixed password 'ubuntu' on every VM, and SSH password
+# login is on: lock it (keys and console still work; owner 2026-10-26, same as db v1.0.9).
+case " $VM_PW_USERS " in *" ubuntu "*) ;; *) id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1 && say "ubuntu: password locked";; esac
 [ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"
 : "${DB_PASS:=$(genpw)}"; : "${MASTER_PASS:=$(genpw)}"; : "${ADMIN_PASS:=$(genpw)}"
 for v in DB_PASS MASTER_PASS ADMIN_PASS; do [ -n "${!v}" ] || die "password generation failed (local and pass.oasisstack.io)"; done

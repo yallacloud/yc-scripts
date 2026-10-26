@@ -166,7 +166,7 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
-NC_IVER="1.1.8"
+NC_IVER="1.1.9"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -213,6 +213,9 @@ if [ -z "$CS_ROOT_PASS" ]; then
 fi
 if [ -z "$CS_ROOT_PASS" ]; then CS_ROOT_PASS=$(rnd 18); CS_ROOT_SRC="generated (no CloudStack password found)"; fi
 printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
+# The template's cloud-config gives 'ubuntu' the fixed password 'ubuntu' on every VM, and SSH password
+# login is on: lock it (keys and console still work; owner 2026-10-26, same as db v1.0.9).
+id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1 || true
 export VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0

@@ -166,7 +166,7 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
-NC_IVER="1.1.7"
+NC_IVER="1.1.8"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -191,6 +191,11 @@ ZONE=$(md availability-zone); OFFERING=$(md service-offering); CLOUD_ID=$(md clo
 VM_UUID=$(md vm-id); VM_UUID="${VM_UUID:-$(md instance-id)}"; VM_UUID=$(printf '%s' "${VM_UUID:-$VMID}" | tr 'A-Z' 'a-z')
 INSTANCE_ID="${CS_INSTANCE:-$(md instance-id)}"
 if TENANT=$(yc_tenant); then TENANT_SRC="salt-who"; else TENANT="${CS_DOMAIN:-}"; [ -n "$CS_DOMAIN" ] && TENANT_SRC="config" || TENANT_SRC=""; fi
+# CloudStack root password: deployer CS_ROOT_PASS wins; else read what cloud-init captured THIS boot
+# (/run is tmpfs, gone after reboot). The KVM v263 template's linked cloud-config chpasswd OVERWRITES
+# root's password, so set it back from that value - then the portal-shown password actually works.
+[ -n "$CS_ROOT_PASS" ] || CS_ROOT_PASS=$(python3 -c "import json;print(json.load(open('/run/cloud-init/combined-cloud-config.json')).get('password','') or '')" 2>/dev/null)
+[ -n "$CS_ROOT_PASS" ] && printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
 export VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0

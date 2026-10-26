@@ -228,7 +228,7 @@ notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, ne
   curl -fsS --max-time 10 -H "Title: $1 - $(hostname)" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source},nextcloud" --data-binary "$2
 host    $(hostname)  ${NET_IP:-}${PUBLIC_IP:+  public ${PUBLIC_IP}}
 os      $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}")
-time    $(date '+%F %T %z') ${TZ_SET##*/}  ($(date -u +%FT%TZ))
+time    $(TZ="${TZ_SET:-UTC}" date '+%F %T %z') ${TZ_SET##*/}  ($(date -u +%FT%TZ))
 vm      ${VM_NAME:--}  uuid ${VM_UUID:--}${ZONE:+  zone ${ZONE}}
 tenant  ${TENANT:-not published yet}  (${TENANT_SRC:--})  ${CLOUDSTACK_URL:-}
 by      yc-nextcloud-install / ${NC_IVER}  log ${LOG}" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
@@ -1062,7 +1062,7 @@ ln -sf /etc/nginx/sites-available/nextcloud /etc/nginx/sites-enabled/nextcloud
 
 # a temporary self-signed pair so nginx starts before certbot runs
 mkdir -p /etc/ssl/yc
-openssl req -x509 -nodes -days 3 -newkey rsa:2048 \
+openssl req -x509 -nodes -days 30 -newkey rsa:2048 \
   -keyout /etc/ssl/yc/tmp.key -out /etc/ssl/yc/tmp.crt -subj "/CN=${FQDN}" 2>/dev/null
 nginx -t || die "nginx config test failed"
 systemctl restart nginx

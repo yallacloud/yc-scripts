@@ -68,6 +68,14 @@ DISABLE_CLOUD_INIT="yes"       # yes = stop cloud-init re-running every boot onc
 REBOOT_AFTER="yes"             # yes = verify every service and port, then reboot
                                 # cleanly at the end. no = leave the box running.
 
+# --- notifications (each switchable; ntfy = STATUS ONLY no secrets, webhook = FULL incl. passwords) ---
+NOTIFY_NTFY="yes"              # yes|no - push status to ntfy (never secrets)
+NTFY_URL="https://ntfy.sh"     # ntfy server base
+NTFY_TOPIC="9890122212"        # ntfy topic (change per client/deployment)
+NOTIFY_WEBHOOK="no"            # yes|no - POST full JSON incl. credentials (needs WEBHOOK_SECRET)
+WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"  # YallaCloud ERP webhook (changeable)
+WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn the webhook on
+
 # --- overrides (leave blank to auto-detect) ---------------------------------
 SSH_PORT_OVERRIDE=""            # blank = 3222 if the VM has a public IP, else 22.
                                 # behind a firewall (private IP) leave blank -> 22.
@@ -93,7 +101,11 @@ OUT=/root/yc-handover.json
 exec > >(tee -a "$LOG") 2>&1
 
 say()  { echo "[$(date +%H:%M:%S)] $*"; }
-die()  { echo "YC-FATAL: $*" | tee /root/yc-INSTALL-FAILED; exit 1; }
+die()  { echo "YC-FATAL: $*" | tee /root/yc-INSTALL-FAILED
+         command -v notify_ntfy    >/dev/null 2>&1 && notify_ntfy "Nextcloud FAILED: ${FQDN:-?}" "FAILED: $* (host $(hostname) ip ${NET_IP:-?})" high "rotating_light,x"
+         command -v notify_webhook >/dev/null 2>&1 && notify_webhook "vm.deploy.failed" "$*"
+         command -v build_deploy_log>/dev/null 2>&1 && build_deploy_log FAILED
+         exit 1; }
 # YallaCloud password rule (stated 2026-09-08): length 16, first char A-Z,
 # last char a-z, at least two '#' (the ONLY symbol allowed), at least one digit,
 # both cases present; confusables O 0 o I l 1 excluded. CSPRNG via /dev/urandom.
@@ -128,6 +140,29 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 # userdata / re-run: an existing conf (written by cloud-init) OVERRIDES the
 # CONFIG block above, so one embedded installer serves many VMs.
 [ -f "$CFG" ] && . "$CFG"
+: "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
+: "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"
+VMID=$(cat /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
+notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, no secrets
+  [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
+  curl -fsS --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source}" -d "$2" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
+}
+notify_webhook(){  # $1 type $2 extra - FULL JSON incl. credentials, X-Webhook-Secret
+  [ "${NOTIFY_WEBHOOK:-no}" = yes ] && [ -n "${WEBHOOK_URL:-}" ] || return 0
+  curl -fsS --max-time 15 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} -d "{\"type\":\"$1\",\"cloud\":\"cloudstack\",\"product\":\"nextcloud\",\"vmId\":\"${VMID}\",\"smbiosUuid\":\"${VMID}\",\"hostname\":\"$(hostname)\",\"fqdn\":\"${FQDN}\",\"ip\":\"${NET_IP:-}\",\"publicIp\":\"${PUBLIC_IP:-}\",\"shape\":\"${NET_SHAPE:-}\",\"url\":\"https://${FQDN}${PORTSFX:-}/\",\"ssl\":\"${SSL_STATUS:-}\",\"ncVersion\":\"${NC_VERSION:-}\",\"adminUser\":\"${ADMIN_USER:-}\",\"adminPassword\":\"${ADMIN_PASS:-}\",\"dbName\":\"${DB_NAME:-}\",\"dbUser\":\"${DB_USER:-}\",\"dbPassword\":\"${DB_PASS:-}\",\"redisPassword\":\"${REDIS_PASS:-}\",\"sudoUser\":\"${SUDO_USER_NAME:-}\",\"sshPort\":\"${SSH_PORT:-}\",\"dataPath\":\"${DATA_PATH:-}\",\"extra\":\"$2\",\"utc\":\"$(date -u +%FT%TZ)\"}" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
+}
+build_deploy_log(){  # $1 = SUCCESS|FAILED - ONE merged log: installer + cloud-init
+  local DPL=/var/log/yc-nextcloud-deploy.log
+  { echo "==== YallaCloud Nextcloud deploy: $1  $(date -Is) ===="
+    echo "fqdn=${FQDN} ip=${NET_IP:-} shape=${NET_SHAPE:-} ssl=${SSL_STATUS:-} nc=${NC_VERSION:-} vmId=${VMID}"
+    echo; echo "---- installer log (${LOG}) ----"; cat "$LOG" 2>/dev/null
+    for c in /var/log/cloud-init-output.log /var/log/cloud-init.log; do
+      [ -f "$c" ] && { echo; echo "---- $c ----"; cat "$c"; }
+    done
+    echo; echo "==== end: $1 ===="
+  } > "$DPL" 2>/dev/null || true
+  chmod 600 "$DPL" 2>/dev/null || true
+}
 case "$FQDN" in cloud.example.com|"") die "edit FQDN in the CONFIG block first";; esac
 : "${HTTPS_PORT:=443}"           # blank -> standard 443 (nginx listen needs a port)
 : "${PERMIT_ROOT_LOGIN:=yes}"
@@ -150,6 +185,12 @@ SET_HOSTNAME=$SET_HOSTNAME
 TARBALL=$TARBALL
 TARBALL_URL=$TARBALL_URL
 REPO_MIRROR=$REPO_MIRROR
+NOTIFY_NTFY=$NOTIFY_NTFY
+NTFY_URL=$NTFY_URL
+NTFY_TOPIC=$NTFY_TOPIC
+NOTIFY_WEBHOOK=$NOTIFY_WEBHOOK
+WEBHOOK_URL=$WEBHOOK_URL
+WEBHOOK_SECRET=$WEBHOOK_SECRET
 APT_MIRROR=$APT_MIRROR
 SSH_PUBKEY=$SSH_PUBKEY
 PERMIT_ROOT_LOGIN=$PERMIT_ROOT_LOGIN
@@ -268,6 +309,9 @@ EOF
 }
 
 stabilise_network
+PUBLIC_IP=""; [ "${IS_PUBLIC:-0}" = 1 ] && PUBLIC_IP="$NET_IP"
+notify_ntfy "Nextcloud: creating ${FQDN}" "Deploying on ${NET_IP} (${NET_SHAPE})" default "package,hourglass"
+notify_webhook "vm.deploy.started" "network ${NET_SHAPE}"
 PRIV_IP="$NET_IP"
 
 if [ "$SET_HOSTNAME" = "yes" ]; then
@@ -562,7 +606,38 @@ opcache.interned_strings_buffer=64
 opcache.max_accelerated_files=10000
 opcache.memory_consumption=256
 opcache.revalidate_freq=1
+opcache.enable_cli=1
+opcache.save_comments=1
+apc.enable_cli=1
+realpath_cache_size=4M
+realpath_cache_ttl=600
 EOF
+
+# php-fpm pool sized to RAM (conservative: ~64 MB per worker, min 8, cap 120); safe dynamic pm
+PHP_CH=$(( RAM_MB / 64 )); [ "$PHP_CH" -lt 8 ] && PHP_CH=8; [ "$PHP_CH" -gt 120 ] && PHP_CH=120
+POOL=/etc/php/${PHPV}/fpm/pool.d/www.conf
+if [ -f "$POOL" ]; then
+  sed -i "s/^pm = .*/pm = dynamic/;
+          s/^pm.max_children = .*/pm.max_children = ${PHP_CH}/;
+          s/^pm.start_servers = .*/pm.start_servers = $(( PHP_CH/4>2?PHP_CH/4:2 ))/;
+          s/^pm.min_spare_servers = .*/pm.min_spare_servers = 2/;
+          s/^pm.max_spare_servers = .*/pm.max_spare_servers = $(( PHP_CH/2>4?PHP_CH/2:4 ))/;
+          s/^;pm.max_requests = .*/pm.max_requests = 500/" "$POOL"
+  say "  php-fpm pool: pm=dynamic max_children=${PHP_CH} (RAM ${RAM_MB}M)"
+fi
+
+# kernel sysctl - CONSERVATIVE (connection backlog, low swappiness, redis overcommit)
+cat > /etc/sysctl.d/90-yallacloud-nextcloud.conf <<SYS
+# YallaCloud Nextcloud - safe kernel tweaks
+net.core.somaxconn = 1024
+net.ipv4.tcp_max_syn_backlog = 2048
+net.core.netdev_max_backlog = 2048
+vm.swappiness = 10
+vm.overcommit_memory = 1
+fs.file-max = 262144
+SYS
+sysctl --system >/dev/null 2>&1 || true
+say "  kernel sysctl applied (backlog, swappiness=10, overcommit=1 for redis)"
 systemctl restart php${PHPV}-fpm
 
 # ---------------------------------------------------------- 8. the tarball
@@ -857,6 +932,7 @@ say "requesting a Let's Encrypt certificate for $FQDN (HTTP-01 on port 80)"
 mkdir -p /var/www/nextcloud
 if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos \
      --register-unsafely-without-email -d "$FQDN" >/dev/null 2>&1; then
+  SSL_STATUS="letsencrypt"
   # point nginx at the real cert (replaces the temporary self-signed pair)
   sed -i "s#ssl_certificate .*#ssl_certificate /etc/letsencrypt/live/${FQDN}/fullchain.pem;#;
           s#ssl_certificate_key .*#ssl_certificate_key /etc/letsencrypt/live/${FQDN}/privkey.pem;#" \
@@ -865,6 +941,7 @@ if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos \
   say "certificate issued and installed"
   SSL_OK=yes
 else
+  SSL_STATUS="self-signed"
   say "WARNING: Let's Encrypt failed - the site is up on the temporary self-signed cert."
   say "         Port 80 must be reachable from the internet (NAT 80 -> this VM:80)."
   say "         Once forwarded, run: certbot certonly --webroot -w /var/www/nextcloud -d $FQDN"
@@ -1160,6 +1237,12 @@ if [ "$VFAIL" != "0" ]; then
     exit 1
 fi
 say "all services healthy, all ports listening"
+NC_VERSION=$(sudo -u www-data php /var/www/nextcloud/occ status 2>/dev/null | awk -F': ' '/versionstring/{print $2}')
+notify_ntfy "Nextcloud: finished ${FQDN}" "READY https://${FQDN}${PORTSFX}/  ip ${NET_IP}  ssl ${SSL_STATUS}  nc ${NC_VERSION}  ssh ${SSH_PORT}" default "white_check_mark,rocket"
+notify_webhook "vm.deploy.completed" "install ok"
+build_deploy_log SUCCESS
+say "deploy log: /var/log/yc-nextcloud-deploy.log (installer + cloud-init merged)"
+
 
 if [ "$REBOOT_AFTER" != "yes" ]; then
     say "REBOOT_AFTER=no - leaving the box running. Reboot when convenient."

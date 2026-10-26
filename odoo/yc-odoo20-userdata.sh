@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.1.0  (2026-10-26 15:05 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.2.0  (2026-10-26 15:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -75,9 +75,11 @@ fix_gateway(){   # $1 = forced gateway (GATEWAY), blank = auto
 for _ in $(seq 1 30); do ip -o -4 addr show scope global | grep -q . && break; sleep 2; done
 say "$(fix_gateway "$GATEWAY")"   # BEFORE the download: a dead .254 gateway means no internet
 
-# installer from GitHub (public yallacloud/yc-scripts), three mirrors, each checked by its .sha256
+# installer: GitHub (public yallacloud/yc-scripts), then the local mirror repo.oasisstack.io/odoo
+# (ycwsus01, YC ranges), then two more GitHub mirrors - each checked by its .sha256
 R=yallacloud/yc-scripts; F=odoo/yc-odoo20-install.sh; OUT=/root/yc-odoo20-install.sh; ok=""
 for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
+         "https://repo.oasisstack.io/odoo/yc-odoo20-install.sh" \
          "https://cdn.jsdelivr.net/gh/$R@$INSTALLER_REF/$F" \
          "https://github.com/$R/raw/$INSTALLER_REF/$F"; do
   if curl -fsSL --retry 3 --connect-timeout 15 -o "$OUT" "$u" \
@@ -87,7 +89,7 @@ for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
   fi
   say "mirror failed or sha256 mismatch: $u"
 done
-[ -n "$ok" ] || fail "installer download failed from all GitHub mirrors (check DNS / outbound 443)"
+[ -n "$ok" ] || fail "installer download failed from GitHub and repo.oasisstack.io (check DNS / outbound 443 / gateway)"
 say "installer ok from $ok"
 chmod 700 "$OUT"
 exec bash "$OUT"

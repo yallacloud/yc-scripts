@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.7  (2026-10-26 20:30 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.9  (2026-10-26 21:10 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -54,7 +54,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.7
+VER=1.0.9
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -90,18 +90,30 @@ cat > "$LIB" <<'LIBEOF'
 is_priv(){ [[ "$1" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.|127\.) ]]; }
 ip4(){ [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1; local n; for n in "${BASH_REMATCH[@]:1}"; do [ "$n" -le 255 ] || return 1; done; }
 cidr_ok(){ local m=${1##*/}; [[ "$1" == */* ]] && ip4 "${1%/*}" && [[ "$m" =~ ^[0-9]{1,2}$ ]] && [ "$m" -le 32 ]; }
-# CloudStack metadata: cloud-init cache first, then the virtual router
+# CloudStack VR = the DHCP server (shared networks: NOT the gateway); gateway last
+vr_list(){
+  grep -hoE 'SERVER_ADDRESS=[0-9.]+' /run/systemd/netif/leases/* 2>/dev/null | cut -d= -f2
+  nmcli -g DHCP4.OPTION device show 2>/dev/null | tr '|' '\n' | sed -n 's/.*dhcp_server_identifier = //p'
+  grep -h dhcp-server-identifier /var/lib/NetworkManager/*.lease /var/lib/dhclient/*.lease 2>/dev/null | awk '{print $NF}' | tr -d ';'
+  ip -4 route show default | awk '{print $3}'
+}
+# ConfigDrive (isolated networks without a VR): CD labelled config-2, mounted read-only once
+cfgdrive(){
+  local m=/run/yc-cfgdrive d
+  [ -d "$m/cloudstack" ] && { echo "$m"; return 0; }
+  d=$(blkid -L config-2 2>/dev/null) || return 1
+  mkdir -p "$m" && mount -o ro "$d" "$m" 2>/dev/null && [ -d "$m/cloudstack" ] && echo "$m"
+}
+# CloudStack metadata: cloud-init cache, then the VR, then the ConfigDrive
 md(){
   local k="$1" v="" s
   v=$(python3 -c "import json,sys;d=json.load(open('/run/cloud-init/instance-data.json'));print(d.get('ds',{}).get('meta_data',{}).get(sys.argv[1],'') or '')" "$k" 2>/dev/null)
   if [ -z "$v" ]; then
-    # the VR answers metadata on the DHCP server address (shared networks: NOT the gateway)
-    for s in $(grep -hoE 'SERVER_ADDRESS=[0-9.]+' /run/systemd/netif/leases/* 2>/dev/null | cut -d= -f2) \
-             $(nmcli -g DHCP4.OPTION device show 2>/dev/null | grep -oE 'dhcp_server_identifier = [0-9.]+' | awk '{print $3}') \
-             $(ip -4 route show default | awk '{print $3}'); do
+    for s in $(vr_list | awk '!s[$0]++'); do
       v=$(curl -fs --max-time 3 "http://$s/latest/meta-data/$k" 2>/dev/null) && [ -n "$v" ] && break
     done
   fi
+  if [ -z "$v" ]; then local c; c=$(cfgdrive) && v=$(cat "$c/cloudstack/metadata/$k.txt" 2>/dev/null); fi
   printf '%s' "$v" | tr -d '\r\n'
 }
 # PUB_NIC/PRIV_NIC = first public/private NIC IP. HOST_PUB = what clients outside use (NIC, PUBLIC_IP, static NAT).
@@ -348,6 +360,8 @@ if e("W") == "yes":
         "user": "DB_USER", "userPassword": "DB_USER_PASS", "uriAdmin": "URI_ADMIN", "uriUser": "URI_USER",
         "dataDir": "DATADIR", "backupDir": "BACKUP_DIR", "backupRetention": "RETENTION",
         "sshPort": "SSH_PORT"}.items()}
+    d["vmUser"] = "root"; d["vmPassword"] = e("VM_PASS") or None
+    if e("CHADMIN_PASS"): d["sudoUser"] = "chadmin"; d["sudoPassword"] = e("CHADMIN_PASS")
 # same keys as the Odoo kit / payload events (one ERP contract) - additive only
 d.update({"offering": e("OFFERING") or None, "identitySource": "smbios" if e("SMBIOS") else "metadata",
           "instanceId": e("INSTANCE_ID") or None, "routerVmId": "", "cloudstackUrl": e("CLOUDSTACK_URL") or None,
@@ -361,7 +375,9 @@ if e("W") == "yes":
     f.update({"dbRootUser": "root", "dbRootPassword": e("DB_ROOT_PASS") or None, "dbAdminUser": e("DB_ADMIN_USER"),
               "dbAdminPassword": e("DB_ADMIN_PASS") or None, "dbName": e("DB_NAME") or None,
               "dbUser": e("DB_USER") or e("DB_ADMIN_USER"), "dbPassword": (e("DB_USER_PASS") if e("DB_USER") else e("DB_ADMIN_PASS")) or None,
-              "backupDir": e("BACKUP_DIR") or None, "backupRetention": e("RETENTION") or None})
+              "backupDir": e("BACKUP_DIR") or None, "backupRetention": e("RETENTION") or None,
+              "vmUser": "root", "vmPassword": e("VM_PASS") or None})
+    if e("CHADMIN_PASS"): f.update({"sudoUser": "chadmin", "sudoPassword": e("CHADMIN_PASS")})
 d["fields"] = f
 print(json.dumps(d))
 PY
@@ -374,7 +390,7 @@ finish(){
   [ -n "${CANCELLED:-}" ] && rc=130
   if [ "$rc" = 0 ]; then RESULT=SUCCESS; elif [ "$rc" = 130 ]; then RESULT=CANCELLED; else RESULT=FAILED; fi
   FREE_GB=$(df -BM --output=avail /var/lib 2>/dev/null | tail -1 | tr -dc 0-9 | awk '{printf "%.1f", $1/1024}')
-  export RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER DATADIR BACKUP_DIR RETENTION SSH_PORT
+  export RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB VM_PASS CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER DATADIR BACKUP_DIR RETENTION SSH_PORT
   {
     echo "RESULT=$RESULT"; echo "TIME=$(date '+%F %T %Z')"; echo "INSTALLER=yc-db-install $VER"
     echo "ENGINE=$ENGINE ${DB_REAL_VERSION:-$DB_VERSION}"; echo "STEP=$STEP"; echo "WARNINGS=$WARNS${WARN_TXT:+ ($WARN_TXT)}"
@@ -539,7 +555,28 @@ step "4 secrets"
 : "${DB_ROOT_PASS:=$(genpw)}"; : "${DB_ADMIN_PASS:=$(genpw)}"
 [ -n "$DB_USER" ] && : "${DB_USER_PASS:=$(genpw)}"
 for v in DB_ROOT_PASS DB_ADMIN_PASS; do [ -n "${!v}" ] || die "password generation failed (local and $PASS_URL)"; done
-( umask 077; printf "DB_ROOT_PASS='%s'\nDB_ADMIN_PASS='%s'\nDB_USER_PASS='%s'\n" "$DB_ROOT_PASS" "$DB_ADMIN_PASS" "${DB_USER_PASS:-}" > "$INFO/secrets.env" )
+# OS logins: the KVM v263 template's linked cloud-config sets WELL-KNOWN passwords (root/Root@123, ubuntu/ubuntu,
+# chadmin/Reset@123) after CloudStack's - with SSH password login on a public IP that is an open door. Replace them:
+# root = the CloudStack-issued password (cloud-init cache, this boot only) or a generated one; chadmin = generated; ubuntu = locked.
+if [ -z "${VM_PASS:-}" ]; then
+  # CloudStack password (password-enabled template): cloud-init cache -> ConfigDrive -> VR password server -> generated
+  VM_PASS=$(python3 -c "import json;print(json.load(open('/run/cloud-init/combined-cloud-config.json')).get('password',''))" 2>/dev/null); VM_PASS_SRC=cloudstack
+  if [ ${#VM_PASS} -lt 8 ]; then c=$(cfgdrive) && VM_PASS=$(tr -d '\r\n' < "$c/cloudstack/password/vm_password.txt" 2>/dev/null); VM_PASS_SRC=cloudstack-configdrive; fi
+  if [ ${#VM_PASS} -lt 8 ]; then
+    for s in $(vr_list | awk '!s[$0]++'); do
+      VM_PASS=$(curl -fs --max-time 5 -H "DomU_Request: send_my_password" "http://$s:8080" 2>/dev/null | tr -d '\r\n')
+      case "$VM_PASS" in ""|saved_password|bad_request) VM_PASS="";; *) curl -fs --max-time 5 -H "DomU_Request: saved_password" "http://$s:8080" >/dev/null 2>&1; VM_PASS_SRC=cloudstack-password-server; break;; esac
+    done
+  fi
+  if [ ${#VM_PASS} -lt 8 ]; then VM_PASS=$(genpw); VM_PASS_SRC=generated; fi
+fi
+VM_PASS_SRC=${VM_PASS_SRC:-kept}
+printf 'root:%s\n' "$VM_PASS" | chpasswd || die "setting the root password failed"
+CHADMIN_PASS=${CHADMIN_PASS:-}
+if id chadmin >/dev/null 2>&1; then : "${CHADMIN_PASS:=$(genpw)}"; printf 'chadmin:%s\n' "$CHADMIN_PASS" | chpasswd || warn "chadmin password not set"; else CHADMIN_PASS=""; fi
+id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1
+say "os logins: root password = $VM_PASS_SRC, chadmin $([ -n "$CHADMIN_PASS" ] && echo 'password generated' || echo 'not present'), ubuntu locked (template defaults removed)"
+( umask 077; printf "DB_ROOT_PASS='%s'\nDB_ADMIN_PASS='%s'\nDB_USER_PASS='%s'\nVM_PASS='%s'\nCHADMIN_PASS='%s'\n" "$DB_ROOT_PASS" "$DB_ADMIN_PASS" "${DB_USER_PASS:-}" "$VM_PASS" "$CHADMIN_PASS" > "$INFO/secrets.env" )
 ( umask 077; printf '[client]\nuser=root\npassword="%s"\n' "$DB_ROOT_PASS" > /root/.my.cnf.yc-new )
 
 # answers file without passwords (re-run, retune, yallacloud, backup read it)
@@ -809,7 +846,7 @@ URI_ADMIN="mysql://$DB_ADMIN_USER:$(urlpw "$DB_ADMIN_PASS")@${HOST_PUB:-$HOST_C}
 URI_USER=""; [ -n "$DB_USER" ] && URI_USER="mysql://$DB_USER:$(urlpw "$DB_USER_PASS")@${HOST_PUB:-$HOST_C}:$DB_PORT/$DB_NAME"
 jproto=mysql; [ "$ENGINE" = mariadb ] && jproto=mariadb
 jx=""; [ "$ENGINE" = mysql ] && jx="?allowPublicKeyRetrieval=true"
-export DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATADIR BACKUP_DIR RETENTION SSH_PORT URI_ADMIN URI_USER
+export DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS VM_PASS CHADMIN_PASS DATADIR BACKUP_DIR RETENTION SSH_PORT URI_ADMIN URI_USER
 umask 077
 {
 cat <<EOF
@@ -846,7 +883,11 @@ cat <<EOF
 note        : '#' in a password is written %23 inside a URI.$([ "$ENGINE" = mysql ] && echo " Old clients without TLS need allowPublicKeyRetrieval=true (caching_sha2_password).")
 
 -- server ----------------------------------------------------------------------
-ssh         : port $SSH_PORT, root + password (CloudStack password)${SSH_KEY_FP:+ + key $SSH_KEY_FP}
+ssh         : port $SSH_PORT, root / $VM_PASS   (${VM_PASS_SRC:-kept})${SSH_KEY_FP:+ + key $SSH_KEY_FP}
+EOF
+[ -n "$CHADMIN_PASS" ] && echo "sudo user   : chadmin / $CHADMIN_PASS"
+cat <<EOF
+note        : template default passwords (Root@123, ubuntu, Reset@123) were replaced; ubuntu is locked
 datadir     : $DATADIR on $(findmnt -no SOURCE --target $DATADIR)
 backups     : $RETENTION   (yallacloud backup)
 binlog      : $BINLOG $([ "$BINLOG" = yes ] && echo "(${BINLOG_DAYS} days)")
@@ -998,5 +1039,5 @@ fi
 step "14 done"
 [ "$DISABLE_CLOUD_INIT" = yes ] && touch /etc/cloud/cloud-init.disabled 2>/dev/null
 rm -f "$INFO/INSTALL-FAILED"
-grep -vE '^(root|admin|app user|cli|uri|jdbc|php|python) ' "$INFO/handover.txt"   # no passwords on the console
+grep -vE '^(root|admin|app user|cli|uri|jdbc|php|python|ssh|sudo user) ' "$INFO/handover.txt"   # no passwords on the console
 say "done in ${SECONDS}s - credentials: /root/yc-db/handover.txt (yallacloud secrets)"

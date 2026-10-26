@@ -298,7 +298,22 @@ DB_NAME=nextcloud; DB_USER=nc_user01
 
 # ------------------------------------------------------------- 4. packages
 export DEBIAN_FRONTEND=noninteractive
+# Ubuntu 24.04 unattended hygiene (common first-boot traps):
+#  - needrestart pops an interactive service/kernel-restart prompt that HANGS a
+#    cloud-init run; NEEDRESTART_MODE=a auto-restarts, SUSPEND=1 skips the prompt.
+export NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 UCF_FORCE_CONFFOLD=1
+#  - cloud-init / unattended-upgrades can still hold the dpkg lock at first boot;
+#    wait it out so our first apt-get does not die on a lock (max ~5 min).
+for _ in $(seq 1 60); do
+  fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break
+  sleep 5
+done
 timedatectl set-timezone "$TZ_SET" 2>/dev/null || true
+#  - a skewed clock makes Let's Encrypt and TLS fail; force NTP sync on.
+timedatectl set-ntp true 2>/dev/null || true
+#  - generate the system locale so apt/perl stop warning and occ has a real locale.
+locale-gen en_GB.UTF-8 >/dev/null 2>&1 || true
+update-locale LANG=en_GB.UTF-8 >/dev/null 2>&1 || true
 # Ubuntu 24.04 repo fix: the default archive.ubuntu.com / cloudflare / eu.archive
 # mirrors can be slow or unreachable on some networks. Repoint the archive host
 # at APT_MIRROR (default the UAE mirror ae.archive.ubuntu.com). security.ubuntu.com

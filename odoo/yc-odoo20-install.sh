@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.3  (2026-10-26 19:35 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.4  (2026-10-26 19:55 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -68,7 +68,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.3
+VER=1.4.4
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -196,7 +196,7 @@ say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=
 umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" ACRONIS_TOKEN "$ACRONIS_TOKEN" > "$NOTIFY_ENV"; umask 022
 cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 #!/usr/bin/env python3
-# yc-notify v1.1.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
+# yc-notify v1.2.0 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
 # (other team, yallacloud01, contract YCERP-01 - NOT ychook). Same event shape as the Windows
 # C-Scripts payload so the ERP matches it by vmId = SMBIOS UUID.
 #   yc-notify -t vm.deploy.completed -T "OK BUILD odoo combined" -p 3 -g white_check_mark,odoo \
@@ -207,7 +207,7 @@ cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 # webhook only, and only when WEBHOOK_SEND_SECRETS=yes. ntfy never gets a secret.
 # Settings: /etc/yallacloud/odoo.conf.env (switches) + notify.env (secrets, root 600). Failed webhook posts wait in
 # /var/lib/yallacloud/notify-queue and go first on the next call (event.delivery.queued).
-# Log: /var/log/yc-notify.log. Best effort: always exits 0 unless the arguments are wrong.
+# Log: /var/log/yc-notify.log; full webhook bodies + ERP answers: /var/log/yc-notify.events.jsonl (600). Best effort: always exits 0 unless the arguments are wrong.
 import argparse, datetime, glob, hashlib, json, os, shlex, socket, ssl, subprocess, sys, time, urllib.request
 
 CONF = '/etc/yallacloud/notify.env'          # secrets only: ERP_WEBHOOK_SECRET, ERP_WEBHOOK_TOKEN, NTFY_TOKEN
@@ -215,6 +215,7 @@ MAIN = '/etc/yallacloud/odoo.conf.env'       # switches + URLs (ENABLE_NTFY, NTF
 FACTS = '/etc/yallacloud/vm-facts.env'
 QDIR = '/var/lib/yallacloud/notify-queue'
 LOG = '/var/log/yc-notify.log'
+EVENTS = '/var/log/yc-notify.events.jsonl'   # every webhook body + the ERP answer, root 600 (holds the passwords)
 CLOUD = 'CloudStack-{220e4496-d9e4-49a6-9fa0-3d1ca8b67382}'   # constant in YCERP-01
 
 
@@ -391,16 +392,27 @@ def send_webhook(c, a, fx):
     left = len(glob.glob(QDIR + '/*.json'))
     ev['delivery'] = {'queued': left}
     body = json.dumps(ev, separators=(',', ':')).encode('utf-8')
+
+    def keep(answer):
+        try:
+            fd = os.open(EVENTS, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps({'sentAt': ev['utc'], 'event': ev, 'response': answer}) + '\n')
+        except OSError:
+            pass
     try:
         s, txt = post(url, body, h)
         try:
-            d = json.loads(txt).get('data', {})
+            resp = json.loads(txt)
         except ValueError:
-            d = {}
+            resp = {'raw': txt[:2000]}
+        keep(resp)
+        d = resp.get('data', {}) if isinstance(resp, dict) else {}
         if d.get('applied') is True:            # YCERP-01: 200 + success is NOT success; applied is
             return 'ok %s applied %s' % (s, d.get('instanceNo', ''))
         return 'ok %s NOT applied (%s)' % (s, d.get('ignored', 'no reason given'))
     except Exception as e:
+        keep({'error': str(e), 'queued': True})
         qf = '%s/%s-%s.json' % (QDIR, time.strftime('%Y%m%d%H%M%S'), os.getpid())
         fd = os.open(qf, os.O_WRONLY | os.O_CREAT, 0o600)
         with os.fdopen(fd, 'wb') as f:
@@ -1233,7 +1245,7 @@ BH=${BACKUP_TIME%:*}; BM=${BACKUP_TIME#*:}
     echo "0 8 * * * root odoo-ssl check >> /var/log/yc-odoo-ssl.log 2>&1"
   fi; } > /etc/cron.d/yallacloud-odoo
 chmod 644 /etc/cron.d/yallacloud-odoo
-printf '/var/log/yc-odoo-backup.log /var/log/yc-odoo-ssl.log /var/log/yc-notify.log {\n  monthly\n  rotate 12\n  compress\n  missingok\n  notifempty\n}\n' > /etc/logrotate.d/yc-odoo-tools
+printf '/var/log/yc-odoo-backup.log /var/log/yc-odoo-ssl.log /var/log/yc-notify.log /var/log/yc-notify.events.jsonl {\n  monthly\n  rotate 12\n  compress\n  missingok\n  notifempty\n}\n' > /etc/logrotate.d/yc-odoo-tools
 say "backups: $BACKUP_DIR daily $BACKUP_TIME, keep $BACKUP_KEEP_DAYS days; cert renew 03:15/15:15, cert check 08:00 (/etc/cron.d/yallacloud-odoo)"
 
 # persist effective config (no secrets) for re-runs, odoo-domain, odoo-backup, yc-notify
@@ -1353,7 +1365,7 @@ h "Logs and retention"
 kv odoo "/var/log/odoo/odoo-server.log (weekly, 8 kept)"
 kv nginx "/var/log/nginx/ (daily, 14 kept)"
 kv deploy "/var/log/yc-odoo-deploy.log (userdata + installer + cloud-init), status /var/log/yc-odoo-deploy.status"
-kv tools "/var/log/yc-odoo-backup.log, yc-odoo-ssl.log, yc-notify.log (monthly, 12 kept)"
+kv tools "/var/log/yc-odoo-backup.log, yc-odoo-ssl.log, yc-notify.log (monthly, 12 kept); webhook bodies + ERP answers /var/log/yc-notify.events.jsonl"
 kv journal "$(journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*[KMGT]')"
 h "Resources"
 kv cpu/ram "$(nproc) vCPU, $(free -h | awk '/Mem:/{print $2" RAM, "$3" used"}'), swap $(free -h | awk '/Swap:/{print $2}')"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.0  (2026-10-26 15:45 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.0  (2026-10-26 15:25 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,

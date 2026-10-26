@@ -54,7 +54,7 @@ TARBALL_URL=""                 # optional INTERNAL mirror (e.g. pbs01) serving
                                 # FortiGate throttle), e.g. "http://10.x.x.x/nextcloud".
 
 # --- ssh ---------------------------------------------------------------------
-SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yc-ops"  # baked-in yc-ops operator key, installed for root
+SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== guest"  # baked-in guest operator key, installed for root
                                 # and $SUDO_USER_NAME, e.g.
                                 # "ssh-ed25519 AAAAC3Nza... bilal@elitebook"
                                 # blank = pubkey auth still enabled, add keys later.
@@ -77,6 +77,13 @@ NTFY_TOPIC="9890122212"        # ntfy topic (change per client/deployment)
 NOTIFY_WEBHOOK="no"            # yes|no - POST full JSON incl. credentials (needs WEBHOOK_SECRET)
 WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"  # YallaCloud ERP webhook (changeable)
 WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn the webhook on
+# CloudStack context for the webhook - the deployer/portal supplies these (the guest
+# cannot know its own tenant/portal); they are reported so the ERP knows exactly where
+# the VM came from. All optional.
+CS_PORTAL_URL=""               # CloudStack portal URL, e.g. https://cloudstack.yallacloud.net
+CS_DOMAIN=""                   # CloudStack domain/tenant that owns this VM
+CS_ACCOUNT=""                  # CloudStack account that owns this VM
+VM_NAME=""                     # CloudStack VM display name (blank = auto-detect from cloud-init)
 
 # --- integrations (Salt minion + Acronis backup agent) ---
 JOIN_SALT="yes"                # yes|no - join this VM to the YallaCloud Salt master (salt.oasisstack.io:4506)
@@ -154,13 +161,23 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"
 VMID=$(cat /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
+VM_UUID="$VMID"   # CloudStack instance UUID == SMBIOS product_uuid
+# VM name + instance id: deployer vars (VM_NAME) win; else best-effort from cloud-init metadata.
+: "${VM_NAME:=}"; : "${VM_INSTANCE:=}"; : "${CS_PORTAL_URL:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"
+if command -v cloud-init >/dev/null 2>&1; then
+  [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.name 2>/dev/null)
+  [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.'local-hostname' 2>/dev/null)
+  [ -n "$VM_INSTANCE" ] || VM_INSTANCE=$(cloud-init query ds.meta_data.'instance-id' 2>/dev/null)
+fi
+case "$VM_NAME"     in null|"<no value>"|*[Ee]rror*) VM_NAME="";; esac
+case "$VM_INSTANCE" in null|"<no value>"|*[Ee]rror*) VM_INSTANCE="";; esac
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, no secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
   curl -fsS --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source}" -d "$2" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
 }
 notify_webhook(){  # $1 type $2 extra - FULL JSON incl. credentials, X-Webhook-Secret
   [ "${NOTIFY_WEBHOOK:-no}" = yes ] && [ -n "${WEBHOOK_URL:-}" ] || return 0
-  curl -fsS --max-time 15 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} -d "{\"type\":\"$1\",\"cloud\":\"cloudstack\",\"product\":\"nextcloud\",\"vmId\":\"${VMID}\",\"smbiosUuid\":\"${VMID}\",\"hostname\":\"$(hostname)\",\"fqdn\":\"${FQDN}\",\"ip\":\"${NET_IP:-}\",\"publicIp\":\"${PUBLIC_IP:-}\",\"shape\":\"${NET_SHAPE:-}\",\"url\":\"https://${FQDN}${PORTSFX:-}/\",\"ssl\":\"${SSL_STATUS:-}\",\"ncVersion\":\"${NC_VERSION:-}\",\"adminUser\":\"${ADMIN_USER:-}\",\"adminPassword\":\"${ADMIN_PASS:-}\",\"dbName\":\"${DB_NAME:-}\",\"dbUser\":\"${DB_USER:-}\",\"dbPassword\":\"${DB_PASS:-}\",\"redisPassword\":\"${REDIS_PASS:-}\",\"sudoUser\":\"${SUDO_USER_NAME:-}\",\"sshPort\":\"${SSH_PORT:-}\",\"dataPath\":\"${DATA_PATH:-}\",\"extra\":\"$2\",\"utc\":\"$(date -u +%FT%TZ)\"}" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
+  curl -fsS --max-time 15 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} -d "{\"type\":\"$1\",\"cloud\":\"cloudstack\",\"product\":\"nextcloud\",\"vmId\":\"${VMID}\",\"smbiosUuid\":\"${VMID}\",\"vmUuid\":\"${VM_UUID:-}\",\"vmName\":\"${VM_NAME:-}\",\"vmInstance\":\"${VM_INSTANCE:-}\",\"csPortalUrl\":\"${CS_PORTAL_URL:-}\",\"csDomain\":\"${CS_DOMAIN:-}\",\"csAccount\":\"${CS_ACCOUNT:-}\",\"hostname\":\"$(hostname)\",\"fqdn\":\"${FQDN}\",\"ip\":\"${NET_IP:-}\",\"publicIp\":\"${PUBLIC_IP:-}\",\"shape\":\"${NET_SHAPE:-}\",\"url\":\"https://${FQDN}${PORTSFX:-}/\",\"ssl\":\"${SSL_STATUS:-}\",\"ncVersion\":\"${NC_VERSION:-}\",\"adminUser\":\"${ADMIN_USER:-}\",\"adminPassword\":\"${ADMIN_PASS:-}\",\"dbName\":\"${DB_NAME:-}\",\"dbUser\":\"${DB_USER:-}\",\"dbPassword\":\"${DB_PASS:-}\",\"redisPassword\":\"${REDIS_PASS:-}\",\"sudoUser\":\"${SUDO_USER_NAME:-}\",\"sshPort\":\"${SSH_PORT:-}\",\"dataPath\":\"${DATA_PATH:-}\",\"extra\":\"$2\",\"utc\":\"$(date -u +%FT%TZ)\"}" "${WEBHOOK_URL}" >/dev/null 2>&1 || true
 }
 build_deploy_log(){  # $1 = SUCCESS|FAILED - ONE merged log: installer + cloud-init
   local DPL=/var/log/yc-nextcloud-deploy.log
@@ -202,6 +219,10 @@ NTFY_TOPIC=$NTFY_TOPIC
 NOTIFY_WEBHOOK=$NOTIFY_WEBHOOK
 WEBHOOK_URL=$WEBHOOK_URL
 WEBHOOK_SECRET=$WEBHOOK_SECRET
+CS_PORTAL_URL=$CS_PORTAL_URL
+CS_DOMAIN=$CS_DOMAIN
+CS_ACCOUNT=$CS_ACCOUNT
+VM_NAME="$VM_NAME"
 JOIN_SALT=$JOIN_SALT
 ACRONIS_TOKEN=$ACRONIS_TOKEN
 ACRONIS_REGION=$ACRONIS_REGION

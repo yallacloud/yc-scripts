@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.6  (2026-10-26 20:10 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.7  (2026-10-26 20:30 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -54,7 +54,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.6
+VER=1.0.7
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -321,6 +321,7 @@ SMBIOS=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)
 ZONE=$(md availability-zone)
 VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$(md instance-id)}; VM_UUID=$(printf '%s' "${VM_UUID:-$SMBIOS}" | tr 'A-Z' 'a-z')
 OFFERING=$(md service-offering)
+INSTANCE_ID=$(md instance-id)
 CLOUD_ID=$(md cloud-identifier)
 TENANT=""; TENANT_SRC=""
 PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
@@ -333,7 +334,7 @@ d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or None, "smbiosUuid":
      "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
      "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
      "hostname": e("VM_NAME"), "ip": e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": e("HOST_PUB") or None,
-     "zone": e("ZONE") or None, "cloud": "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
+     "zone": e("ZONE") or None, "cloud": e("CLOUD_ID") or "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
      "cloudPortal": e("CLOUDSTACK_URL") or None,
      "cloudVmUrl": (e("CLOUDSTACK_URL") + "/#/vm/" + e("VM_UUID")) if e("CLOUDSTACK_URL") and e("VM_UUID") else None, "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
      "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
@@ -347,17 +348,33 @@ if e("W") == "yes":
         "user": "DB_USER", "userPassword": "DB_USER_PASS", "uriAdmin": "URI_ADMIN", "uriUser": "URI_USER",
         "dataDir": "DATADIR", "backupDir": "BACKUP_DIR", "backupRetention": "RETENTION",
         "sshPort": "SSH_PORT"}.items()}
+# same keys as the Odoo kit / payload events (one ERP contract) - additive only
+d.update({"offering": e("OFFERING") or None, "identitySource": "smbios" if e("SMBIOS") else "metadata",
+          "instanceId": e("INSTANCE_ID") or None, "routerVmId": "", "cloudstackUrl": e("CLOUDSTACK_URL") or None,
+          "lastUpdated": time.strftime("%Y-%m-%d %H:%M:%S %z ") + (e("TZ_SET") or "UTC").split("/")[-1], "payload": e("VER"), "freeGb": float(e("FREE_GB") or 0),
+          "delivery": {"queued": 0}})
+st = {"vm.deploy.started": "started", "vm.deploy.completed": "completed"}.get(e("T"), "failed")
+f = {"area": "db", "status": st, "summary": e("S"), "engine": e("ENGINE"), "dbVersion": e("DB_REAL_VERSION") or e("DB_VERSION"),
+     "dbHost": e("HOST_PUB") or e("HOST_PRIV") or None, "dbPort": e("DB_PORT"), "sshPort": e("SSH_PORT") or None,
+     "warnings": e("WARN_TXT") or "", "installer": e("VER"), "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}
+if e("W") == "yes":
+    f.update({"dbRootUser": "root", "dbRootPassword": e("DB_ROOT_PASS") or None, "dbAdminUser": e("DB_ADMIN_USER"),
+              "dbAdminPassword": e("DB_ADMIN_PASS") or None, "dbName": e("DB_NAME") or None,
+              "dbUser": e("DB_USER") or e("DB_ADMIN_USER"), "dbPassword": (e("DB_USER_PASS") if e("DB_USER") else e("DB_ADMIN_PASS")) or None,
+              "backupDir": e("BACKUP_DIR") or None, "backupRetention": e("RETENTION") or None})
+d["fields"] = f
 print(json.dumps(d))
 PY
 }
-export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER VM_NAME VM_UUID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS
+export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS
 RESULT=RUNNING
 finish(){
   local rc=$? title prio tags msg typ j
   trap - EXIT INT TERM
   [ -n "${CANCELLED:-}" ] && rc=130
   if [ "$rc" = 0 ]; then RESULT=SUCCESS; elif [ "$rc" = 130 ]; then RESULT=CANCELLED; else RESULT=FAILED; fi
-  export RESULT STEP WARNS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER DATADIR BACKUP_DIR RETENTION SSH_PORT
+  FREE_GB=$(df -BM --output=avail /var/lib 2>/dev/null | tail -1 | tr -dc 0-9 | awk '{printf "%.1f", $1/1024}')
+  export RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER DATADIR BACKUP_DIR RETENTION SSH_PORT
   {
     echo "RESULT=$RESULT"; echo "TIME=$(date '+%F %T %Z')"; echo "INSTALLER=yc-db-install $VER"
     echo "ENGINE=$ENGINE ${DB_REAL_VERSION:-$DB_VERSION}"; echo "STEP=$STEP"; echo "WARNINGS=$WARNS${WARN_TXT:+ ($WARN_TXT)}"

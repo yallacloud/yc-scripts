@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-#  yc-nextcloud-manual.sh  1.4.0                                              #
+#  yc-nextcloud-install.sh  (version: NC_IVER below)                           #
 #  Run this AS ROOT on a fresh Ubuntu 24.04 LTS VM.                          #
 #  VM to install a production Nextcloud with a Let's Encrypt certificate.     #
 #                                                                            #
@@ -121,11 +121,14 @@ PUBLIC_IP=""                    # optional: the PUBLIC IP that reaches this VM (
 CFG=/etc/yallacloud/nextcloud.conf
 LOG=/var/log/yc-nextcloud-install.log
 OUT=/root/yc-handover.json
-exec > >(tee -a "$LOG") 2>&1
+touch "$LOG"; chmod 600 "$LOG"
+# cloud-init already sends our stdout to $LOG - teeing again wrote every line twice
+[ "$(readlink -f /proc/$$/fd/1)" = "$LOG" ] || exec > >(tee -a "$LOG") 2>&1
 
 say()  { echo "[$(date +%H:%M:%S)] $*"; }
 die()  { echo "YC-FATAL: $*" | tee /root/yc-INSTALL-FAILED
-         command -v notify_ntfy    >/dev/null 2>&1 && notify_ntfy "Nextcloud FAILED: ${FQDN:-?}" "FAILED: $* (host $(hostname) ip ${NET_IP:-?})" high "rotating_light,x"
+         command -v notify_ntfy    >/dev/null 2>&1 && notify_ntfy "FAILED BUILD nextcloud" "result  FAILED: $*
+url     https://${FQDN:-?}/" high "x"
          command -v notify_webhook >/dev/null 2>&1 && notify_webhook "vm.deploy.failed" "$*"
          command -v build_deploy_log>/dev/null 2>&1 && build_deploy_log FAILED
          exit 1; }
@@ -163,10 +166,13 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 # userdata / re-run: an existing conf (written by cloud-init) OVERRIDES the
 # CONFIG block above, so one embedded installer serves many VMs.
 [ -f "$CFG" ] && . "$CFG"
+if grep -qs "'installed' => true" /var/www/nextcloud/config/config.php; then
+    say "Nextcloud is already installed here - nothing to do (TLS: yc-nc-ssl, domain: yc-nc-domain, facts: yallacloud)"; exit 0
+fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"
-VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
-NC_IVER="1.1.9"
+VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
+NC_IVER="1.2.0"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -216,13 +222,16 @@ printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
 # The template's cloud-config gives 'ubuntu' the fixed password 'ubuntu' on every VM, and SSH password
 # login is on: lock it (keys and console still work; owner 2026-10-26, same as db v1.0.9).
 id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1 || true
-export VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
+export SALT_STATE SSL_STATUS ACRONIS_TOKEN TZ_SET VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
-  curl -fsS --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source}" --data-binary "$2
+  curl -fsS --max-time 10 -H "Title: $1 - $(hostname)" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source},nextcloud" --data-binary "$2
 host    $(hostname)  ${NET_IP:-}${PUBLIC_IP:+  public ${PUBLIC_IP}}
+os      $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}")
+time    $(date '+%F %T %z') ${TZ_SET##*/}  ($(date -u +%FT%TZ))
 vm      ${VM_NAME:--}  uuid ${VM_UUID:--}${ZONE:+  zone ${ZONE}}
-tenant  ${TENANT:-not published yet}  (${TENANT_SRC:--})  ${CLOUDSTACK_URL:-}" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
+tenant  ${TENANT:-not published yet}  (${TENANT_SRC:--})  ${CLOUDSTACK_URL:-}
+by      yc-nextcloud-install / ${NC_IVER}  log ${LOG}" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
 }
 notify_webhook(){  # $1 type $2 extra [$3 with-secrets:yes|no] - house YCERP-01 envelope, X-Webhook-Secret
   [ "${NOTIFY_WEBHOOK:-no}" = yes ] && [ -n "${WEBHOOK_URL:-}" ] || return 0
@@ -255,15 +264,36 @@ d={"type":e("WTYPE"),"extra":e("WEXTRA"),
  "app":{"url":"https://%s%s/"%(e("FQDN") or "",PORTSFX),"tls":e("SSL_STATUS") or "",
    "ncVersion":e("NC_VERSION") or "","sshPort":e("SSH_PORT") or "","dataPath":e("DATA_PATH") or "",
    "dbName":e("DB_NAME") or ""}}
-if e("WSEC")=="yes":
-  d["credentials"]={"rootUser":"root","rootPassword":e("CS_ROOT_PASS") or "","rootPasswordSource":e("CS_ROOT_SRC") or "",
-   "adminUser":e("ADMIN_USER") or "","adminPassword":e("ADMIN_PASS") or "",
-   "dbUser":e("DB_USER") or "","dbPassword":e("DB_PASS") or "",
-   "redisPassword":e("REDIS_PASS") or "",
-   "sudoUser":e("SUDO_USER_NAME") or "","sudoPassword":e("SUDO_PASS") or ""}
+T=e("WTYPE") or ""; ok=T=="vm.deploy.completed"
+st={"vm.deploy.started":"started","vm.deploy.completed":"completed"}.get(T,"failed")
+warn=[w for w in ["salt: "+e("SALT_STATE") if (e("SALT_STATE") or "").startswith(("FAILED","BLOCKED")) else "",
+                  "tls: "+e("SSL_STATUS") if (e("SSL_STATUS") or "").startswith("self-signed") else ""] if w]
+try: fs=os.statvfs(e("DATA_PATH") or "/")
+except OSError: fs=os.statvfs("/")
+d["schema"]="yc-event/2"; d["summary"]=e("WEXTRA") or T
+d["vm"]={"vmId":d["vmId"],"smbiosUuid":d["smbiosUuid"],"vmUuid":d["vmUuid"],"instanceId":d["instanceId"],
+ "identitySource":"smbios","vmIdMismatch":d["vmIdMismatch"],"routerVmId":None,"vmName":d["vmName"],
+ "hostname":d["hostname"],"ip":d["ip"],"publicIp":d["publicIp"],"os":d["os"],"osVersion":o.get("VERSION_ID",""),
+ "freeGb":round(fs.f_bavail*fs.f_frsize/1073741824,1)}
+d["cloud"]={"id":e("CLOUD_ID") or None,"zone":d["zone"],"tenant":d["tenant"],"tenantSource":d["tenantSource"],
+ "offering":d["serviceOffering"],"portal":d["cloudPortal"],"vmUrl":d["cloudVmUrl"]}
+d["service"]={"area":"salt" if T.startswith("vm.salt.") else "nextcloud","catalogue":d["catalogue"],"status":st,
+ "result":("SUCCESS" if not warn else "SUCCESS with warnings") if ok else ("FAILED" if st=="failed" else None),
+ "warnings":warn,"installer":d["installer"],
+ "details":dict(d["app"],sshPort=int(e("SSH_PORT")) if (e("SSH_PORT") or "").isdigit() else None,fqdn=d["fqdn"],shape=d["shape"],salt=e("SALT_STATE") or None,
+                acronis="on" if e("ACRONIS_TOKEN") else "off")}
+if e("WSEC")=="yes":   # every secret in ONE place, YC-EVENT v2 shape; empty logins left out
+  def up(u,pw,**x): return dict({"user":u,"password":pw},**x) if pw else None
+  c={"vm":up("root",e("CS_ROOT_PASS"),source=e("CS_ROOT_SRC") or None),
+     "sudo":up(e("SUDO_USER_NAME"),e("SUDO_PASS")),
+     "nextcloud":{"admin":up(e("ADMIN_USER"),e("ADMIN_PASS"))},
+     "db":{"app":up(e("DB_USER"),e("DB_PASS")),"database":e("DB_NAME") or None},
+     "redis":{"password":e("REDIS_PASS")} if e("REDIS_PASS") else None}
+  d["credentials"]={k:v for k,v in c.items() if v and any(x is not None for x in v.values())}
+d["delivery"]={"queued":0}
 print(json.dumps(d))
 PY
-  curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H "X-Webhook-Secret: ${WEBHOOK_SECRET}"} --data-binary @"$j" "${WEBHOOK_URL}" >/root/yc-webhook-$1.resp 2>&1 || true
+  curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H @<(printf 'X-Webhook-Secret: %s\n' "$WEBHOOK_SECRET")} --data-binary @"$j" "${WEBHOOK_URL}" >/root/yc-webhook-$1.resp 2>&1 || true
   install -m 600 "$j" "/root/yc-webhook-$1.json"  # root-only copy of what was sent (same secrets as yc-handover.json)
   rm -f "$j"
 }
@@ -288,6 +318,7 @@ case "$FQDN" in cloud.example.com|"") FQDN=""; FQDN_AUTO=yes ;; *) FQDN_AUTO=no 
 
 # persist the choices so a re-run and the handover agree
 mkdir -p /etc/yallacloud
+install -m 600 /dev/null "$CFG"
 cat > "$CFG" <<EOF
 FQDN=$FQDN
 ADMIN_USER=$ADMIN_USER
@@ -323,6 +354,8 @@ LE_EMAIL="$LE_EMAIL"
 DISABLE_CLOUD_INIT=$DISABLE_CLOUD_INIT
 REBOOT_AFTER=$REBOOT_AFTER
 PUBLIC_IP=$PUBLIC_IP
+SSH_PORT_OVERRIDE=$SSH_PORT_OVERRIDE
+GATEWAY_OVERRIDE=$GATEWAY_OVERRIDE
 EOF
 chmod 600 "$CFG"
 
@@ -446,7 +479,8 @@ if [ "${FQDN_AUTO:-no}" = yes ]; then
     sed -i "s|^FQDN=.*|FQDN=$FQDN|" "$CFG" 2>/dev/null || echo "FQDN=$FQDN" >> "$CFG"
     say "no FQDN given - using sslip.io fallback $FQDN (change later: yc-nc-domain <domain> --le)"
 fi
-notify_ntfy "Nextcloud: creating ${FQDN}" "Deploying on ${NET_IP} (${NET_SHAPE})" default "package,hourglass"
+notify_ntfy "START BUILD nextcloud" "url     https://${FQDN}/
+ip      ${NET_IP} (${NET_SHAPE})  tier ${TIER}  data ${DATA_PATH}" low "hourglass_flowing_sand"
 notify_webhook "vm.deploy.started" "network ${NET_SHAPE}"
 PRIV_IP="$NET_IP"
 
@@ -479,9 +513,6 @@ case "${ID}-${VERSION_ID}" in
   *) die "this script is for Ubuntu 24.04 LTS only (found: ${PRETTY_NAME})." ;;
 esac
 
-# name the host after its domain (cosmetic - tidier logs/mail)
-hostnamectl set-hostname "$FQDN" 2>/dev/null || true
-grep -q "$FQDN" /etc/hosts || echo "127.0.1.1 $FQDN ${FQDN%%.*}" >> /etc/hosts
 say "using distro PHP $PHPV - no third-party APT repositories are added"
 
 # ------------------------------------------------------------ 3. secrets
@@ -629,7 +660,7 @@ point(){ sed -i "s#ssl_certificate .*#ssl_certificate $1;#; s#ssl_certificate_ke
 reload(){ nginx -t && systemctl reload nginx; }
 case "${1:-status}" in
   le)
-    certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos -m "${LE_EMAIL:-admin@${FQDN}}" -d "$FQDN" \ --deploy-hook "systemctl reload nginx"
+    certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos -m "${LE_EMAIL:-admin@${FQDN}}" -d "$FQDN" \
       --deploy-hook "systemctl reload nginx"
     point "/etc/letsencrypt/live/${FQDN}/fullchain.pem" "/etc/letsencrypt/live/${FQDN}/privkey.pem"; reload
     echo "Let's Encrypt cert installed for $FQDN (auto-renews via certbot.timer).";;
@@ -736,7 +767,7 @@ sed -i 's/^memory_limit = .*/memory_limit = 1024M/;
         s/^max_execution_time = .*/max_execution_time = 3600/;
         s/^max_input_time = .*/max_input_time = 3600/;
         s/^;date.timezone.*/date.timezone = '"${TZ_SET//\//\\/}"'/' "$PHPINI"
-cat >> "$PHPINI" <<EOF
+grep -q "^; yallacloud" "$PHPINI" || cat >> "$PHPINI" <<EOF
 
 ; yallacloud
 opcache.enable=1
@@ -919,8 +950,8 @@ if { [ -n "$TARBALL_URL" ] || [ -n "$REPO_MIRROR" ]; } && { [ -z "$TARBALL" ] ||
     for _mir in "$TARBALL_URL" "$REPO_MIRROR"; do
         [ -n "$_mir" ] || continue
         say "fetching Nextcloud from $_mir"
-        if curl -fSL --retry 3 --retry-delay 5 -o "$TARBALL" "$_mir/latest.tar.bz2"; then
-            curl -fSL --retry 3 --retry-delay 5 -o "${TARBALL}.sha256" "$_mir/latest.tar.bz2.sha256" \
+        if curl -fSL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 1800 --speed-limit 10240 --speed-time 120 -o "$TARBALL" "$_mir/latest.tar.bz2"; then
+            curl -fSL --retry 3 --retry-delay 5 --max-time 60 -o "${TARBALL}.sha256" "$_mir/latest.tar.bz2.sha256" \
                 || say "  no .sha256 at $_mir - will check archive integrity only"
             [ -s "$TARBALL" ] && { say "  fetched $(du -h "$TARBALL" | cut -f1) from $_mir"; break; }
         fi
@@ -947,7 +978,7 @@ elif [ -n "$TARBALL" ]; then
     die "TARBALL set to '$TARBALL' but that file does not exist"
 else
     say "fetching Nextcloud from download.nextcloud.com"
-    fetch_nextcloud || die "could not obtain a verified Nextcloud archive after $NC_ATTEMPTS attempts.
+    fetch_nextcloud || die "could not obtain a verified Nextcloud archive after ${NC_ATTEMPTS:-0} attempts.
       Report: $DL_RECORD
       Either fix egress to download.nextcloud.com, or pre-download latest.tar.bz2
       and set TARBALL=/path/to/latest.tar.bz2 in the CONFIG block."
@@ -1069,9 +1100,9 @@ echo '*/5 * * * * php -f /var/www/nextcloud/cron.php' | crontab -u www-data -
 say "requesting a Let's Encrypt certificate for $FQDN (HTTP-01 on port 80)"
 mkdir -p /var/www/nextcloud
 if [ -n "${LE_EMAIL:-}" ]; then _le_em="-m $LE_EMAIL"; else _le_em="--register-unsafely-without-email"; fi
-if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos \
+if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos --deploy-hook "systemctl reload nginx" \
      $_le_em -d "$FQDN" >/dev/null 2>&1; then
-  SSL_STATUS="letsencrypt"
+  SSL_STATUS="free (Let's Encrypt)"
   # point nginx at the real cert (replaces the temporary self-signed pair)
   sed -i "s#ssl_certificate .*#ssl_certificate /etc/letsencrypt/live/${FQDN}/fullchain.pem;#;
           s#ssl_certificate_key .*#ssl_certificate_key /etc/letsencrypt/live/${FQDN}/privkey.pem;#" \
@@ -1080,10 +1111,10 @@ if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos \
   say "certificate issued and installed"
   SSL_OK=yes
 else
-  SSL_STATUS="self-signed"
+  SSL_STATUS="self-signed (Let's Encrypt failed)"
   say "WARNING: Let's Encrypt failed - the site is up on the temporary self-signed cert."
   say "         Port 80 must be reachable from the internet (NAT 80 -> this VM:80)."
-  say "         Once forwarded, run: certbot certonly --webroot -w /var/www/nextcloud -d $FQDN"
+  say "         Once forwarded, run: yc-nc-ssl le"
   say "         then reload nginx."
   SSL_OK=no
 fi
@@ -1269,23 +1300,25 @@ if [ "${JOIN_SALT:-yes}" = yes ]; then
   # reachability gate: the minion must reach the master publisher port before joining.
   if timeout 8 bash -c '</dev/tcp/salt.oasisstack.io/4506' 2>/dev/null; then
     say "salt: master salt.oasisstack.io:4506 reachable - joining via repo.oasisstack.io/salt/join.sh"
-    if curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh >>"$LOG" 2>&1; then
-      say "  salt: joined (the master assigns the minion id: <domain>-<vmname>)"
+    if timeout 1200 bash -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' >>"$LOG" 2>&1; then
+      SALT_STATE="JOINED"; say "  salt: joined (the master assigns the minion id: <domain>-<vmname>)"
     else
-      say "  salt: join.sh failed (repo.oasisstack.io unreachable here?) - skipped, join later"
-      notify_webhook "vm.salt.failed" "salt join.sh failed (apt/mirror); 15-min retry cron set" no
+      printf '# YallaCloud: Salt join failed at install - retry the zero-input join until JOINED (join.sh removes this)\n*/15 * * * * root curl -fsS https://repo.oasisstack.io/salt/join.sh | sh >/dev/null 2>&1\n' > /etc/cron.d/yc-salt-join
+      SALT_STATE="FAILED - join.sh failed (repo/apt mirror), retry every 15 min"; say "  salt: $SALT_STATE"
+      notify_webhook "vm.salt.failed" "salt join.sh failed (repo/apt mirror) - retry cron /etc/cron.d/yc-salt-join" no
     fi
   else
-    say "  salt: master salt.oasisstack.io:4506 unreachable - skipping join (re-run join.sh when the path is open)"
-    notify_webhook "vm.salt.failed" "salt master salt.oasisstack.io:4506 unreachable" no
+    printf '# YallaCloud: Salt join failed at install - retry the zero-input join until JOINED (join.sh removes this)\n*/15 * * * * root curl -fsS https://repo.oasisstack.io/salt/join.sh | sh >/dev/null 2>&1\n' > /etc/cron.d/yc-salt-join
+    SALT_STATE="BLOCKED - salt.oasisstack.io:4506 unreachable, retry every 15 min"; say "  salt: $SALT_STATE"
+    notify_webhook "vm.salt.failed" "salt master salt.oasisstack.io:4506 unreachable - retry cron /etc/cron.d/yc-salt-join" no
   fi
 else
-  say "salt join disabled (JOIN_SALT=no)"
+  SALT_STATE="off"; say "salt join disabled (JOIN_SALT=no)"
 fi
 if [ -n "${ACRONIS_TOKEN:-}" ]; then
   say "installing + registering the Acronis backup agent (region ${ACRONIS_REGION:-AE})"
   _acr_ntfy=""; [ "${NOTIFY_NTFY:-yes}" = yes ] && [ -n "${NTFY_URL:-}" ] && [ -n "${NTFY_TOPIC:-}" ] && _acr_ntfy="--ntfy ${NTFY_URL%/}/${NTFY_TOPIC}"
-  if curl -fsSL --max-time 60 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s -- --token "$ACRONIS_TOKEN" --region "${ACRONIS_REGION:-AE}" $_acr_ntfy >>"$LOG" 2>&1; then
+  if curl -fsSL --max-time 60 https://repo.oasisstack.io/acronis/acronis-setup.sh | timeout 1800 bash -s -- --token "$ACRONIS_TOKEN" --region "${ACRONIS_REGION:-AE}" $_acr_ntfy >>"$LOG" 2>&1; then
     say "  acronis: setup ran (see the log for registered/already-registered status)"
   else
     say "  acronis: setup failed (token/region/egress) - continuing without it"
@@ -1390,9 +1423,8 @@ cat > "$OUT" <<EOF
 }
 EOF
 chmod 600 "$OUT"
-touch /root/yc-INSTALL-OK
 say "DONE - handover written to $OUT"
-say "URL https://${FQDN}${PORTSFX}  admin ${ADMIN_USER} / ${ADMIN_PASS}  ssh port ${SSH_PORT}"
+say "URL https://${FQDN}${PORTSFX}  admin ${ADMIN_USER}  ssh port ${SSH_PORT}  (passwords: yallacloud secrets)"
 
 # --------------------------------------------- 16. verify, then clean reboot
 # Nothing here changes the build. It proves the box is actually serving before
@@ -1418,11 +1450,19 @@ curl -skS -o /dev/null -m 15 "https://127.0.0.1:${HTTPS_PORT}/status.php" \
 if [ "$VFAIL" != "0" ]; then
     say "VERIFICATION FAILED - not rebooting. Fix the above first."
     say "Full log: $LOG   Handover: $OUT"
-    exit 1
+    die "post-install verification failed (see NOT RUNNING / NOT LISTENING above)"
 fi
 say "all services healthy, all ports listening"
+rm -f /root/yc-INSTALL-FAILED; touch /root/yc-INSTALL-OK
 NC_VERSION=$(sudo -u www-data php /var/www/nextcloud/occ status 2>/dev/null | awk -F': ' '/versionstring/{print $2}')
-notify_ntfy "Nextcloud: finished ${FQDN}" "READY https://${FQDN}${PORTSFX}/  ip ${NET_IP}  ssl ${SSL_STATUS}  nc ${NC_VERSION}  ssh ${SSH_PORT}" default "white_check_mark,rocket"
+_ok="SUCCESS"; case "$SALT_STATE$SSL_STATUS" in *FAILED*|*BLOCKED*|*self-signed*) _ok="SUCCESS with warnings";; esac
+notify_ntfy "OK BUILD nextcloud" "result  ${_ok}
+url     https://${FQDN}${PORTSFX}/
+tls     ${SSL_STATUS}
+ip      ${NET_IP}  ssh ${SSH_PORT}
+nc      ${NC_VERSION}   php ${PHPV}   data ${DATA_PATH}
+addons  salt ${SALT_STATE}   acronis ${ACRONIS_TOKEN:+on}${ACRONIS_TOKEN:-off}
+creds   /root/yc-handover.json (yallacloud secrets)" default "white_check_mark"
 notify_webhook "vm.deploy.completed" "install ok" yes
 build_deploy_log SUCCESS
 say "deploy log: /var/log/yc-nextcloud-deploy.log (installer + cloud-init merged)"
@@ -1444,7 +1484,7 @@ sleep 15
 say "  stopping web tier"
 systemctl stop nginx "php${PHPV}-fpm" >/dev/null 2>&1 || true
 say "  flushing redis"
-redis-cli -a "$REDIS_PASS" --no-auth-warning SAVE >/dev/null 2>&1 || true
+REDISCLI_AUTH="$REDIS_PASS" redis-cli SAVE >/dev/null 2>&1 || true
 systemctl stop redis-server >/dev/null 2>&1 || true
 say "  flushing mariadb - do not interrupt"
 mysql --no-defaults -u root -e "FLUSH TABLES; FLUSH LOGS;" >/dev/null 2>&1 || true

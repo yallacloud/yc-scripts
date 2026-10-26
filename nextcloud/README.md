@@ -18,7 +18,21 @@ Set `TARBALL_URL` to the release base and the installer pulls both over HTTPS
 
     TARBALL_URL=https://github.com/yallacloud/yc-scripts/releases/download/nc-latest
 
-## Userdata (cloud-init) - minimal
+## Userdata (cloud-init)
 
-cloud-init writes `/etc/yallacloud/nextcloud.conf` and a start hook that fetches this
-script from raw GitHub and runs it. See `yc-nc-userdata.yaml.example`.
+`yc-nextcloud-cloudinit.yaml` is the one cloud-init to paste at VM creation. Edit only the
+"EDIT THESE" block (nothing is required; blank FQDN = sslip.io name). It writes
+`/etc/yallacloud/nextcloud.conf`, fetches this installer from raw GitHub and runs it.
+
+The helper commands (`yc-nc-ssl`, `yc-nc-domain`, `yc-nc-backup`, `yc-nc-datadisk`, `yallacloud`)
+are embedded in the installer and written to `/usr/local/bin` on the VM - edit them there, not
+as separate files.
+
+## Notifications
+
+- ntfy: status only, house format (`START / OK / FAILED BUILD nextcloud - <host>`), never secrets.
+- ERP webhook: YC-EVENT v2 sections (`schema`, `vm`, `cloud`, `service`, `credentials`) plus the
+  v1 top-level keys (STACK4-63 phase 1). Secrets only in `credentials`, only on `vm.deploy.completed`.
+  A root-only copy of each event sent, and the ERP reply, is kept in `/root/yc-webhook-<event>.json|.resp`.
+
+Guide: STACK4-60 Nextcloud Deployment - Auto and Manual.

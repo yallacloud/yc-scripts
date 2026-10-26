@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.0  (2026-10-26 15:25 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.1  (2026-10-26 16:25 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -24,6 +24,7 @@ PG_VERSION="18"        # optional  16-19 (PGDG)
 PUBLIC_IP=""           # app/combined behind NAT: public IP forwarded to this VM (blank = auto)
 GATEWAY=""             # private VM behind a firewall: firewall LAN IP, e.g. 172.30.30.1 (blank = auto)
 SSH_PORT=""            # optional  blank = 3222 on a public IP, 22 on a private IP
+SSH_PUBKEYS="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yallacloud-admin"   # root keys, one per line
 # -- 4. OS
 TZ_SET="Asia/Dubai"    # optional  any /usr/share/zoneinfo name
 LOCALE_SET="en_US.UTF-8"
@@ -76,7 +77,7 @@ fi
 
 # answers for the installer (it validates each one, moves the secrets to notify.env)
 umask 077; mkdir -p /etc/yallacloud
-for v in ROLE DOMAIN LE_EMAIL DB_HOST DB_PASS APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT TZ_SET LOCALE_SET \
+for v in ROLE DOMAIN LE_EMAIL DB_HOST DB_PASS APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEYS TZ_SET LOCALE_SET \
          BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL \
          ERP_WEBHOOK_SECRET WEBHOOK_SEND_SECRETS ENABLE_SALT ENABLE_ACRONIS ACRONIS_TOKEN ACRONIS_REGION; do
   printf '%s=%q\n' "$v" "${!v}"

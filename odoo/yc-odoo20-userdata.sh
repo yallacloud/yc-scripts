@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.1  (2026-10-26 16:25 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.2  (2026-10-26 16:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -13,7 +13,7 @@
 # -- 1. layout
 ROLE="combined"        # REQUIRED  combined (DB+app on one VM) | db | app
 DOMAIN=""              # optional  erp.example.com  - blank = <public-ip>.sslip.io (app/combined only)
-LE_EMAIL=""            # optional  admin@example.com - Let's Encrypt expiry mails (blank = none)
+LE_EMAIL="bilalinamdar@gmail.com"   # optional  Let's Encrypt expiry mails (blank = none)
 # -- 2. database
 DB_HOST=""             # app: REQUIRED  private IP of the db VM, e.g. 172.30.30.3
 DB_PASS=""             # app: REQUIRED  from the db handover | db: blank = generated | combined: blank

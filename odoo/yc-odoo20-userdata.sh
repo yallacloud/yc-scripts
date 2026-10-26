@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.5  (2026-10-26 20:50 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.6  (2026-10-26 22:00 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -25,7 +25,7 @@ PUBLIC_IP=""           # app/combined behind NAT: public IP forwarded to this VM
 GATEWAY=""             # private VM behind a firewall: firewall LAN IP, e.g. 172.30.30.1 (blank = auto)
 SSH_PORT=""            # optional  blank = 3222 on a public IP, 22 on a private IP
 ROOT_PW_FROM_CLOUDSTACK="yes"   # VM login password = the one CloudStack shows (VR or ConfigDrive), sent in the webhook
-VM_PW_USERS="root chadmin"     # accounts that get it
+VM_PW_USERS="root"            # accounts that get it (chadmin gets its own generated password)
 SSH_PUBKEYS="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== guest"   # root keys, one per line
 # -- 4. OS
 TZ_SET="Asia/Dubai"    # optional  any /usr/share/zoneinfo name

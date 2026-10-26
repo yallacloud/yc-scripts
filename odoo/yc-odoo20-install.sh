@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.9  (2026-10-26 21:45 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.10  (2026-10-26 22:00 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -55,7 +55,7 @@ WEBHOOK_SEND_SECRETS="yes"       # put the Odoo/DB passwords in the webhook fiel
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal this VM comes from (sent as cloudstackUrl)
 CS_TENANT=""                     # CloudStack domain/tenant; blank = auto from the Salt inventory (ROOT = admin)
 ROOT_PW_FROM_CLOUDSTACK="yes"    # VM login password = the one CloudStack shows after deploy (sent in the webhook)
-VM_PW_USERS="root chadmin"       # accounts that get it (users that do not exist are skipped)
+VM_PW_USERS="root"              # accounts that get it (missing users skipped). chadmin gets its OWN generated password (owner 2026-10-26)
 # -- 7. add-ons, run in the background after the deploy (never block or fail it)
 ENABLE_SALT="yes"                # join the YallaCloud Salt master (zero-input, STACK4-54)
 SALT_JOIN_URL="https://repo.oasisstack.io/salt/join.sh"
@@ -70,7 +70,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.9
+VER=1.4.10
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -183,7 +183,7 @@ if [ "$ENABLE_WEBHOOK" = yes ]; then
   [ -n "$ERP_WEBHOOK_SECRET$ERP_WEBHOOK_TOKEN" ] || warn "ERP_WEBHOOK_SECRET is blank - the ERP will refuse the events (set it and run: yc-notify --test)"
 fi
 yn ENABLE_SALT yes; yn ENABLE_ACRONIS yes; yn ROOT_PW_FROM_CLOUDSTACK yes
-[[ "$VM_PW_USERS" =~ ^[a-z_][a-z0-9_-]*(\ [a-z_][a-z0-9_-]*)*$ ]] || { warn "VM_PW_USERS '$VM_PW_USERS' invalid - using root chadmin"; VM_PW_USERS="root chadmin"; }
+[[ "$VM_PW_USERS" =~ ^[a-z_][a-z0-9_-]*(\ [a-z_][a-z0-9_-]*)*$ ]] || { warn "VM_PW_USERS '$VM_PW_USERS' invalid - using root"; VM_PW_USERS="root"; }
 [[ "$SALT_JOIN_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "SALT_JOIN_URL '$SALT_JOIN_URL' invalid - default"; SALT_JOIN_URL=https://repo.oasisstack.io/salt/join.sh; }
 [[ "$ACRONIS_SETUP_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "ACRONIS_SETUP_URL invalid - default"; ACRONIS_SETUP_URL=https://repo.oasisstack.io/acronis/acronis-setup.sh; }
 ACRONIS_REGION=$(printf '%s' "$ACRONIS_REGION" | tr 'a-z' 'A-Z' | tr -d '[:space:]')
@@ -730,6 +730,17 @@ if [ "$ROOT_PW_FROM_CLOUDSTACK" = yes ]; then
 fi
 # The template's cloud-config gives 'ubuntu' the fixed password 'ubuntu' on every VM, and SSH password
 # login is on: lock it (keys and console still work; owner 2026-10-26, same as db v1.0.9).
+# chadmin (the template's sudo user): its OWN generated password, like the Nextcloud and db installers
+# (owner 2026-10-26) - unless it is listed in VM_PW_USERS. Kept across re-runs in vm-password.env.
+SUDO_USER_NAME=chadmin; SUDO_PASS=""
+case " $VM_PW_USERS " in *" $SUDO_USER_NAME "*) ;; *)
+  if id "$SUDO_USER_NAME" >/dev/null 2>&1; then
+    SUDO_PASS=$(sed -n "s/^SUDO_PASS=//p" "$INFO/vm-password.sudo" 2>/dev/null); [ -n "$SUDO_PASS" ] || SUDO_PASS=$(genpw)
+    if [ -n "$SUDO_PASS" ] && printf '%s:%s\n' "$SUDO_USER_NAME" "$SUDO_PASS" | chpasswd; then
+      umask 077; printf 'SUDO_PASS=%s\n' "$SUDO_PASS" > "$INFO/vm-password.sudo"; umask 022; say "$SUDO_USER_NAME: own generated password"
+    else warn "could not set the $SUDO_USER_NAME password"; SUDO_PASS=""; fi
+  fi;;
+esac
 case " $VM_PW_USERS " in *" ubuntu "*) ;; *) id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1 && say "ubuntu: password locked";; esac
 [ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"
 : "${DB_PASS:=$(genpw)}"; : "${MASTER_PASS:=$(genpw)}"; : "${ADMIN_PASS:=$(genpw)}"
@@ -1311,6 +1322,7 @@ umask 077
 echo "YallaCloud Odoo 20 - $(hostname) - $(date '+%F %T %Z')"
 echo "role        : $ROLE"
 echo "ssh         : root@${URL_IP} -p $SSH_PORT  password: ${VM_PASS:-<unchanged>}  (${VM_PASS_SRC:-}; users: ${VM_PASS_SET:-none})  (key: SSH_PUBKEYS)"
+[ -n "${SUDO_PASS:-}" ] && echo "sudo user   : $SUDO_USER_NAME / $SUDO_PASS"
 if [ "$ROLE" != db ]; then
 echo "odoo url    : $URL"
 echo "odoo login  : admin / $ADMIN_PASS        (database: ${ODOO_DB:-none})"
@@ -1454,6 +1466,7 @@ ADD_SALT=off; [ "$ENABLE_SALT" = yes ] && ADD_SALT="joining (own message follows
 ADD_ACR=off; [ "$ENABLE_ACRONIS" = yes ] && { [ -n "$ACRONIS_TOKEN" ] && ADD_ACR="installing $ACRONIS_REGION (own message follows)" || ADD_ACR="skipped - no token"; }
 # credentials section of the webhook: vm / odoo / database (only with WEBHOOK_SEND_SECRETS=yes)
 SEC=(-s vm.user=root -s vm.password="${VM_PASS:-}" -s vm.passwordSource="${VM_PASS_SRC:-unchanged}" -s vm.passwordUsers="${VM_PASS_SET:-}" -s vm.sshHost="$URL_IP" -s vm.sshPort="$SSH_PORT")
+[ -n "${SUDO_PASS:-}" ] && SEC+=(-s vm.sudoUser="$SUDO_USER_NAME" -s vm.sudoPassword="$SUDO_PASS")
 [ "$ROLE" != db ] && SEC+=(-s odoo.url="$URL" -s odoo.adminUser=admin -s odoo.adminPassword="$ADMIN_PASS" -s odoo.masterPassword="$MASTER_PASS")
 SEC+=(-s database.engine=postgresql -s database.version="$PG_VERSION" -s database.host="${DB_HOST:-${PRIV_NIC:-$BIND_IP}}" -s database.port=5432
       -s database.name="${ODOO_DB:-}" -s database.user=odoo -s database.password="$DB_PASS")

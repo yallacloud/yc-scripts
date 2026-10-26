@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.5  (2026-10-26 19:45 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.6  (2026-10-26 20:10 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -54,7 +54,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.5
+VER=1.0.6
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -971,6 +971,12 @@ if [ -n "$ACRONIS_TOKEN" ]; then
   say "acronis: $ACRONIS_STATE"
 else ACRONIS_STATE="off (ACRONIS_TOKEN blank)"; fi
 
+# tenant for the final webhook: a VM deployed minutes ago may not be in the Salt inventory yet (5-min sync)
+if [ -z "$TENANT" ]; then
+  for _ in $(seq 1 30); do TENANT=$(yc_tenant) && { TENANT_SRC="salt-inventory (CloudStack domain)"; break; }; TENANT=""; sleep 10; done
+  say "tenant: ${TENANT:-still not published after 5 min - webhook sends null}"
+  [ -n "$TENANT" ] && sed -i "s/^tenant      : - (/tenant      : $TENANT (/" "$INFO/handover.txt"
+fi
 # ================= 14. done: cloud-init off (CloudStack would re-run it on every boot)
 step "14 done"
 [ "$DISABLE_CLOUD_INIT" = yes ] && touch /etc/cloud/cloud-init.disabled 2>/dev/null

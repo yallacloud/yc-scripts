@@ -2,13 +2,13 @@
 # Sync-OdooMirror.ps1 - keep the Odoo 20 deploy kit on repo.oasisstack.io/odoo (local fallback for GitHub)
 # Runs on ycwsus01 as task YC-OdooMirror (SYSTEM, daily 03:45 + at startup). Lives in D:\repo-sync
 # (NOT C:\Scripts - Update-YcScripts wipes C:\Scripts). Guide: STACK4-61.
-# YallaCloud / OasisStack - v1.0.0 - 2026-10-26. Windows PowerShell 5.1. ASCII only.
+# YallaCloud / OasisStack - v1.0.1 - 2026-10-26. Windows PowerShell 5.1. ASCII only.
 #
 # Source of truth = GitHub (public yallacloud/yc-scripts). Served copy (IIS, YC ranges only):
 #   <Root>\odoo\yc-odoo20-install.sh   + .sha256     raw main odoo/
 #   <Root>\odoo\yc-odoo20-userdata.sh  + .sha256     raw main odoo/
 #   <Root>\odoo\odoo_20.0.latest_all.deb + .sha256 + odoo-VERSION.txt   release odoo20-latest
-#   <Root>\odoo\wkhtmltox_0.12.6.1-3.jammy_amd64.deb + .sha256          wkhtmltopdf/packaging release
+#   <Root>\odoo\wkhtmltox_0.12.6.1-3.jammy_amd64.deb + .sha256          release odoo20-latest (copy of wkhtmltopdf/packaging)
 #   <Root>\odoo\VERSION.txt   what is served, sizes, sha256, last check
 # Rule: the .sha256 decides. A file is fetched only when its published sha256 changed, into
 # D:\repo-sync\tmp (outside the web root), checked against that sha256, then swapped in.
@@ -25,13 +25,12 @@ function Get-Text([string]$u){ $p = Join-Path $Tmp 'txt.part'; & curl.exe -fsSL 
 
 $raw = 'https://raw.githubusercontent.com/yallacloud/yc-scripts/main/odoo'
 $rel = 'https://github.com/yallacloud/yc-scripts/releases/download/odoo20-latest'
-$wk  = 'https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb'
 # Sha = URL of a published "<sha256>  <name>" file; $null = no upstream sha (computed here once).
 $items = @(
   @{ Name = 'yc-odoo20-install.sh';  Url = "$raw/yc-odoo20-install.sh";  Sha = "$raw/yc-odoo20-install.sh.sha256";  Min = 1KB },
   @{ Name = 'yc-odoo20-userdata.sh'; Url = "$raw/yc-odoo20-userdata.sh"; Sha = "$raw/yc-odoo20-userdata.sh.sha256"; Min = 1KB },
   @{ Name = 'odoo_20.0.latest_all.deb'; Url = "$rel/odoo_20.0.latest_all.deb"; Sha = "$rel/odoo_20.0.latest_all.deb.sha256"; Min = 100MB },
-  @{ Name = 'wkhtmltox_0.12.6.1-3.jammy_amd64.deb'; Url = $wk; Sha = $null; Min = 10MB }
+  @{ Name = 'wkhtmltox_0.12.6.1-3.jammy_amd64.deb'; Url = "$rel/wkhtmltox_0.12.6.1-3.jammy_amd64.deb"; Sha = "$rel/wkhtmltox_0.12.6.1-3.jammy_amd64.deb.sha256"; Min = 10MB }
 )
 $fail = 0; $rows = @()
 foreach ($it in $items) {

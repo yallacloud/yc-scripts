@@ -338,6 +338,7 @@ odoo_install(){
   # wkhtmltopdf: patched-Qt build (Ubuntu's own breaks PDF header/footer). Jammy build runs on noble.
   if ! wkhtmltopdf -V 2>/dev/null | grep -q 0.12.6; then
     fetch https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb /tmp/wkhtmltox.deb nosha \
+      || fetch "${ODOO_DEB_URL%/*}/wkhtmltox_0.12.6.1-3.jammy_amd64.deb" /tmp/wkhtmltox.deb \
       || fetch "$REPO_URL/wkhtmltox_0.12.6.1-3.jammy_amd64.deb" /tmp/wkhtmltox.deb || die "wkhtmltox download failed (GitHub and $REPO_URL)"
     apt-get -y -q install /tmp/wkhtmltox.deb || die "wkhtmltox install failed"
   fi

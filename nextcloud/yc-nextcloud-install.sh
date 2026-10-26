@@ -80,7 +80,7 @@ WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn t
 # CloudStack context for the webhook - the deployer/portal supplies these (the guest
 # cannot know its own tenant/portal); they are reported so the ERP knows exactly where
 # the VM came from. All optional.
-CS_PORTAL_URL=""               # CloudStack portal URL, e.g. https://cloudstack.yallacloud.net
+CS_PORTAL_URL=""               # CloudStack portal URL, e.g. https://dxb01.oasisstack.io
 CS_DOMAIN=""                   # CloudStack domain/tenant that owns this VM
 CS_ACCOUNT=""                  # CloudStack account that owns this VM
 CS_INSTANCE=""                 # CloudStack internal instance name (i-2-xxxx); deployer-supplied, else the UUID

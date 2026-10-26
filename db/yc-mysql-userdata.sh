@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-mysql-userdata.sh  v1.0.2  (2026-10-26 19:45 IST)  YallaCloud / OasisStack
+# yc-mysql-userdata.sh  v1.0.4  (2026-10-26 21:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Oracle MySQL Community database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Paste in CloudStack: Add Instance > Advanced > Userdata. Edit ONLY the block below.
@@ -45,17 +45,10 @@ INSTALLER_REF="main"       # advanced: git branch/tag of yallacloud/yc-scripts
 # ======================================================
 
 LOG=/var/log/yc-db-deploy.log; touch "$LOG"; chmod 600 "$LOG"; exec 3>&1 4>&2; exec > >(tee -a "$LOG") 2>&1
-say(){ echo "[$(date '+%F %T')] userdata: $*"; }
+say(){ echo "[$(date '+%F %T %z')] userdata: $*"; }
 fail(){ say "FATAL: $*"; mkdir -p /root/yc-db; echo "$*" > /root/yc-db/INSTALL-FAILED; printf 'RESULT=FAILED\nTIME=%s\nSTEP=userdata\nREASON=%s\n' "$(date '+%F %T %Z')" "$*" > /var/log/yc-db-deploy.status
   [ -n "$NTFY_URL" ] && timeout 20 curl -fsS -o /dev/null -H "Title: FAILED $ENGINE $(hostname -s)" -H "Priority: 4" -H "Tags: x,db" --data-binary "userdata: $*" "$NTFY_URL"; exit 1; }
 case "$ENGINE" in mariadb|mysql) ;; *) fail "ENGINE='$ENGINE' - must be mariadb or mysql";; esac
-
-# answers for the installer (it validates everything again; re-run: yc-db-install)
-umask 077; mkdir -p /etc/yallacloud
-for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL; do
-  printf '%s=%q\n' "$v" "${!v}"
-done > /etc/yallacloud/db.conf.env
-umask 022
 
 # gateway fix BEFORE the download: CloudStack SDN without a gateway declares .254 (dead), firewall is .1
 [ -z "$GATEWAY" ] || [[ "$GATEWAY" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { say "WARN: GATEWAY '$GATEWAY' invalid - auto"; GATEWAY=""; }
@@ -67,9 +60,16 @@ ip=$(ip -o -4 addr show dev "$dev" scope global 2>/dev/null | awk '{print $4}' |
 gw=$(ip -4 route show default dev "$dev" 2>/dev/null | awk '{print $3; exit}')
 if [ -n "$GATEWAY" ] || { priv "$ip" && ! { [ -n "$gw" ] && gw_ok "$gw" "$dev"; }; }; then
   for c in ${GATEWAY:-${ip%.*}.1 ${ip%.*}.254 ${ip%.*}.2}; do
-    gw_ok "$c" "$dev" && ip route replace default via "$c" dev "$dev" metric 0 && { say "gateway: ${gw:-none} dead - default via $c (installer persists it)"; break; }
+    gw_ok "$c" "$dev" && ip route replace default via "$c" dev "$dev" metric 0 && { say "gateway: ${gw:-none} dead - default via $c (installer persists it)"; GATEWAY=$c; break; }
   done
 fi
+
+# answers for the installer (it validates everything again; re-run: yc-db-install)
+umask 077; mkdir -p /etc/yallacloud
+for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL; do
+  printf '%s=%q\n' "$v" "${!v}"
+done > /etc/yallacloud/db.conf.env
+umask 022
 
 # installer: GitHub (public yallacloud/yc-scripts) -> repo.oasisstack.io/db (YC ranges) -> GitHub mirrors, sha256 checked
 R=yallacloud/yc-scripts; F=db/yc-db-install.sh; OUT=/root/yc-db-install.sh; ok=""
@@ -77,8 +77,8 @@ for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
          "https://repo.oasisstack.io/db/yc-db-install.sh" \
          "https://cdn.jsdelivr.net/gh/$R@$INSTALLER_REF/$F" \
          "https://github.com/$R/raw/$INSTALLER_REF/$F"; do
-  if curl -fsSL --retry 3 --connect-timeout 15 -o "$OUT" "$u" \
-     && curl -fsSL --retry 3 --connect-timeout 15 -o "$OUT.sha256" "$u.sha256" \
+  if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 -o "$OUT" "$u" \
+     && curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 -o "$OUT.sha256" "$u.sha256" \
      && [ "$(sha256sum "$OUT" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$OUT.sha256")" ]; then ok=$u; break; fi
   say "mirror failed or sha256 mismatch: $u"
 done

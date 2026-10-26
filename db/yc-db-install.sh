@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.9  (2026-10-26 21:10 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.10  (2026-10-26 21:30 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -54,7 +54,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.9
+VER=1.0.10
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -64,7 +64,7 @@ STATUS=/var/log/yc-db-deploy.status
 mkdir -p /etc/yallacloud "$INFO" /var/lib/yallacloud; chmod 700 /etc/yallacloud "$INFO"
 touch "$LOG"; chmod 600 "$LOG"
 exec > >(tee -a "$LOG") 2>&1
-say(){ echo "[$(date '+%F %T')] $*"; }
+say(){ echo "[$(date '+%F %T %z')] $*"; }
 WARNS=0; WARN_TXT=""
 warn(){ say "WARN: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; }
 STEP=init; FAIL_REASON=""
@@ -182,8 +182,8 @@ fix_gateway(){   # $1 = forced gateway, blank = auto
 # CloudStack tenant (domain; ROOT = admin) from the Salt inventory "who" file, keyed by sha256 of SMBIOS UUID or a MAC
 yc_tenant(){
   local k w
-  for k in $(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null) $(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | sort -u); do
-    w=$(curl -fsS -m 10 "https://repo.oasisstack.io/salt/who/$(printf '%s' "$k" | sha256sum | cut -c1-64)" 2>/dev/null) || continue
+  for k in $(tr 'A-Z' 'a-z' 2>/dev/null < /sys/class/dmi/id/product_uuid) $(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | sort -u); do
+    w=$(curl -fsS -m 5 "https://repo.oasisstack.io/salt/who/$(printf '%s' "$k" | sha256sum | cut -c1-64)" 2>/dev/null) || continue
     case "$w" in *tenant=*) printf '%s\n' "$w" | sed -n 's/^tenant=//p' | tr -d '\r '; return 0;; esac
   done
   return 1
@@ -201,7 +201,7 @@ salt_ports(){
 }
 # database client as root (/root/.my.cnf)
 db_cli(){ command -v mariadb || command -v mysql; }
-sqlr(){ "$(db_cli)" --defaults-file=/root/.my.cnf -NB -e "$1"; }
+sqlr(){ "$(db_cli)" --defaults-file=/root/.my.cnf -NB <<<"$1"; }   # SQL on stdin: passwords never in ps
 db_svc(){ local s; for s in mariadb mysqld mysql; do systemctl cat "$s.service" >/dev/null 2>&1 && { echo "$s"; return; }; done; }
 cnf_dir(){ local d; for d in /etc/mysql/mariadb.conf.d /etc/mysql/mysql.conf.d /etc/my.cnf.d; do [ -d "$d" ] && { echo "$d"; return; }; done; }
 # memory/CPU based tuning -> 90-yallacloud-tuning.cnf (installer + 'yallacloud retune')
@@ -249,7 +249,9 @@ fw_db(){   # add|del CIDR
 # notifications: separate, best effort, never block or fail the work
 yc_ntfy(){   # title priority tags message - NO secrets here
   [ -n "${NTFY_URL:-}" ] || return 0
-  timeout 20 curl -fsS -o /dev/null -H "Title: $1" -H "Priority: $2" -H "Tags: $3" --data-binary "$4" "$NTFY_URL" 2>/dev/null || echo "ntfy: post failed (ignored)"
+  timeout 20 curl -fsS -o /dev/null -H "Title: $1" -H "Priority: $2" -H "Tags: $3" --data-binary "$4
+time    : $(date '+%F %T %z')  ($(date -u +%FT%TZ))
+by      : $([ -n "${VER:-}" ] && echo "yc-db-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)" "$NTFY_URL" 2>/dev/null || echo "ntfy: post failed (ignored)"
 }
 yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header file, never argv
   [ -n "${ERP_WEBHOOK_URL:-}" ] && [ -n "${ERP_WEBHOOK_SECRET:-}" ] || { echo "erp webhook: ERP_WEBHOOK_SECRET blank - skipped"; return 0; }
@@ -260,6 +262,134 @@ yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header 
 LIBEOF
 chmod 644 "$LIB"
 . "$LIB"
+
+TENANT=""; TENANT_SRC=""; HOST_PRIV=""; HOST_PUB=""; PUB_NIC=""
+# facts for notifications
+VM_NAME=$(md local-hostname); VM_NAME=${VM_NAME:-$(hostname -s)}
+SMBIOS=$(tr 'A-Z' 'a-z' 2>/dev/null < /sys/class/dmi/id/product_uuid)
+ZONE=$(md availability-zone)
+INSTANCE_ID=$(md instance-id)
+VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$INSTANCE_ID}; VM_UUID=$(printf '%s' "${VM_UUID:-$SMBIOS}" | tr 'A-Z' 'a-z')
+OFFERING=$(md service-offering)
+CLOUD_ID=$(md cloud-identifier)
+PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
+facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout
+  T="$1" S="$2" W="$3" python3 - <<'PY'
+import json, os, time
+e = os.environ.get
+d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or e("VM_UUID") or None, "smbiosUuid": e("SMBIOS") or None,
+     "vmName": e("VM_NAME"), "vmUuid": e("VM_UUID") or None,
+     "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
+     "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
+     "hostname": e("VM_NAME"), "ip": e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": e("HOST_PUB") or None,
+     "zone": e("ZONE") or None, "cloud": e("CLOUD_ID") or "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
+     "cloudPortal": e("CLOUDSTACK_URL") or None,
+     "cloudVmUrl": (e("CLOUDSTACK_URL") + "/#/vm/" + e("VM_UUID")) if e("CLOUDSTACK_URL") and e("VM_UUID") else None, "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
+     "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
+     "warnings": int(e("WARNS") or 0), "installer": "yc-db-install " + e("VER"),
+     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+if e("W") == "yes":
+    d["db"] = {k: (e(v) or None) for k, v in {
+        "engine": "ENGINE", "version": "DB_REAL_VERSION", "port": "DB_PORT", "hostPrivate": "HOST_PRIV",
+        "hostPublic": "HOST_PUB", "allow": "DB_ALLOW", "rootUser": "ROOTU", "rootPassword": "DB_ROOT_PASS",
+        "adminUser": "DB_ADMIN_USER", "adminPassword": "DB_ADMIN_PASS", "database": "DB_NAME",
+        "user": "DB_USER", "userPassword": "DB_USER_PASS", "uriAdmin": "URI_ADMIN", "uriUser": "URI_USER",
+        "dataDir": "DATADIR", "backupDir": "BACKUP_DIR", "backupRetention": "RETENTION",
+        "sshPort": "SSH_PORT"}.items()}
+    d["vmUser"] = "root"; d["vmPassword"] = e("VM_PASS") or None
+    if e("CHADMIN_PASS"): d["sudoUser"] = "chadmin"; d["sudoPassword"] = e("CHADMIN_PASS")
+# same keys as the Odoo kit / payload events (one ERP contract) - additive only
+d.update({"offering": e("OFFERING") or None, "identitySource": "smbios" if e("SMBIOS") else "metadata",
+          "instanceId": e("INSTANCE_ID") or None, "routerVmId": None, "cloudstackUrl": e("CLOUDSTACK_URL") or None,
+          "lastUpdated": time.strftime("%Y-%m-%d %H:%M:%S %z ") + (e("TZ_SET") or "UTC").split("/")[-1], "payload": e("VER"), "freeGb": float(e("FREE_GB")) if e("FREE_GB") else None,
+          "delivery": {"queued": 0}})
+st = {"vm.deploy.started": "started", "vm.deploy.completed": "completed"}.get(e("T"), "failed")
+f = {"area": "db", "status": st, "summary": e("S"), "engine": e("ENGINE"), "dbVersion": e("DB_REAL_VERSION") or e("DB_VERSION"),
+     "dbHost": e("HOST_PUB") or e("HOST_PRIV") or None, "dbPort": e("DB_PORT"), "sshPort": e("SSH_PORT") or None,
+     "warnings": e("WARN_TXT") or "", "installer": e("VER"), "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}
+if e("W") == "yes":
+    f.update({"dbRootUser": "root", "dbRootPassword": e("DB_ROOT_PASS") or None, "dbAdminUser": e("DB_ADMIN_USER"),
+              "dbAdminPassword": e("DB_ADMIN_PASS") or None, "dbName": e("DB_NAME") or None,
+              "dbUser": e("DB_USER") or e("DB_ADMIN_USER"), "dbPassword": (e("DB_USER_PASS") if e("DB_USER") else e("DB_ADMIN_PASS")) or None,
+              "backupDir": e("BACKUP_DIR") or None, "backupRetention": e("RETENTION") or None,
+              "vmUser": "root", "vmPassword": e("VM_PASS") or None})
+    if e("CHADMIN_PASS"): f.update({"sudoUser": "chadmin", "sudoPassword": e("CHADMIN_PASS")})
+d["fields"] = f
+# YC-EVENT v2 sections (STACK4-63), additive: same shape as nextcloud 1.2.0 - flat v1 keys above stay for the ERP
+d["schema"] = "yc-event/2"; d["summary"] = e("S") or e("T")
+d["vm"] = {k: d.get(k) for k in ("vmId", "smbiosUuid", "vmUuid", "instanceId", "identitySource", "vmIdMismatch",
+                                 "routerVmId", "vmName", "hostname", "ip", "publicIp", "os", "freeGb")}
+d["vm"]["osVersion"] = e("VERSION_ID") or ""
+d["cloud"] = {"id": e("CLOUD_ID") or None, "zone": d["zone"], "tenant": d["tenant"], "tenantSource": d["tenantSource"],
+              "offering": d["serviceOffering"], "portal": d["cloudPortal"], "vmUrl": d["cloudVmUrl"]}
+num = lambda x: int(x) if (x or "").isdigit() else None
+d["service"] = {"area": "db", "catalogue": d["catalogue"], "status": st,
+                "result": e("RESULT") if e("RESULT") not in (None, "", "RUNNING") else None, "steps": e("STEP"),
+                "warnings": [w for w in (e("WARN_TXT") or "").split("; ") if w], "installer": d["installer"],
+                "details": {"engine": e("ENGINE"), "version": e("DB_REAL_VERSION") or e("DB_VERSION"),
+                            "host": e("HOST_PUB") or e("HOST_PRIV") or None, "hostPrivate": e("HOST_PRIV") or None,
+                            "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP)",
+                            "sshPort": num(e("SSH_PORT")), "dataDir": e("DATADIR") or None, "backupDir": e("BACKUP_DIR") or None,
+                            "backupRetention": e("RETENTION") or None, "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
+if e("W") == "yes":   # every secret in ONE place; empty logins left out
+    up = lambda u, p, **x: dict({"user": u, "password": p}, **x) if p else None
+    db = {"root": up("root", e("DB_ROOT_PASS")), "admin": up(e("DB_ADMIN_USER"), e("DB_ADMIN_PASS")),
+          "app": up(e("DB_USER"), e("DB_USER_PASS")) if e("DB_USER") else None, "database": e("DB_NAME") or None,
+          "uriAdmin": e("URI_ADMIN") or None, "uriApp": e("URI_USER") or None}
+    c = {"vm": up("root", e("VM_PASS"), source=e("VM_PASS_SRC") or None), "sudo": up("chadmin", e("CHADMIN_PASS")),
+         "db": {k: v for k, v in db.items() if v}}
+    d["credentials"] = {k: v for k, v in c.items() if v}
+print(json.dumps(d))
+PY
+}
+export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT
+RESULT=RUNNING
+finish(){
+  local rc=$? title prio tags msg typ j
+  trap - EXIT INT TERM
+  [ -n "${CANCELLED:-}" ] && rc=130
+  if [ "$rc" = 0 ]; then RESULT=SUCCESS; elif [ "$rc" = 130 ]; then RESULT=CANCELLED; else RESULT=FAILED; fi
+  FREE_GB=$({ df -BM --output=avail /var/lib/mysql || df -BM --output=avail /var/lib; } 2>/dev/null | tail -1 | tr -dc 0-9 | awk '{printf "%.1f", $1/1024}')
+  export RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB VM_PASS VM_PASS_SRC CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER DATADIR BACKUP_DIR RETENTION SSH_PORT
+  {
+    echo "RESULT=$RESULT"; echo "TIME=$(date '+%F %T %Z')"; echo "INSTALLER=yc-db-install $VER"
+    echo "ENGINE=$ENGINE ${DB_REAL_VERSION:-$DB_VERSION}"; echo "STEP=$STEP"; echo "WARNINGS=$WARNS${WARN_TXT:+ ($WARN_TXT)}"
+    [ "$RESULT" = SUCCESS ] || echo "REASON=${FAIL_REASON:-exit $rc in step $STEP}"
+  } > "$STATUS"
+  say "RESULT $RESULT (step $STEP, warnings $WARNS) - status $STATUS"
+  # one log for everything: append cloud-init's own logs
+  { echo; echo "========== merged: cloud-init status =========="; cloud-init status --long 2>/dev/null
+    for f in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
+      [ -f "$f" ] && { echo "========== merged: $f (last 400 lines) =========="; tail -n 400 "$f"; }; done
+  } >> "$LOG" 2>/dev/null
+  msg="vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
+ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
+engine  : $ENGINE ${DB_REAL_VERSION:-$DB_VERSION} port $DB_PORT
+allow   : ${DB_ALLOW:-?}
+step    : $STEP   warnings: $WARNS
+detail  : ${FAIL_REASON:-${WARN_TXT:-none}}
+salt    : ${SALT_STATE:-not run}   acronis: ${ACRONIS_STATE:-not run}
+log     : $LOG"
+  case "$RESULT" in
+    SUCCESS)
+      typ=vm.deploy.completed
+      if [ "$PREV_RESULT" = FAILED ]; then title="BACK TO GREEN $ENGINE - $VM_NAME"; prio=3; tags="green_circle,db"
+      elif [ "${WAIT_HUMAN:-}" ]; then title="WAIT FOR HUMAN $ENGINE - $VM_NAME"; prio=4; tags="raising_hand,db"; msg="$msg
+human   : $WAIT_HUMAN"
+      elif [ "$WARNS" -gt 0 ]; then title="OK BUILD WITH WARNINGS $ENGINE - $VM_NAME"; prio=3; tags="warning,db"
+      else title="OK BUILD $ENGINE - $VM_NAME"; prio=3; tags="white_check_mark,db"; fi ;;
+    CANCELLED) typ=vm.deploy.failed; title="CANCELLED BUILD $ENGINE - $VM_NAME"; prio=4; tags="stop_sign,db" ;;
+    *) typ=vm.deploy.failed; title="FAILED BUILD $ENGINE - $VM_NAME"; prio=4; tags="x,db" ;;
+  esac
+  yc_ntfy "$title" "$prio" "$tags" "$msg"
+  j=$(mktemp); chmod 600 "$j"
+  facts_json "$typ" "$title | step $STEP | warnings $WARNS${FAIL_REASON:+ | $FAIL_REASON}" "$([ "$RESULT" = SUCCESS ] && echo yes || echo no)" > "$j" && yc_erp "$j" || say "erp webhook: payload build failed - nothing sent"
+  [ "$RESULT" = SUCCESS ] && install -m 600 "$j" "$INFO/handover.json"   # = the exact body the ERP received
+  rm -f "$j"
+  exit "$rc"
+}
+trap finish EXIT
+trap 'CANCELLED=1; exit 130' INT TERM
 
 # ================= 0. check every input: required -> stop with the reason; optional -> warn + default
 step "0 inputs"
@@ -307,6 +437,7 @@ if [ -n "$SSH_PORT" ]; then
   { [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] && [ "$SSH_PORT" != "$DB_PORT" ]; } || { warn "SSH_PORT '$SSH_PORT' invalid - auto"; SSH_PORT=""; }
 fi
 [ -f "/usr/share/zoneinfo/$TZ_SET" ] || { warn "TZ_SET '$TZ_SET' unknown - Asia/Dubai"; TZ_SET=Asia/Dubai; }
+export TZ=$TZ_SET
 [[ "$LOCALE_SET" =~ ^[a-z]{2,3}_[A-Z]{2}\.UTF-8$ ]] || { warn "LOCALE_SET '$LOCALE_SET' invalid - en_US.UTF-8"; LOCALE_SET=en_US.UTF-8; }
 SALT_JOIN=$(low "$SALT_JOIN"); case "$SALT_JOIN" in yes|no) ;; *) warn "SALT_JOIN '$SALT_JOIN' invalid - yes"; SALT_JOIN=yes;; esac
 ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
@@ -327,114 +458,11 @@ case "$ID" in
 esac
 say "config: ENGINE=$ENGINE $DB_VERSION PORT=$DB_PORT ALLOW=${DB_ALLOW:-auto} ADMIN=$DB_ADMIN_USER DB=${DB_NAME:--}/${DB_USER:--} DATA_DISK=$DATA_DISK BACKUP=${BACKUP_KEEP_DAYS}d/${BACKUP_KEEP_WEEKS}w/${BACKUP_KEEP_MONTHS}m@$BACKUP_TIME BINLOG=$BINLOG/${BINLOG_DAYS}d SALT=$SALT_JOIN ACRONIS=$([ -n "$ACRONIS_TOKEN" ] && echo "on/$ACRONIS_REGION" || echo off) ERP=$([ -n "$ERP_WEBHOOK_SECRET" ] && echo on || echo off) OS=$PRETTY_NAME"
 
-# facts for notifications
-VM_NAME=$(md local-hostname); VM_NAME=${VM_NAME:-$(hostname -s)}
-SMBIOS=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)
-ZONE=$(md availability-zone)
-VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$(md instance-id)}; VM_UUID=$(printf '%s' "${VM_UUID:-$SMBIOS}" | tr 'A-Z' 'a-z')
-OFFERING=$(md service-offering)
-INSTANCE_ID=$(md instance-id)
-CLOUD_ID=$(md cloud-identifier)
-TENANT=""; TENANT_SRC=""
-PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
-facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout
-  T="$1" S="$2" W="$3" python3 - <<'PY'
-import json, os, time
-e = os.environ.get
-d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or None, "smbiosUuid": e("SMBIOS") or None,
-     "vmName": e("VM_NAME"), "vmUuid": e("VM_UUID") or None,
-     "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
-     "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
-     "hostname": e("VM_NAME"), "ip": e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": e("HOST_PUB") or None,
-     "zone": e("ZONE") or None, "cloud": e("CLOUD_ID") or "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
-     "cloudPortal": e("CLOUDSTACK_URL") or None,
-     "cloudVmUrl": (e("CLOUDSTACK_URL") + "/#/vm/" + e("VM_UUID")) if e("CLOUDSTACK_URL") and e("VM_UUID") else None, "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
-     "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
-     "warnings": int(e("WARNS") or 0), "installer": "yc-db-install " + e("VER"),
-     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-if e("W") == "yes":
-    d["db"] = {k: (e(v) or None) for k, v in {
-        "engine": "ENGINE", "version": "DB_REAL_VERSION", "port": "DB_PORT", "hostPrivate": "HOST_PRIV",
-        "hostPublic": "HOST_PUB", "allow": "DB_ALLOW", "rootUser": "ROOTU", "rootPassword": "DB_ROOT_PASS",
-        "adminUser": "DB_ADMIN_USER", "adminPassword": "DB_ADMIN_PASS", "database": "DB_NAME",
-        "user": "DB_USER", "userPassword": "DB_USER_PASS", "uriAdmin": "URI_ADMIN", "uriUser": "URI_USER",
-        "dataDir": "DATADIR", "backupDir": "BACKUP_DIR", "backupRetention": "RETENTION",
-        "sshPort": "SSH_PORT"}.items()}
-    d["vmUser"] = "root"; d["vmPassword"] = e("VM_PASS") or None
-    if e("CHADMIN_PASS"): d["sudoUser"] = "chadmin"; d["sudoPassword"] = e("CHADMIN_PASS")
-# same keys as the Odoo kit / payload events (one ERP contract) - additive only
-d.update({"offering": e("OFFERING") or None, "identitySource": "smbios" if e("SMBIOS") else "metadata",
-          "instanceId": e("INSTANCE_ID") or None, "routerVmId": "", "cloudstackUrl": e("CLOUDSTACK_URL") or None,
-          "lastUpdated": time.strftime("%Y-%m-%d %H:%M:%S %z ") + (e("TZ_SET") or "UTC").split("/")[-1], "payload": e("VER"), "freeGb": float(e("FREE_GB") or 0),
-          "delivery": {"queued": 0}})
-st = {"vm.deploy.started": "started", "vm.deploy.completed": "completed"}.get(e("T"), "failed")
-f = {"area": "db", "status": st, "summary": e("S"), "engine": e("ENGINE"), "dbVersion": e("DB_REAL_VERSION") or e("DB_VERSION"),
-     "dbHost": e("HOST_PUB") or e("HOST_PRIV") or None, "dbPort": e("DB_PORT"), "sshPort": e("SSH_PORT") or None,
-     "warnings": e("WARN_TXT") or "", "installer": e("VER"), "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}
-if e("W") == "yes":
-    f.update({"dbRootUser": "root", "dbRootPassword": e("DB_ROOT_PASS") or None, "dbAdminUser": e("DB_ADMIN_USER"),
-              "dbAdminPassword": e("DB_ADMIN_PASS") or None, "dbName": e("DB_NAME") or None,
-              "dbUser": e("DB_USER") or e("DB_ADMIN_USER"), "dbPassword": (e("DB_USER_PASS") if e("DB_USER") else e("DB_ADMIN_PASS")) or None,
-              "backupDir": e("BACKUP_DIR") or None, "backupRetention": e("RETENTION") or None,
-              "vmUser": "root", "vmPassword": e("VM_PASS") or None})
-    if e("CHADMIN_PASS"): f.update({"sudoUser": "chadmin", "sudoPassword": e("CHADMIN_PASS")})
-d["fields"] = f
-print(json.dumps(d))
-PY
-}
-export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS
-RESULT=RUNNING
-finish(){
-  local rc=$? title prio tags msg typ j
-  trap - EXIT INT TERM
-  [ -n "${CANCELLED:-}" ] && rc=130
-  if [ "$rc" = 0 ]; then RESULT=SUCCESS; elif [ "$rc" = 130 ]; then RESULT=CANCELLED; else RESULT=FAILED; fi
-  FREE_GB=$(df -BM --output=avail /var/lib 2>/dev/null | tail -1 | tr -dc 0-9 | awk '{printf "%.1f", $1/1024}')
-  export RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB VM_PASS CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER DATADIR BACKUP_DIR RETENTION SSH_PORT
-  {
-    echo "RESULT=$RESULT"; echo "TIME=$(date '+%F %T %Z')"; echo "INSTALLER=yc-db-install $VER"
-    echo "ENGINE=$ENGINE ${DB_REAL_VERSION:-$DB_VERSION}"; echo "STEP=$STEP"; echo "WARNINGS=$WARNS${WARN_TXT:+ ($WARN_TXT)}"
-    [ "$RESULT" = SUCCESS ] || echo "REASON=${FAIL_REASON:-exit $rc in step $STEP}"
-  } > "$STATUS"
-  say "RESULT $RESULT (step $STEP, warnings $WARNS) - status $STATUS"
-  # one log for everything: append cloud-init's own logs
-  { echo; echo "========== merged: cloud-init status =========="; cloud-init status --long 2>/dev/null
-    for f in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
-      [ -f "$f" ] && { echo "========== merged: $f (last 400 lines) =========="; tail -n 400 "$f"; }; done
-  } >> "$LOG" 2>/dev/null
-  msg="vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
-ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
-engine  : $ENGINE ${DB_REAL_VERSION:-$DB_VERSION} port $DB_PORT
-allow   : ${DB_ALLOW:-?}
-step    : $STEP   warnings: $WARNS
-detail  : ${FAIL_REASON:-${WARN_TXT:-none}}
-salt    : ${SALT_STATE:-not run}   acronis: ${ACRONIS_STATE:-not run}
-log     : $LOG"
-  case "$RESULT" in
-    SUCCESS)
-      typ=vm.deploy.completed
-      if [ "$PREV_RESULT" = FAILED ]; then title="BACK TO GREEN $ENGINE $VM_NAME"; prio=3; tags="green_circle,db"
-      elif [ "${WAIT_HUMAN:-}" ]; then title="WAIT FOR HUMAN $ENGINE $VM_NAME"; prio=4; tags="raising_hand,db"; msg="$msg
-human   : $WAIT_HUMAN"
-      elif [ "$WARNS" -gt 0 ]; then title="OK WITH WARNINGS $ENGINE $VM_NAME"; prio=3; tags="warning,db"
-      else title="READY $ENGINE $VM_NAME"; prio=3; tags="white_check_mark,db"; fi ;;
-    CANCELLED) typ=vm.deploy.failed; title="CANCELLED $ENGINE $VM_NAME"; prio=4; tags="stop_sign,db" ;;
-    *) typ=vm.deploy.failed; title="FAILED $ENGINE $VM_NAME"; prio=4; tags="x,db" ;;
-  esac
-  yc_ntfy "$title" "$prio" "$tags" "$msg"
-  j=$(mktemp); chmod 600 "$j"
-  facts_json "$typ" "$title | step $STEP | warnings $WARNS${FAIL_REASON:+ | $FAIL_REASON}" "$([ "$RESULT" = SUCCESS ] && echo yes || echo no)" > "$j" && yc_erp "$j"
-  [ "$RESULT" = SUCCESS ] && install -m 600 "$j" "$INFO/handover.json"   # = the exact body the ERP received
-  rm -f "$j"
-  exit "$rc"
-}
-trap finish EXIT
-trap 'CANCELLED=1; exit 130' INT TERM
 
 # ================= 1. network
 step "1 network"
 for _ in $(seq 1 30); do ip -o -4 addr show scope global | grep -q . && break; sleep 2; done
-say "$(fix_gateway "$GATEWAY")" || warn "gateway check found no answering gateway"
+gwo=$(fix_gateway "$GATEWAY") && say "$gwo" || warn "$gwo"
 ip -4 route show default | grep -q . || die "no default route - set GATEWAY= to the firewall LAN IP"
 detect_ips
 [ -n "$PRIV_NIC$PUB_NIC" ] || die "no IPv4 address on any NIC"
@@ -447,7 +475,7 @@ export HOST_PRIV HOST_PUB PUB_NIC
 TENANT=$(yc_tenant) && TENANT_SRC="salt-inventory (CloudStack domain)" || { TENANT=""; say "tenant: not published yet (Salt inventory syncs every 5 min) - webhook sends null"; }
 say "vm: $VM_NAME uuid ${VM_UUID:-?} smbios ${SMBIOS:-?} tenant ${TENANT:-?} offering ${OFFERING:-?}"
 say "ips: private=${HOST_PRIV:-none} public=${HOST_PUB:-none} (nic ${PUB_NIC:-none}, static-nat ${MD_PUB:-none}) subnet=${PRIV_CIDR:-none} allow=$DB_ALLOW ssh=$SSH_PORT"
-yc_ntfy "RUN $ENGINE $VM_NAME" 2 "hourglass,db" "vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
+yc_ntfy "START BUILD $ENGINE - $VM_NAME" 2 "hourglass,db" "vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
 ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
 engine  : $ENGINE $DB_VERSION port $DB_PORT
 os      : $PRETTY_NAME
@@ -528,7 +556,7 @@ step "3 ssh"
 SSHD=/etc/ssh/sshd_config.d/00-yallacloud.conf
 printf 'Port %s\nPermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nUsePAM yes\n' "$SSH_PORT" > "$SSHD"
 rm -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
-[ -f /root/.ssh/authorized_keys ] && sed -i -E 's/^.*(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9-]+@openssh\.com) /\1 /' /root/.ssh/authorized_keys
+[ -f /root/.ssh/authorized_keys ] && sed -i -E '/Please login as/ s/^.*(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9-]+@openssh\.com) /\1 /' /root/.ssh/authorized_keys
 SSH_PUBKEY=$(printf '%s' "$SSH_PUBKEY" | tr -d '\r\n')
 if [ -n "$SSH_PUBKEY" ]; then
   kf=$(mktemp); printf '%s\n' "$SSH_PUBKEY" > "$kf"
@@ -571,17 +599,17 @@ if [ -z "${VM_PASS:-}" ]; then
   if [ ${#VM_PASS} -lt 8 ]; then VM_PASS=$(genpw); VM_PASS_SRC=generated; fi
 fi
 VM_PASS_SRC=${VM_PASS_SRC:-kept}
-printf 'root:%s\n' "$VM_PASS" | chpasswd || die "setting the root password failed"
+[ "$VM_PASS_SRC" = kept ] || { printf 'root:%s\n' "$VM_PASS" | chpasswd || die "setting the root password failed"; }
 CHADMIN_PASS=${CHADMIN_PASS:-}
-if id chadmin >/dev/null 2>&1; then : "${CHADMIN_PASS:=$(genpw)}"; printf 'chadmin:%s\n' "$CHADMIN_PASS" | chpasswd || warn "chadmin password not set"; else CHADMIN_PASS=""; fi
+if ! id chadmin >/dev/null 2>&1; then CHADMIN_PASS=""
+elif [ -z "$CHADMIN_PASS" ]; then CHADMIN_PASS=$(genpw) && printf 'chadmin:%s\n' "$CHADMIN_PASS" | chpasswd || warn "chadmin password not set"; fi
 id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1
 say "os logins: root password = $VM_PASS_SRC, chadmin $([ -n "$CHADMIN_PASS" ] && echo 'password generated' || echo 'not present'), ubuntu locked (template defaults removed)"
-( umask 077; printf "DB_ROOT_PASS='%s'\nDB_ADMIN_PASS='%s'\nDB_USER_PASS='%s'\nVM_PASS='%s'\nCHADMIN_PASS='%s'\n" "$DB_ROOT_PASS" "$DB_ADMIN_PASS" "${DB_USER_PASS:-}" "$VM_PASS" "$CHADMIN_PASS" > "$INFO/secrets.env" )
+( umask 077; printf "DB_ROOT_PASS=%q\nDB_ADMIN_PASS=%q\nDB_USER_PASS=%q\nVM_PASS=%q\nCHADMIN_PASS=%q\n" "$DB_ROOT_PASS" "$DB_ADMIN_PASS" "${DB_USER_PASS:-}" "$VM_PASS" "$CHADMIN_PASS" > "$INFO/secrets.env" )
 ( umask 077; printf '[client]\nuser=root\npassword="%s"\n' "$DB_ROOT_PASS" > /root/.my.cnf.yc-new )
 
 # answers file without passwords (re-run, retune, yallacloud, backup read it)
 ( umask 077; for v in $KEYS; do case $v in *_PASS) continue;; esac; printf '%s=%q\n' "$v" "${!v}"; done > "$CFG" )
-echo "SSH_PORT=$SSH_PORT" >> "$CFG"
 
 # ================= 5. data disk: empty extra disk -> XFS /data, /data/mysql bind-mounted on /var/lib/mysql
 step "5 storage"
@@ -631,7 +659,7 @@ say "storage: datadir $DATADIR on $(findmnt -no SOURCE --target /var/lib/mysql 2
 
 # ================= 6. engine: vendor repo -> repo.oasisstack.io copy -> OS packages (fallback)
 step "6 install $ENGINE $DB_VERSION"
-get(){ curl -fsSL --retry 3 --connect-timeout 20 -o "$2" "$1"; }   # url out
+get(){ curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$2" "$1"; }   # url out
 FALLBACK=""
 if [ "$ENGINE" = mariadb ]; then
   rs=/root/mariadb_repo_setup
@@ -650,7 +678,7 @@ if [ "$ENGINE" = mariadb ]; then
 else
   key=/root/mysql-key.asc
   get https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 $key || get "$REPO_URL/RPM-GPG-KEY-mysql-2025" $key || { warn "MySQL GPG key download failed"; FALLBACK=1; }
-  comp=mysql-$DB_VERSION-lts; [ "$DB_VERSION" = 8.4 ] && comp=mysql-8.4-lts
+  comp=mysql-$DB_VERSION-lts
   if [ "$OSF" = ubuntu ]; then
     if [ -z "$FALLBACK" ]; then
       gpg --dearmor --yes -o /usr/share/keyrings/mysql.gpg $key
@@ -733,11 +761,13 @@ elif [ -f /root/.my.cnf ] && "$CLI" --defaults-file=/root/.my.cnf -NBe 'select 1
 else
   tmp=$(grep -h 'temporary password' "$LOG_ERR" /var/log/mysqld.log 2>/dev/null | tail -1 | awk '{print $NF}')
   [ -n "$tmp" ] || die "cannot log in as root (no socket auth, no password, no temporary password in $LOG_ERR)"
-  "$CLI" -uroot -p"$tmp" --connect-expired-password -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_ROOT_PASS'" || die "root temporary password change failed"
+  ( umask 077; printf '[client]\nuser=root\npassword="%s"\n' "$tmp" > /root/.my.cnf.yc-tmp )
+  "$CLI" --defaults-file=/root/.my.cnf.yc-tmp --connect-expired-password <<<"ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_ROOT_PASS'"; t_rc=$?; rm -f /root/.my.cnf.yc-tmp
+  [ "$t_rc" = 0 ] || die "root temporary password change failed"
   rc_auth="temporary"
 fi
 case $rc_auth in socket) RC=(-uroot) ;; password) RC=(--defaults-file=/root/.my.cnf.yc-new) ;; old-cnf) RC=(--defaults-file=/root/.my.cnf) ;; temporary) RC=(--defaults-file=/root/.my.cnf.yc-new) ;; esac
-q(){ "$CLI" "${RC[@]}" -NB -e "$1"; }
+q(){ "$CLI" "${RC[@]}" -NB <<<"$1"; }
 if [ "$ENGINE" = mariadb ]; then
   q "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('$DB_ROOT_PASS')" || die "root password set failed"
 else
@@ -802,12 +832,13 @@ set -uo pipefail; umask 077; export HOME=/root
 . /etc/yallacloud/db.conf.env; . /usr/local/lib/yc-db-common.sh
 ST=/var/lib/yallacloud/db-backup.status; prev=$(awk -F= '/^RESULT=/{print $2}' $ST 2>/dev/null)
 day=$(date +%F); out="$BACKUP_DIR/daily/$day"; err=""
+sqlr 'SELECT 1' >/dev/null 2>&1 || err="database not answering"
 log(){ echo "[$(date '+%F %T')] $*"; }
 mkdir -p "$out" "$BACKUP_DIR/weekly" "$BACKUP_DIR/monthly"; chmod 700 "$BACKUP_DIR"
 DUMP=$(command -v mariadb-dump || command -v mysqldump)
 size=$(sqlr "SELECT COALESCE(SUM(data_length+index_length),0) FROM information_schema.tables WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys')")
 free=$(( $(df -Pk "$BACKUP_DIR" | awk 'NR==2{print $4}') * 1024 ))
-[ "${size:-0}" -lt "$free" ] || err="not enough space: databases ${size} bytes, free ${free} bytes in $BACKUP_DIR"
+[ -n "$err" ] || [ "${size:-0}" -lt "$free" ] || err="not enough space: databases ${size} bytes, free ${free} bytes in $BACKUP_DIR"
 if [ -z "$err" ]; then
   for db in $(sqlr "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys')"); do
     if "$DUMP" --defaults-file=/root/.my.cnf --single-transaction --quick --routines --events --triggers --hex-blob --databases "$db" | gzip -c > "$out/$db.sql.gz.part" && gzip -t "$out/$db.sql.gz.part"; then
@@ -819,8 +850,8 @@ if [ -z "$err" ]; then
     else for u in $(sqlr "SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user NOT IN ('root','mysql.sys','mysql.session','mysql.infoschema')"); do
       echo "$(sqlr "SET SESSION print_identified_with_as_hex=ON; SHOW CREATE USER $u");"; sqlr "SHOW GRANTS FOR $u" | sed 's/$/;/'; done; fi; } | gzip -c > "$out/users.sql.gz" || err="$err users dump failed;"
 fi
-[ "$(date +%u)" = 7 ] && [ "${BACKUP_KEEP_WEEKS:-0}" -gt 0 ] && cp -al "$out" "$BACKUP_DIR/weekly/$day" 2>/dev/null
-[ "$(date +%d)" = 01 ] && [ "${BACKUP_KEEP_MONTHS:-0}" -gt 0 ] && cp -al "$out" "$BACKUP_DIR/monthly/$day" 2>/dev/null
+[ "$(date +%u)" = 7 ] && [ "${BACKUP_KEEP_WEEKS:-0}" -gt 0 ] && [ ! -e "$BACKUP_DIR/weekly/$day" ] && cp -al "$out" "$BACKUP_DIR/weekly/$day" 2>/dev/null
+[ "$(date +%d)" = 01 ] && [ "${BACKUP_KEEP_MONTHS:-0}" -gt 0 ] && [ ! -e "$BACKUP_DIR/monthly/$day" ] && cp -al "$out" "$BACKUP_DIR/monthly/$day" 2>/dev/null
 find "$BACKUP_DIR/daily"   -mindepth 1 -maxdepth 1 -type d -mtime +$(( BACKUP_KEEP_DAYS - 1 )) -exec rm -rf {} +
 find "$BACKUP_DIR/weekly"  -mindepth 1 -maxdepth 1 -type d -mtime +$(( BACKUP_KEEP_WEEKS * 7 ))  -exec rm -rf {} +
 find "$BACKUP_DIR/monthly" -mindepth 1 -maxdepth 1 -type d -mtime +$(( BACKUP_KEEP_MONTHS * 31 )) -exec rm -rf {} +
@@ -846,7 +877,6 @@ URI_ADMIN="mysql://$DB_ADMIN_USER:$(urlpw "$DB_ADMIN_PASS")@${HOST_PUB:-$HOST_C}
 URI_USER=""; [ -n "$DB_USER" ] && URI_USER="mysql://$DB_USER:$(urlpw "$DB_USER_PASS")@${HOST_PUB:-$HOST_C}:$DB_PORT/$DB_NAME"
 jproto=mysql; [ "$ENGINE" = mariadb ] && jproto=mariadb
 jx=""; [ "$ENGINE" = mysql ] && jx="?allowPublicKeyRetrieval=true"
-export DB_REAL_VERSION ROOTU DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS VM_PASS CHADMIN_PASS DATADIR BACKUP_DIR RETENTION SSH_PORT URI_ADMIN URI_USER
 umask 077
 {
 cat <<EOF
@@ -896,9 +926,9 @@ full picture: yallacloud      secrets: yallacloud secrets      log: $LOG
 ================================================================================
 EOF
 } > "$INFO/handover.txt"
-facts_json vm.deploy.completed handover yes > "$INFO/handover.json" 2>/dev/null
+[ -f "$INFO/extra.txt" ] && cat "$INFO/extra.txt" >> "$INFO/handover.txt"   # yallacloud newdb entries survive a re-run
 umask 022
-chmod 600 "$INFO/handover.txt" "$INFO/handover.json"
+chmod 600 "$INFO/handover.txt"
 echo "yc-db-install $VER $(date '+%F %T %Z')" > /etc/yallacloud/db.version
 
 cat > /usr/local/sbin/yallacloud <<'YCEOF'
@@ -989,7 +1019,7 @@ newdb)
   detect_ips; h=${HOST_PUB:-$HOST_PRIV}
   t="database    : $n   user $u / $p   (added $(date '+%F %T'))
 uri         : mysql://$u:$(urlpw "$p")@$h:$DB_PORT/$n"
-  echo "$t" | tee -a /root/yc-db/handover.txt ;;
+  ( umask 077; echo "$t" >> /root/yc-db/extra.txt ); echo "$t" | tee -a /root/yc-db/handover.txt ;;
 retune) need_root; db_tune && systemctl restart "$svc" && echo "restarted $svc" ;;
 log) less +G /var/log/yc-db-deploy.log ;;
 *) sed -n '2,11p' "$0" | sed 's/^# //' ;;
@@ -1014,24 +1044,24 @@ rm -f /root/.yc-verify.cnf
 step "13 agents"
 if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
   # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
-  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root curl -fsS https://repo.oasisstack.io/salt/join.sh | sh >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
+  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock timeout 900 sh -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
   SALT_STATE="BLOCKED - $sp (retry every 15 min)"; warn "salt: $sp - join skipped, retry cron /etc/cron.d/yc-salt-join"
   WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }open $SALT_MASTER 4505/4506 for this VM"
 elif [ "$SALT_JOIN" = yes ]; then
   say "salt: $sp"
-  SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
+  SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
   say "salt: $SALT_STATE"; [[ "$SALT_STATE" == *JOINED* ]] || { warn "salt join not confirmed: $SALT_STATE"; SALT_STATE="not joined"; }
   [[ "$SALT_STATE" == *JOINED* ]] && SALT_STATE=JOINED
 else SALT_STATE="off (SALT_JOIN=no)"; fi
 if [ -n "$ACRONIS_TOKEN" ]; then
-  timeout 3600 bash -c "curl -fsSL --retry 3 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s '$ACRONIS_TOKEN' '$ACRONIS_REGION'"; arc=$?
-  case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 10) ACRONIS_STATE="installed, NOT registered"; WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }acronis needs a human (exit 10)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac
+  YC_AT="$ACRONIS_TOKEN" YC_AR="$ACRONIS_REGION" timeout 3600 bash -c 'curl -fsSL --retry 3 --max-time 120 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s "$YC_AT" "$YC_AR"'; arc=$?   # shortcut: token is argv of the inner bash -s (acronis-setup.sh takes no env token yet)
+  case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 8|10) ACRONIS_STATE="installed, NOT registered (exit $arc)"; WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }acronis needs a human (exit $arc)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac
   say "acronis: $ACRONIS_STATE"
 else ACRONIS_STATE="off (ACRONIS_TOKEN blank)"; fi
 
 # tenant for the final webhook: a VM deployed minutes ago may not be in the Salt inventory yet (5-min sync)
 if [ -z "$TENANT" ]; then
-  for _ in $(seq 1 30); do TENANT=$(yc_tenant) && { TENANT_SRC="salt-inventory (CloudStack domain)"; break; }; TENANT=""; sleep 10; done
+  t_end=$((SECONDS+300)); while [ $SECONDS -lt $t_end ]; do TENANT=$(yc_tenant) && { TENANT_SRC="salt-inventory (CloudStack domain)"; break; }; TENANT=""; sleep 10; done
   say "tenant: ${TENANT:-still not published after 5 min - webhook sends null}"
   [ -n "$TENANT" ] && sed -i "s/^tenant      : - (/tenant      : $TENANT (/" "$INFO/handover.txt"
 fi

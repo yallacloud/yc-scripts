@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.6  (2026-10-26 22:00 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.7  (2026-10-26 21:20 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -121,14 +121,18 @@ say "$(fix_gateway "$GATEWAY")"   # BEFORE the download: a dead .254 gateway mea
 # installer: GitHub (public yallacloud/yc-scripts), then the local mirror repo.oasisstack.io/odoo
 # (ycwsus01, YC ranges), then two more GitHub mirrors - each checked by its .sha256
 R=yallacloud/yc-scripts; F=odoo/yc-odoo20-install.sh; OUT=/root/yc-odoo20-install.sh; ok=""
+MIN_VER="1.4.11"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
 for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
+         "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F?nocache=$(date +%s)" \
          "https://repo.oasisstack.io/odoo/yc-odoo20-install.sh" \
          "https://cdn.jsdelivr.net/gh/$R@$INSTALLER_REF/$F" \
          "https://github.com/$R/raw/$INSTALLER_REF/$F"; do
   if curl -fsSL --retry 3 --connect-timeout 15 -o "$OUT" "$u" \
-     && curl -fsSL --retry 3 --connect-timeout 15 -o "$OUT.sha256" "$u.sha256" \
+     && b=${u%%\?*} && curl -fsSL --retry 3 --connect-timeout 15 -o "$OUT.sha256" "$b.sha256${u#"$b"}" \
      && [ "$(sha256sum "$OUT" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$OUT.sha256")" ]; then
-    ok=$u; break
+    v=$(sed -n 's/^VER=//p' "$OUT" | head -1)
+    [ "$(printf '%s\n' "$MIN_VER" "$v" | sort -V | head -1)" = "$MIN_VER" ] && { ok=$u; break; }
+    say "stale installer v${v:-?} (need >= $MIN_VER): $u"; continue
   fi
   say "mirror failed or sha256 mismatch: $u"
 done

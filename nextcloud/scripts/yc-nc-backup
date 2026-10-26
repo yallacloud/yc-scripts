@@ -1,0 +1,11 @@
+#!/bin/bash
+# yc-nc-backup - dump the Nextcloud database and keep the last 15 days.
+# Root MariaDB is unix_socket (no password). Run daily by /etc/cron.d/yc-nc-backup.
+set -euo pipefail
+CFG=/etc/yallacloud/nextcloud.conf; [ -f "$CFG" ] && . "$CFG"
+DB="${DB_NAME:-nextcloud}"; DEST=/var/backups/nextcloud; KEEP=15
+mkdir -p "$DEST"; chmod 700 "$DEST"
+f="$DEST/${DB}-$(date +%F_%H%M).sql.gz"
+mysqldump --no-defaults -u root --single-transaction --routines --triggers "$DB" | gzip -9 > "$f"
+find "$DEST" -maxdepth 1 -name "${DB}-*.sql.gz" -mtime +"$KEEP" -delete
+echo "$(date -Is) ok $f ($(du -h "$f" | cut -f1)); retention ${KEEP}d" >> "$DEST/backup.log"

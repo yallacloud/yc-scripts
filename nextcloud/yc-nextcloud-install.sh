@@ -350,6 +350,142 @@ apt-get install -y -qq \
   || die "package installation failed"
 
 # ------------------------------------------------------------- 5. database
+# --------------------------------------- 15a. operator scripts + data disk + DB backup
+cat > /usr/local/bin/yc-nc-datadisk <<'YCEOF'
+#!/bin/bash
+# yc-nc-datadisk [--apply] - set up a BLANK second disk for the Nextcloud data dir.
+# LVM + xfs when LVM tools exist, else a straight xfs filesystem on the whole disk.
+# SAFETY: only ever touches a whole disk that is NOT the root disk, has NO
+# partitions/children, NO filesystem signature, and is NOT mounted. Anything with
+# data is left untouched (do it manually). Dry-run unless --apply.
+set -euo pipefail
+CFG=/etc/yallacloud/nextcloud.conf; [ -f "$CFG" ] && . "$CFG"; DATA_PATH="${DATA_PATH:-/nc_data}"
+root_src=$(findmnt -no SOURCE / 2>/dev/null)
+rootdisk=$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)
+[ -n "$rootdisk" ] || rootdisk=$(basename "$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)" 2>/dev/null)
+cand=""
+while read -r name type; do
+  [ "$type" = disk ] || continue
+  [ "/dev/$name" = "/dev/$rootdisk" ] || [ "$name" = "$rootdisk" ] && continue
+  [ -n "$(lsblk -no NAME "/dev/$name" | tail -n +2)" ] && continue          # has partitions
+  [ -n "$(blkid -o value -s TYPE "/dev/$name" 2>/dev/null)" ] && continue   # has a filesystem
+  findmnt -S "/dev/$name" >/dev/null 2>&1 && continue                        # mounted
+  cand="$name"; break
+done < <(lsblk -dno NAME,TYPE)
+if [ -z "$cand" ]; then
+  echo "no BLANK second disk found - only an empty, unpartitioned, unformatted disk is used automatically."
+  echo "Add a disk later and run: yc-nc-datadisk --apply   (or set up $DATA_PATH by hand)."; exit 0
+fi
+dev="/dev/$cand"
+echo "blank disk: $dev ($(lsblk -dno SIZE "$dev"))  ->  $DATA_PATH"
+[ "${1:-}" = "--apply" ] || { echo "DRY RUN - nothing changed. Re-run with --apply to use it."; exit 0; }
+mountpoint -q "$DATA_PATH" && { echo "$DATA_PATH is already a mount - aborting"; exit 0; }
+if command -v pvcreate >/dev/null 2>&1; then
+  pvcreate -ff -y "$dev"; vgcreate ncvg "$dev"; lvcreate -y -l 100%FREE -n ncdata ncvg
+  src=/dev/ncvg/ncdata; mkfs.xfs -f "$src"
+else
+  src="$dev"; mkfs.xfs -f "$src"
+fi
+mkdir -p "$DATA_PATH"
+tmp=$(mktemp -d); mount "$src" "$tmp"
+[ -n "$(ls -A "$DATA_PATH" 2>/dev/null)" ] && cp -a "$DATA_PATH"/. "$tmp"/ 2>/dev/null || true
+umount "$tmp"; rmdir "$tmp"
+uuid=$(blkid -o value -s UUID "$src")
+grep -q "$uuid" /etc/fstab || echo "UUID=$uuid $DATA_PATH xfs defaults,noatime 0 2" >> /etc/fstab
+mount "$DATA_PATH"
+id www-data >/dev/null 2>&1 && chown -R www-data:www-data "$DATA_PATH"
+echo "OK - $src formatted xfs, mounted at $DATA_PATH, fstab persisted."
+YCEOF
+chmod 755 /usr/local/bin/yc-nc-datadisk
+cat > /usr/local/bin/yc-nc-backup <<'YCEOF'
+#!/bin/bash
+# yc-nc-backup - dump the Nextcloud database and keep the last 15 days.
+# Root MariaDB is unix_socket (no password). Run daily by /etc/cron.d/yc-nc-backup.
+set -euo pipefail
+CFG=/etc/yallacloud/nextcloud.conf; [ -f "$CFG" ] && . "$CFG"
+DB="${DB_NAME:-nextcloud}"; DEST=/var/backups/nextcloud; KEEP=15
+mkdir -p "$DEST"; chmod 700 "$DEST"
+f="$DEST/${DB}-$(date +%F_%H%M).sql.gz"
+mysqldump --no-defaults -u root --single-transaction --routines --triggers "$DB" | gzip -9 > "$f"
+find "$DEST" -maxdepth 1 -name "${DB}-*.sql.gz" -mtime +"$KEEP" -delete
+echo "$(date -Is) ok $f ($(du -h "$f" | cut -f1)); retention ${KEEP}d" >> "$DEST/backup.log"
+YCEOF
+chmod 755 /usr/local/bin/yc-nc-backup
+cat > /usr/local/bin/yc-nc-domain <<'YCEOF'
+#!/bin/bash
+# yc-nc-domain <new-fqdn> - change the Nextcloud domain end to end
+# (config, nginx server_name, occ trusted_domains + overwrite.cli.url, hostname).
+# Does NOT issue the cert - run 'yc-nc-ssl le' (free) or 'yc-nc-ssl import/from-pfx' (paid) after.
+set -euo pipefail
+new="${1:?usage: yc-nc-domain <new-fqdn>}"
+CFG=/etc/yallacloud/nextcloud.conf; . "$CFG"; old="$FQDN"
+NCROOT=/var/www/nextcloud; occ(){ sudo -u www-data php "$NCROOT/occ" "$@"; }
+PORTSFX=""; [ -n "${HTTPS_PORT:-}" ] && [ "$HTTPS_PORT" != 443 ] && PORTSFX=":$HTTPS_PORT"
+sed -i "s|^FQDN=.*|FQDN=$new|" "$CFG"
+sed -i "s/server_name .*/server_name $new;/" /etc/nginx/sites-available/nextcloud 2>/dev/null || true
+occ config:system:set overwrite.cli.url --value="https://${new}${PORTSFX}/"
+occ config:system:set trusted_domains 0 --value="$new"
+if [ "${SET_HOSTNAME:-yes}" = yes ]; then hostnamectl set-hostname "$new" 2>/dev/null || true; fi
+nginx -t && systemctl reload nginx
+echo "domain changed: $old -> $new"
+echo "next: yc-nc-ssl le   (free LE)   OR   yc-nc-ssl import <fullchain.pem> <privkey.pem>   (paid)"
+YCEOF
+chmod 755 /usr/local/bin/yc-nc-domain
+cat > /usr/local/bin/yc-nc-ssl <<'YCEOF'
+#!/bin/bash
+# yc-nc-ssl - TLS certificate management for this Nextcloud
+#   yc-nc-ssl le                                   free Let's Encrypt (webroot) issue/renew + nginx reload
+#   yc-nc-ssl import <fullchain.pem> <privkey.pem> install a PAID cert (PEM/fullchain)
+#   yc-nc-ssl from-pfx <file.pfx> [password]       convert a PFX/.p12 to key+fullchain and install
+#   yc-nc-ssl make-fullchain <cert.pem> <inter.pem> [out.pem]   just build a fullchain (leaf + intermediate)
+#   yc-nc-ssl status                               show the live cert issuer + expiry
+# Free LE auto-renews via the certbot systemd timer (reload hook included).
+set -euo pipefail
+CFG=/etc/yallacloud/nextcloud.conf; . "$CFG"
+NG=/etc/nginx/sites-available/nextcloud; DST=/etc/ssl/yc; mkdir -p "$DST"
+point(){ sed -i "s#ssl_certificate .*#ssl_certificate $1;#; s#ssl_certificate_key .*#ssl_certificate_key $2;#" "$NG"; }
+reload(){ nginx -t && systemctl reload nginx; }
+case "${1:-status}" in
+  le)
+    certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos -m "admin@${FQDN}" -d "$FQDN" \ --deploy-hook "systemctl reload nginx"
+      --deploy-hook "systemctl reload nginx"
+    point "/etc/letsencrypt/live/${FQDN}/fullchain.pem" "/etc/letsencrypt/live/${FQDN}/privkey.pem"; reload
+    echo "Let's Encrypt cert installed for $FQDN (auto-renews via certbot.timer).";;
+  import)
+    [ -f "${2:-}" ] && [ -f "${3:-}" ] || { echo "usage: yc-nc-ssl import <fullchain.pem> <privkey.pem>"; exit 1; }
+    install -m 644 "$2" "$DST/paid-fullchain.pem"; install -m 600 "$3" "$DST/paid-privkey.pem"
+    point "$DST/paid-fullchain.pem" "$DST/paid-privkey.pem"; reload; echo "paid cert installed.";;
+  from-pfx)
+    f="${2:?usage: yc-nc-ssl from-pfx <file.pfx> [password]}"; pw="${3:-}"
+    openssl pkcs12 -in "$f" -nocerts -nodes ${pw:+-passin pass:$pw} -out "$DST/paid-privkey.pem"
+    openssl pkcs12 -in "$f" -clcerts -nokeys ${pw:+-passin pass:$pw} -out "$DST/_leaf.pem"
+    openssl pkcs12 -in "$f" -cacerts -nokeys -chain ${pw:+-passin pass:$pw} -out "$DST/_chain.pem" 2>/dev/null || : > "$DST/_chain.pem"
+    cat "$DST/_leaf.pem" "$DST/_chain.pem" > "$DST/paid-fullchain.pem"
+    chmod 600 "$DST/paid-privkey.pem"; chmod 644 "$DST/paid-fullchain.pem"; rm -f "$DST/_leaf.pem" "$DST/_chain.pem"
+    point "$DST/paid-fullchain.pem" "$DST/paid-privkey.pem"; reload; echo "cert installed from PFX $f.";;
+  make-fullchain)
+    out="${4:-$DST/fullchain.pem}"; cat "${2:?cert}" "${3:?intermediate}" > "$out"; echo "wrote $out";;
+  status)
+    echo | openssl s_client -connect "127.0.0.1:${HTTPS_PORT:-443}" -servername "$FQDN" 2>/dev/null \
+      | openssl x509 -noout -issuer -subject -enddate;;
+  *) grep '^#' "$0" | sed 's/^# \{0,1\}//';;
+esac
+YCEOF
+chmod 755 /usr/local/bin/yc-nc-ssl
+say "  operator scripts installed: yc-nc-datadisk, yc-nc-backup, yc-nc-domain, yc-nc-ssl"
+# DB backup: nightly 02:30, 15-day retention (the script enforces retention)
+cat > /etc/cron.d/yc-nc-backup <<'EOF'
+30 2 * * * root /usr/local/bin/yc-nc-backup >/dev/null 2>&1
+EOF
+chmod 644 /etc/cron.d/yc-nc-backup
+say "  DB backup cron installed (nightly 02:30 -> /var/backups/nextcloud, keep 15 days)"
+# free-SSL auto-renew: certbot ships its own timer; make sure it is enabled
+systemctl enable --now certbot.timer >/dev/null 2>&1 || true
+# data disk: auto-use a BLANK second disk for the data dir (fresh install, before any data is written)
+say "checking for a blank second disk for ${DATA_PATH}"
+/usr/local/bin/yc-nc-datadisk --apply || say "  (no blank disk / left for manual setup)"
+
+
 say "configuring mariadb"
 
 # --- MariaDB performance tuning (the c-rieger nextcloud-zero optimisation) ---
@@ -919,10 +1055,12 @@ case "${1:-info}" in
     echo "www-data crontab:"; crontab -u www-data -l 2>/dev/null | sed 's/^/  /'
     echo "certbot renew timer:"; systemctl list-timers 'certbot*' --no-pager 2>/dev/null | sed -n '1,3p' ;;
   backup)
-    echo "Backups: NOT configured by default on this host."
-    echo "Data dir: ${DATA_PATH:-/nc_data}   Database: nextcloud (use mysqldump)."
-    echo "To add: back up ${DATA_PATH:-/nc_data} + a nightly mysqldump (e.g. restic/borg or PBS),"
-    echo "set a retention policy, and record it here. Nextcloud data is in ${DATA_PATH:-/nc_data}." ;;
+    echo "DB backups - /var/backups/nextcloud, nightly 02:30 cron, 15-day retention:"
+    ls -1t /var/backups/nextcloud/*.sql.gz 2>/dev/null | head -20 | sed 's/^/  /' || echo "  (none yet)"
+    echo "Run now: sudo yc-nc-backup    Data dir: ${DATA_PATH:-/nc_data}" ;;
+  ssl)      shift; exec yc-nc-ssl "$@" ;;
+  domain)   shift; exec yc-nc-domain "$@" ;;
+  datadisk) shift; exec yc-nc-datadisk "$@" ;;
   *)
     hr; echo " YallaCloud Nextcloud - ${FQDN:-unknown}"; hr
     echo " URL        : https://${FQDN}${PORTSFX}/"
@@ -944,7 +1082,7 @@ case "${1:-info}" in
     echo " Config     : $CFG"
     echo " Handover   : $OUT   (sudo yallacloud secrets)"
     echo " Logs       : /var/log/yc-nextcloud-install.log"
-    echo " More       : yallacloud cron | yallacloud backup | yallacloud secrets"
+    echo " More       : yallacloud cron | backup | secrets | ssl | domain | datadisk"
     hr ;;
 esac
 YCEOF

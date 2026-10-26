@@ -1,0 +1,17 @@
+#!/bin/bash
+# yc-nc-domain <new-fqdn> - change the Nextcloud domain end to end
+# (config, nginx server_name, occ trusted_domains + overwrite.cli.url, hostname).
+# Does NOT issue the cert - run 'yc-nc-ssl le' (free) or 'yc-nc-ssl import/from-pfx' (paid) after.
+set -euo pipefail
+new="${1:?usage: yc-nc-domain <new-fqdn>}"
+CFG=/etc/yallacloud/nextcloud.conf; . "$CFG"; old="$FQDN"
+NCROOT=/var/www/nextcloud; occ(){ sudo -u www-data php "$NCROOT/occ" "$@"; }
+PORTSFX=""; [ -n "${HTTPS_PORT:-}" ] && [ "$HTTPS_PORT" != 443 ] && PORTSFX=":$HTTPS_PORT"
+sed -i "s|^FQDN=.*|FQDN=$new|" "$CFG"
+sed -i "s/server_name .*/server_name $new;/" /etc/nginx/sites-available/nextcloud 2>/dev/null || true
+occ config:system:set overwrite.cli.url --value="https://${new}${PORTSFX}/"
+occ config:system:set trusted_domains 0 --value="$new"
+if [ "${SET_HOSTNAME:-yes}" = yes ]; then hostnamectl set-hostname "$new" 2>/dev/null || true; fi
+nginx -t && systemctl reload nginx
+echo "domain changed: $old -> $new"
+echo "next: yc-nc-ssl le   (free LE)   OR   yc-nc-ssl import <fullchain.pem> <privkey.pem>   (paid)"

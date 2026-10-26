@@ -1,0 +1,43 @@
+#!/bin/bash
+# yc-nc-datadisk [--apply] - set up a BLANK second disk for the Nextcloud data dir.
+# LVM + xfs when LVM tools exist, else a straight xfs filesystem on the whole disk.
+# SAFETY: only ever touches a whole disk that is NOT the root disk, has NO
+# partitions/children, NO filesystem signature, and is NOT mounted. Anything with
+# data is left untouched (do it manually). Dry-run unless --apply.
+set -euo pipefail
+CFG=/etc/yallacloud/nextcloud.conf; [ -f "$CFG" ] && . "$CFG"; DATA_PATH="${DATA_PATH:-/nc_data}"
+root_src=$(findmnt -no SOURCE / 2>/dev/null)
+rootdisk=$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)
+[ -n "$rootdisk" ] || rootdisk=$(basename "$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)" 2>/dev/null)
+cand=""
+while read -r name type; do
+  [ "$type" = disk ] || continue
+  [ "/dev/$name" = "/dev/$rootdisk" ] || [ "$name" = "$rootdisk" ] && continue
+  [ -n "$(lsblk -no NAME "/dev/$name" | tail -n +2)" ] && continue          # has partitions
+  [ -n "$(blkid -o value -s TYPE "/dev/$name" 2>/dev/null)" ] && continue   # has a filesystem
+  findmnt -S "/dev/$name" >/dev/null 2>&1 && continue                        # mounted
+  cand="$name"; break
+done < <(lsblk -dno NAME,TYPE)
+if [ -z "$cand" ]; then
+  echo "no BLANK second disk found - only an empty, unpartitioned, unformatted disk is used automatically."
+  echo "Add a disk later and run: yc-nc-datadisk --apply   (or set up $DATA_PATH by hand)."; exit 0
+fi
+dev="/dev/$cand"
+echo "blank disk: $dev ($(lsblk -dno SIZE "$dev"))  ->  $DATA_PATH"
+[ "${1:-}" = "--apply" ] || { echo "DRY RUN - nothing changed. Re-run with --apply to use it."; exit 0; }
+mountpoint -q "$DATA_PATH" && { echo "$DATA_PATH is already a mount - aborting"; exit 0; }
+if command -v pvcreate >/dev/null 2>&1; then
+  pvcreate -ff -y "$dev"; vgcreate ncvg "$dev"; lvcreate -y -l 100%FREE -n ncdata ncvg
+  src=/dev/ncvg/ncdata; mkfs.xfs -f "$src"
+else
+  src="$dev"; mkfs.xfs -f "$src"
+fi
+mkdir -p "$DATA_PATH"
+tmp=$(mktemp -d); mount "$src" "$tmp"
+[ -n "$(ls -A "$DATA_PATH" 2>/dev/null)" ] && cp -a "$DATA_PATH"/. "$tmp"/ 2>/dev/null || true
+umount "$tmp"; rmdir "$tmp"
+uuid=$(blkid -o value -s UUID "$src")
+grep -q "$uuid" /etc/fstab || echo "UUID=$uuid $DATA_PATH xfs defaults,noatime 0 2" >> /etc/fstab
+mount "$DATA_PATH"
+id www-data >/dev/null 2>&1 && chown -R www-data:www-data "$DATA_PATH"
+echo "OK - $src formatted xfs, mounted at $DATA_PATH, fstab persisted."

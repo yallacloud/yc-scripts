@@ -1,0 +1,38 @@
+#!/bin/bash
+# yc-nc-ssl - TLS certificate management for this Nextcloud
+#   yc-nc-ssl le                                   free Let's Encrypt (webroot) issue/renew + nginx reload
+#   yc-nc-ssl import <fullchain.pem> <privkey.pem> install a PAID cert (PEM/fullchain)
+#   yc-nc-ssl from-pfx <file.pfx> [password]       convert a PFX/.p12 to key+fullchain and install
+#   yc-nc-ssl make-fullchain <cert.pem> <inter.pem> [out.pem]   just build a fullchain (leaf + intermediate)
+#   yc-nc-ssl status                               show the live cert issuer + expiry
+# Free LE auto-renews via the certbot systemd timer (reload hook included).
+set -euo pipefail
+CFG=/etc/yallacloud/nextcloud.conf; . "$CFG"
+NG=/etc/nginx/sites-available/nextcloud; DST=/etc/ssl/yc; mkdir -p "$DST"
+point(){ sed -i "s#ssl_certificate .*#ssl_certificate $1;#; s#ssl_certificate_key .*#ssl_certificate_key $2;#" "$NG"; }
+reload(){ nginx -t && systemctl reload nginx; }
+case "${1:-status}" in
+  le)
+    certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos -m "admin@${FQDN}" -d "$FQDN" \
+      --deploy-hook "systemctl reload nginx"
+    point "/etc/letsencrypt/live/${FQDN}/fullchain.pem" "/etc/letsencrypt/live/${FQDN}/privkey.pem"; reload
+    echo "Let's Encrypt cert installed for $FQDN (auto-renews via certbot.timer).";;
+  import)
+    [ -f "${2:-}" ] && [ -f "${3:-}" ] || { echo "usage: yc-nc-ssl import <fullchain.pem> <privkey.pem>"; exit 1; }
+    install -m 644 "$2" "$DST/paid-fullchain.pem"; install -m 600 "$3" "$DST/paid-privkey.pem"
+    point "$DST/paid-fullchain.pem" "$DST/paid-privkey.pem"; reload; echo "paid cert installed.";;
+  from-pfx)
+    f="${2:?usage: yc-nc-ssl from-pfx <file.pfx> [password]}"; pw="${3:-}"
+    openssl pkcs12 -in "$f" -nocerts -nodes ${pw:+-passin pass:$pw} -out "$DST/paid-privkey.pem"
+    openssl pkcs12 -in "$f" -clcerts -nokeys ${pw:+-passin pass:$pw} -out "$DST/_leaf.pem"
+    openssl pkcs12 -in "$f" -cacerts -nokeys -chain ${pw:+-passin pass:$pw} -out "$DST/_chain.pem" 2>/dev/null || : > "$DST/_chain.pem"
+    cat "$DST/_leaf.pem" "$DST/_chain.pem" > "$DST/paid-fullchain.pem"
+    chmod 600 "$DST/paid-privkey.pem"; chmod 644 "$DST/paid-fullchain.pem"; rm -f "$DST/_leaf.pem" "$DST/_chain.pem"
+    point "$DST/paid-fullchain.pem" "$DST/paid-privkey.pem"; reload; echo "cert installed from PFX $f.";;
+  make-fullchain)
+    out="${4:-$DST/fullchain.pem}"; cat "${2:?cert}" "${3:?intermediate}" > "$out"; echo "wrote $out";;
+  status)
+    echo | openssl s_client -connect "127.0.0.1:${HTTPS_PORT:-443}" -servername "$FQDN" 2>/dev/null \
+      | openssl x509 -noout -issuer -subject -enddate;;
+  *) grep '^#' "$0" | sed 's/^# \{0,1\}//';;
+esac

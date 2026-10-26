@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.1  (2026-10-26 16:30 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.2  (2026-10-26 17:05 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
 #
@@ -53,7 +53,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.1
+VER=1.0.2
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -162,6 +162,17 @@ fix_gateway(){   # $1 = forced gateway, blank = auto
     return 0
   done
   echo "gateway: nothing answers on ${cands// /, } for $dev ($ip)"; return 1
+}
+# Salt master reachability with default tools only (getent, timeout, bash /dev/tcp). Prints the reason, rc 0 = both ports open
+SALT_MASTER=salt.oasisstack.io
+salt_ports(){
+  local ip p bad=""
+  ip=$(getent hosts "$SALT_MASTER" | awk '{print $1; exit}')
+  [ -n "$ip" ] || { echo "DNS: $SALT_MASTER does not resolve"; return 1; }
+  for p in 4505 4506; do timeout 5 bash -c "</dev/tcp/$ip/$p" 2>/dev/null || bad="$bad $p"; done
+  [ -z "$bad" ] && { echo "$SALT_MASTER ($ip) 4505/4506 open"; return 0; }
+  echo "$SALT_MASTER ($ip) port(s)${bad} blocked from $(ip -4 route get "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="src")s=$(i+1);if($i=="via")g=$(i+1)}} END{print s" via "(g?g:"direct")}')"
+  return 1
 }
 # database client as root (/root/.my.cnf)
 db_cli(){ command -v mariadb || command -v mysql; }
@@ -860,7 +871,7 @@ info)
   hd "Cron"
   grep -hv '^#' /etc/cron.d/yc-* 2>/dev/null | sed 's/^/  /'; crontab -l 2>/dev/null | grep -v '^#' | sed 's/^/  root: /'
   hd "Agents"
-  kv salt "$(st salt-minion) $(grep -hs '^id:' /etc/salt/minion.d/*.conf | head -1)"
+  kv salt "$(st salt-minion) $(grep -hs '^id:' /etc/salt/minion.d/*.conf | head -1) - $(salt_ports)$([ -f /etc/cron.d/yc-salt-join ] && echo ', join retry pending')"
   kv acronis "$(st acronis_mms)"
   hd "Commands"
   kv "yallacloud secrets" "credentials + connection strings"
@@ -915,14 +926,20 @@ rm -f /root/.yc-verify.cnf
 
 # ================= 13. agents: Salt, Acronis (never fail the DB build)
 step "13 agents"
-if [ "$SALT_JOIN" = yes ]; then
+if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
+  # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
+  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root curl -fsS https://repo.oasisstack.io/salt/join.sh | sh >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
+  SALT_STATE="BLOCKED - $sp (retry every 15 min)"; warn "salt: $sp - join skipped, retry cron /etc/cron.d/yc-salt-join"
+  WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }open $SALT_MASTER 4505/4506 for this VM"
+elif [ "$SALT_JOIN" = yes ]; then
+  say "salt: $sp"
   SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
   say "salt: $SALT_STATE"; [[ "$SALT_STATE" == *JOINED* ]] || { warn "salt join not confirmed: $SALT_STATE"; SALT_STATE="not joined"; }
   [[ "$SALT_STATE" == *JOINED* ]] && SALT_STATE=JOINED
 else SALT_STATE="off (SALT_JOIN=no)"; fi
 if [ -n "$ACRONIS_TOKEN" ]; then
   timeout 3600 bash -c "curl -fsSL --retry 3 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s '$ACRONIS_TOKEN' '$ACRONIS_REGION'"; arc=$?
-  case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 10) ACRONIS_STATE="installed, NOT registered"; WAIT_HUMAN="acronis needs a human (exit 10)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac
+  case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 10) ACRONIS_STATE="installed, NOT registered"; WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }acronis needs a human (exit 10)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac
   say "acronis: $ACRONIS_STATE"
 else ACRONIS_STATE="off (ACRONIS_TOKEN blank)"; fi
 

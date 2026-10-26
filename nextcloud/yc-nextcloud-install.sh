@@ -54,12 +54,14 @@ TARBALL_URL=""                 # optional INTERNAL mirror (e.g. pbs01) serving
                                 # FortiGate throttle), e.g. "http://10.x.x.x/nextcloud".
 
 # --- ssh ---------------------------------------------------------------------
-SSH_PUBKEY=""                  # optional operator public key, installed for root
+SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yc-ops"  # baked-in yc-ops operator key, installed for root
                                 # and $SUDO_USER_NAME, e.g.
                                 # "ssh-ed25519 AAAAC3Nza... bilal@elitebook"
                                 # blank = pubkey auth still enabled, add keys later.
 PERMIT_ROOT_LOGIN="yes"        # yes | prohibit-password | no
                                 # prohibit-password = key-only root (set SSH_PUBKEY first)
+LE_EMAIL="bilalinamdar@gmail.com"  # Let's Encrypt registration email (renewal + expiry
+                                # notices). Blank = register without an email.
 
 # --- finish ------------------------------------------------------------------
 DISABLE_CLOUD_INIT="yes"       # yes = stop cloud-init re-running every boot once the
@@ -204,8 +206,9 @@ JOIN_SALT=$JOIN_SALT
 ACRONIS_TOKEN=$ACRONIS_TOKEN
 ACRONIS_REGION=$ACRONIS_REGION
 APT_MIRROR=$APT_MIRROR
-SSH_PUBKEY=$SSH_PUBKEY
+SSH_PUBKEY="$SSH_PUBKEY"
 PERMIT_ROOT_LOGIN=$PERMIT_ROOT_LOGIN
+LE_EMAIL="$LE_EMAIL"
 DISABLE_CLOUD_INIT=$DISABLE_CLOUD_INIT
 REBOOT_AFTER=$REBOOT_AFTER
 PUBLIC_IP=$PUBLIC_IP
@@ -515,7 +518,7 @@ point(){ sed -i "s#ssl_certificate .*#ssl_certificate $1;#; s#ssl_certificate_ke
 reload(){ nginx -t && systemctl reload nginx; }
 case "${1:-status}" in
   le)
-    certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos -m "admin@${FQDN}" -d "$FQDN" \ --deploy-hook "systemctl reload nginx"
+    certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos -m "${LE_EMAIL:-admin@${FQDN}}" -d "$FQDN" \ --deploy-hook "systemctl reload nginx"
       --deploy-hook "systemctl reload nginx"
     point "/etc/letsencrypt/live/${FQDN}/fullchain.pem" "/etc/letsencrypt/live/${FQDN}/privkey.pem"; reload
     echo "Let's Encrypt cert installed for $FQDN (auto-renews via certbot.timer).";;
@@ -954,8 +957,9 @@ echo '*/5 * * * * php -f /var/www/nextcloud/cron.php' | crontab -u www-data -
 # ----------------------------------------------------------------- 11. ssl
 say "requesting a Let's Encrypt certificate for $FQDN (HTTP-01 on port 80)"
 mkdir -p /var/www/nextcloud
+if [ -n "${LE_EMAIL:-}" ]; then _le_em="-m $LE_EMAIL"; else _le_em="--register-unsafely-without-email"; fi
 if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos \
-     --register-unsafely-without-email -d "$FQDN" >/dev/null 2>&1; then
+     $_le_em -d "$FQDN" >/dev/null 2>&1; then
   SSL_STATUS="letsencrypt"
   # point nginx at the real cert (replaces the temporary self-signed pair)
   sed -i "s#ssl_certificate .*#ssl_certificate /etc/letsencrypt/live/${FQDN}/fullchain.pem;#;

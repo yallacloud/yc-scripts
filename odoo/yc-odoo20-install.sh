@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.0  (2026-10-26 15:25 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.1  (2026-10-26 16:25 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -33,6 +33,7 @@ PG_VERSION="18"              # PGDG major 16-19
 PUBLIC_IP=""                 # NAT case: public IP forwarded to this VM (blank = auto)
 GATEWAY=""                   # private VM behind a firewall: its LAN IP (blank = auto: .1/.254/.2)
 SSH_PORT=""                  # blank = 3222 on a public IP, 22 on private
+SSH_PUBKEYS="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+Eyv3PjAXqSMhQy3MdWwZCrnrP+W7FON6ilIDhdI42usXmMhTr0eJQYsTwVdwMZE9OtF4SniauuN7YvJkG9O3W6YclGr0U8xqo4QH48ZQYntB37nP5PUIOgFKkVyH3T7MR2Dp8VZo0n6oa7hgMjIJOVcmC8zhEm0+4/JJSL60gaGA2/251jSELOlAVTalKyuOipZYjnNOY4TqU9owCRPJNGd9e3rP4QOO0p5xjtsFSNDMqacpCSYiIc26y2GNjOqthvWGa4/O84QmMqbtG053VrmNQZGSgmGw+4b9ajC/9Bh8dU0XSEN9ijqc1U86zNXL10GhhAV+H2R3V5wLPbFK3/NAPOi4sqZ1eXq6denlr6Ap2/cAvUT089v5L1CkoXaZY2QCLQleHH3jPRKzvzB+7g7R7VIDXVX977qleExzi48XinzV+W5+dZyHbAK+9iOf5orJGOMWWxj1LKYltPUQeY19B+H4fRDfhDmw7+94oqFxnDPjMaSdcTAosoQ4EdKwqBmtdWhDAaxsIHa1ynkmUo0IwbosDJayjl/GqHeiyAwWWG/7CKwJXTef4ZYETwIWdXobZElzh9/kGrKgoalzT5K5f6sBM/IBciPfhSz8PaOiWc0RwLEkqX8JtzzllgBZItuIKWpSWl4TUw== yallacloud-admin"   # root authorized_keys: OpenSSH public keys, one per line (blank = none)
 # -- 4. OS
 TZ_SET="Asia/Dubai"
 LOCALE_SET="en_US.UTF-8"
@@ -65,7 +66,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.0
+VER=1.4.1
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -150,6 +151,9 @@ for m in $APT_MIRRORS; do fqdn "$m" || { warn "APT_MIRRORS '$APT_MIRRORS' invali
 if [ -n "$SSH_PORT" ]; then
   { [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] && [[ ! " 80 443 5432 8069 8072 " == *" $SSH_PORT "* ]]; } || { warn "SSH_PORT '$SSH_PORT' invalid - auto"; SSH_PORT=""; }
 fi
+_k=""; while IFS= read -r l; do l=$(printf '%s' "$l" | tr -d '\r'); [ -z "$l" ] && continue
+  if [[ "$l" =~ ^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp(256|384|521)|sk-[a-z0-9@.-]+)\ [A-Za-z0-9+/]+=*(\ [^[:cntrl:]]*)?$ ]]; then _k+="$l"$'\n'; else warn "SSH_PUBKEYS: skipped a line that is not an OpenSSH public key (${l:0:30}...)"; fi
+done <<< "$SSH_PUBKEYS"; SSH_PUBKEYS=${_k%$'\n'}
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 case "$DISABLE_CLOUD_INIT" in yes|no) ;; *) DISABLE_CLOUD_INIT=yes;; esac
 [ -z "$GATEWAY" ] || ip4 "$GATEWAY" || { warn "GATEWAY '$GATEWAY' invalid - auto"; GATEWAY=""; }
@@ -408,7 +412,7 @@ chmod 755 /usr/local/sbin/yc-notify
 
 save_cfg(){   # effective answers, no secrets (those live in secrets.env / notify.env)
   local v; umask 077
-  for v in ROLE DOMAIN LE_EMAIL DB_HOST APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT TZ_SET LOCALE_SET APT_MIRRORS \
+  for v in ROLE DOMAIN LE_EMAIL DB_HOST APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEYS TZ_SET LOCALE_SET APT_MIRRORS \
            BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL WEBHOOK_SEND_SECRETS \
            ENABLE_SALT SALT_JOIN_URL ENABLE_ACRONIS ACRONIS_REGION ACRONIS_SETUP_URL \
            PASS_URL DISABLE_CLOUD_INIT ODOO_DEB_URL REPO_URL; do printf '%s=%q\n' "$v" "${!v}"; done > "$CFG"
@@ -510,6 +514,7 @@ detect_ips
 [ -n "$BIND_IP" ] || die "no IPv4 address on any NIC"
 [ -z "$SSH_PORT" ] && { [ -n "$PUB_NIC" ] && SSH_PORT=3222 || SSH_PORT=22; }
 say "role=$ROLE bind=$BIND_IP url_ip=$URL_IP pub_nic=${PUB_NIC:-none} priv=${PRIV_NIC:-none} md_pub=${MD_PUB:-none} ssh=$SSH_PORT"
+timedatectl set-timezone "$TZ_SET" 2>/dev/null || true   # before START, so its time line is local
 # facts for yc-notify (read once from the CloudStack router; SMBIOS stays the identity)
 PUB_URL_IP=""; is_priv "$URL_IP" || PUB_URL_IP=$URL_IP
 { printf '%s=%q\n' SMBIOS_UUID "$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)" BIND_IP "$BIND_IP" PUBLIC "$PUB_URL_IP" \
@@ -609,6 +614,11 @@ rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf /etc/ssh/sshd_config.d/60-cloudi
 # cloud-init prepends 'no-port-forwarding,...,command="echo Please login as the user ..."' - strip it.
 [ -f /root/.ssh/authorized_keys ] && sed -i -E 's/^.*(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9-]+@openssh\.com) /\1 /' /root/.ssh/authorized_keys
 printf 'disable_root: false\nssh_pwauth: true\n' > /etc/cloud/cloud.cfg.d/99-yallacloud.cfg
+if [ -n "$SSH_PUBKEYS" ]; then   # YallaCloud admin key(s) for root, added once each
+  install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+  while IFS= read -r l; do grep -qF "$(printf '%s' "$l" | cut -d' ' -f2)" /root/.ssh/authorized_keys || printf '%s\n' "$l" >> /root/.ssh/authorized_keys; done <<< "$SSH_PUBKEYS"
+  say "ssh: $(printf '%s\n' "$SSH_PUBKEYS" | grep -c .) public key(s) in root authorized_keys"
+fi
 install -d -m 755 /run/sshd   # missing when ssh.service is down; sshd -t needs it
 sshd -t || die "sshd config invalid"
 # 24.04 socket activation: the generator reads Port on daemon-reload; restart the socket, not the service.
@@ -780,6 +790,7 @@ limit_time_real = 1200
 limit_time_real_cron = 3600
 limit_request = 65536
 EOF
+  [ "$ROLE" = combined ] && sed -i '/^db_host = False$/d;/^db_port = False$/d;/^db_password = False$/d' /etc/odoo/odoo.conf   # unix socket: Odoo 20 warns on False
   [ -z "$ODOO_DB" ] && sed -i '/^db_name\|^dbfilter/d;s/^list_db = False/list_db = True/' /etc/odoo/odoo.conf
   chown odoo:odoo /etc/odoo/odoo.conf; chmod 640 /etc/odoo/odoo.conf
   printf '/var/log/odoo/*.log {\n  weekly\n  rotate 8\n  compress\n  missingok\n  copytruncate\n}\n' > /etc/logrotate.d/odoo-yallacloud

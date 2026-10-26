@@ -83,6 +83,7 @@ WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn t
 CS_PORTAL_URL=""               # CloudStack portal URL, e.g. https://cloudstack.yallacloud.net
 CS_DOMAIN=""                   # CloudStack domain/tenant that owns this VM
 CS_ACCOUNT=""                  # CloudStack account that owns this VM
+CS_INSTANCE=""                 # CloudStack internal instance name (i-2-xxxx); deployer-supplied, else the UUID
 VM_NAME=""                     # CloudStack VM display name (blank = auto-detect from cloud-init)
 
 # --- integrations (Salt minion + Acronis backup agent) ---
@@ -163,7 +164,7 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 VMID=$(cat /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; PUBLIC_IP=""
 VM_UUID="$VMID"   # CloudStack instance UUID == SMBIOS product_uuid
 # VM name + instance id: deployer vars (VM_NAME) win; else best-effort from cloud-init metadata.
-: "${VM_NAME:=}"; : "${VM_INSTANCE:=}"; : "${CS_PORTAL_URL:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"
+: "${VM_NAME:=}"; : "${VM_INSTANCE:=}"; : "${CS_INSTANCE:=}"; : "${CS_PORTAL_URL:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"
 if command -v cloud-init >/dev/null 2>&1; then
   [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.name 2>/dev/null)
   [ -n "$VM_NAME" ]     || VM_NAME=$(cloud-init query ds.meta_data.'local-hostname' 2>/dev/null)
@@ -171,6 +172,7 @@ if command -v cloud-init >/dev/null 2>&1; then
 fi
 case "$VM_NAME"     in null|"<no value>"|*[Ee]rror*) VM_NAME="";; esac
 case "$VM_INSTANCE" in null|"<no value>"|*[Ee]rror*) VM_INSTANCE="";; esac
+[ -n "$CS_INSTANCE" ] && VM_INSTANCE="$CS_INSTANCE"   # deployer-supplied libvirt name (i-2-xxxx) wins over the UUID
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, no secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
   curl -fsS --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source}" -d "$2" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
@@ -222,6 +224,7 @@ WEBHOOK_SECRET=$WEBHOOK_SECRET
 CS_PORTAL_URL=$CS_PORTAL_URL
 CS_DOMAIN=$CS_DOMAIN
 CS_ACCOUNT=$CS_ACCOUNT
+CS_INSTANCE=$CS_INSTANCE
 VM_NAME="$VM_NAME"
 JOIN_SALT=$JOIN_SALT
 ACRONIS_TOKEN=$ACRONIS_TOKEN

@@ -79,7 +79,7 @@ WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"  # YallaClou
 WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn the webhook on
 
 # --- integrations (Salt minion + Acronis backup agent) ---
-JOIN_SALT="yes"                # yes|no - join this VM to the YallaCloud Salt master (ycsalt01)
+JOIN_SALT="yes"                # yes|no - join this VM to the YallaCloud Salt master (salt.oasisstack.io:4506)
 ACRONIS_TOKEN=""               # Acronis registration token; EMPTY = skip Acronis entirely
 ACRONIS_REGION="AE"            # AE|SG - Acronis datacenter region
 
@@ -1144,11 +1144,16 @@ APPSTORE=$(curl -sS -o /dev/null -m 15 -w '%{http_code}' https://apps.nextcloud.
 # Both pull from repo.oasisstack.io (IP-allowlisted). A failure here NEVER aborts
 # the Nextcloud build - it is logged and the deploy continues.
 if [ "${JOIN_SALT:-yes}" = yes ]; then
-  say "joining the YallaCloud Salt master (ycsalt01) via repo.oasisstack.io/salt/join.sh"
-  if curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh >>"$LOG" 2>&1; then
-    say "  salt: join.sh ran (the master assigns the minion id: <domain>-<vmname>)"
+  # reachability gate: the minion must reach the master publisher port before joining.
+  if timeout 8 bash -c '</dev/tcp/salt.oasisstack.io/4506' 2>/dev/null; then
+    say "salt: master salt.oasisstack.io:4506 reachable - joining via repo.oasisstack.io/salt/join.sh"
+    if curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh >>"$LOG" 2>&1; then
+      say "  salt: joined (the master assigns the minion id: <domain>-<vmname>)"
+    else
+      say "  salt: join.sh failed (repo.oasisstack.io unreachable here?) - skipped, join later"
+    fi
   else
-    say "  salt: join could not run (repo.oasisstack.io unreachable here?) - skipped, join later"
+    say "  salt: master salt.oasisstack.io:4506 unreachable - skipping join (re-run join.sh when the path is open)"
   fi
 else
   say "salt join disabled (JOIN_SALT=no)"

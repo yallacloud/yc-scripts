@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-mysql-userdata.sh  v1.0.4  (2026-10-26 21:30 IST)  YallaCloud / OasisStack
+# yc-mysql-userdata.sh  v1.0.5  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Oracle MySQL Community database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Paste in CloudStack: Add Instance > Advanced > Userdata. Edit ONLY the block below.
@@ -40,6 +40,8 @@ ACRONIS_REGION="AE"        # AE | SG
 NTFY_URL="https://ntfy.sh/9890122212"                          # status only, never secrets
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""      # ERP webhook X-Webhook-Secret (blank = webhook off)
+EXTRA_WEBHOOK_URL=""       # optional second webhook (copy of every event, credentials stripped), blank = off
+EXTRA_WEBHOOK_SECRET=""    # its X-Webhook-Secret
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal (cloudPortal / cloudVmUrl in the webhook)
 INSTALLER_REF="main"       # advanced: git branch/tag of yallacloud/yc-scripts
 # ======================================================
@@ -66,7 +68,7 @@ fi
 
 # answers for the installer (it validates everything again; re-run: yc-db-install)
 umask 077; mkdir -p /etc/yallacloud
-for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL; do
+for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL; do
   printf '%s=%q\n' "$v" "${!v}"
 done > /etc/yallacloud/db.conf.env
 umask 022

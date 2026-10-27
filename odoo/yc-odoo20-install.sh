@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.11  (2026-10-26 21:20 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.12  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -51,6 +51,8 @@ ENABLE_WEBHOOK="yes"
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""            # X-Webhook-Secret - REQUIRED by the ERP; paste at deploy time
 ERP_WEBHOOK_TOKEN=""             # optional Authorization: Bearer <jwt>
+EXTRA_WEBHOOK_URL=""             # optional second webhook: copy of every event, credentials stripped (blank = off)
+EXTRA_WEBHOOK_SECRET=""          # its X-Webhook-Secret
 WEBHOOK_SEND_SECRETS="yes"       # put the Odoo/DB passwords in the webhook fields (never in ntfy)
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal this VM comes from (sent as cloudstackUrl)
 CS_TENANT=""                     # CloudStack domain/tenant; blank = auto from the Salt inventory (ROOT = admin)
@@ -70,7 +72,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.11
+VER=1.4.12
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -182,6 +184,7 @@ if [ "$ENABLE_WEBHOOK" = yes ]; then
   [[ "$ERP_WEBHOOK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "ERP_WEBHOOK_URL '$ERP_WEBHOOK_URL' invalid - webhook off"; ENABLE_WEBHOOK=no; }
   [ -n "$ERP_WEBHOOK_SECRET$ERP_WEBHOOK_TOKEN" ] || warn "ERP_WEBHOOK_SECRET is blank - the ERP will refuse the events (set it and run: yc-notify --test)"
 fi
+[ -z "$EXTRA_WEBHOOK_URL" ] || [[ "$EXTRA_WEBHOOK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "EXTRA_WEBHOOK_URL invalid - second webhook off"; EXTRA_WEBHOOK_URL=""; }
 yn ENABLE_SALT yes; yn ENABLE_ACRONIS yes; yn ROOT_PW_FROM_CLOUDSTACK yes
 [[ "$VM_PW_USERS" =~ ^[a-z_][a-z0-9_-]*(\ [a-z_][a-z0-9_-]*)*$ ]] || { warn "VM_PW_USERS '$VM_PW_USERS' invalid - using root"; VM_PW_USERS="root"; }
 [[ "$SALT_JOIN_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "SALT_JOIN_URL '$SALT_JOIN_URL' invalid - default"; SALT_JOIN_URL=https://repo.oasisstack.io/salt/join.sh; }
@@ -191,16 +194,16 @@ case "$ACRONIS_REGION" in AE|SG) ;; *) warn "ACRONIS_REGION '$ACRONIS_REGION' mu
 ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
 [ -z "$ACRONIS_TOKEN" ] || [[ "$ACRONIS_TOKEN" =~ ^[A-Za-z0-9-]{8,128}$ ]] || { warn "ACRONIS_TOKEN has bad characters - Acronis skipped"; ACRONIS_TOKEN=""; }
 [ "$ENABLE_ACRONIS" = yes ] && [ -z "$ACRONIS_TOKEN" ] && say "acronis: ENABLE_ACRONIS=yes but no ACRONIS_TOKEN - Acronis will be skipped"
-for v in ERP_WEBHOOK_SECRET ERP_WEBHOOK_TOKEN; do [[ "${!v}" =~ [[:space:]\"\'] ]] && { warn "$v contains spaces or quotes - ignored"; printf -v "$v" ''; }; done
+for v in ERP_WEBHOOK_SECRET ERP_WEBHOOK_TOKEN EXTRA_WEBHOOK_SECRET; do [[ "${!v}" =~ [[:space:]\"\'] ]] && { warn "$v contains spaces or quotes - ignored"; printf -v "$v" ''; }; done
 say "config: ROLE=$ROLE DOMAIN=${DOMAIN:-<sslip>} DB_HOST=${DB_HOST:--} DB_PASS=$([ -n "$DB_PASS" ] && echo set || echo generate) APP_ALLOW=${APP_ALLOW:-auto} ODOO_DB=${ODOO_DB:-none} PG=$PG_VERSION TZ=$TZ_SET SSH=${SSH_PORT:-auto} PUBLIC_IP=${PUBLIC_IP:-auto} GATEWAY=${GATEWAY:-auto}"
-say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=$ENABLE_NTFY ($NTFY_SERVER/$NTFY_TOPIC)  WEBHOOK=$ENABLE_WEBHOOK ($ERP_WEBHOOK_URL, secret $([ -n "$ERP_WEBHOOK_SECRET" ] && echo set || echo NOT set), send secrets $WEBHOOK_SEND_SECRETS)  SALT=$ENABLE_SALT  ACRONIS=$ENABLE_ACRONIS (token $([ -n "$ACRONIS_TOKEN" ] && echo set || echo none), $ACRONIS_REGION)"
+say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=$ENABLE_NTFY ($NTFY_SERVER/$NTFY_TOPIC)  WEBHOOK=$ENABLE_WEBHOOK ($ERP_WEBHOOK_URL, secret $([ -n "$ERP_WEBHOOK_SECRET" ] && echo set || echo NOT set), send secrets $WEBHOOK_SEND_SECRETS)  EXTRA=$([ -n "$EXTRA_WEBHOOK_URL" ] && [ -n "$EXTRA_WEBHOOK_SECRET" ] && echo on || echo off)  SALT=$ENABLE_SALT  ACRONIS=$ENABLE_ACRONIS (token $([ -n "$ACRONIS_TOKEN" ] && echo set || echo none), $ACRONIS_REGION)"
 
 # == reporting tool (ntfy + ERP webhook) - installed first so a failure later is still reported
-umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" ACRONIS_TOKEN "$ACRONIS_TOKEN" > "$NOTIFY_ENV"; umask 022
+umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" EXTRA_WEBHOOK_SECRET "$EXTRA_WEBHOOK_SECRET" ACRONIS_TOKEN "$ACRONIS_TOKEN" > "$NOTIFY_ENV"; umask 022
 cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 #!/usr/bin/env python3
-# yc-notify v1.4.1 (2026-10-26) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
-# (other team, yallacloud01, contract YCERP-01 - NOT ychook). Same event shape as the Windows
+# yc-notify v1.4.2 (2026-10-27) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
+# (contract YCERP-01) + optional second webhook (EXTRA_WEBHOOK_URL, no credentials). Same event shape as the Windows
 # C-Scripts payload so the ERP matches it by vmId = SMBIOS UUID.
 #   yc-notify -t vm.deploy.completed -T "OK BUILD odoo combined" -p 3 -g white_check_mark,odoo \
 #             -l "url  https://..." -f area=odoo -s odooAdminPassword=... [--steps "NET+ OS+"] \
@@ -212,9 +215,9 @@ cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 # Settings: /etc/yallacloud/odoo.conf.env (switches) + notify.env (secrets, root 600). Failed webhook posts wait in
 # /var/lib/yallacloud/notify-queue and go first on the next call (event.delivery.queued).
 # Log: /var/log/yc-notify.log; full webhook bodies + ERP answers: /var/log/yc-notify.events.jsonl (600). Best effort: always exits 0 unless the arguments are wrong.
-import argparse, datetime, glob, hashlib, json, os, shlex, socket, ssl, subprocess, sys, time, urllib.request
+import argparse, datetime, glob, hashlib, json, os, re, shlex, socket, ssl, subprocess, sys, time, urllib.request
 
-CONF = '/etc/yallacloud/notify.env'          # secrets only: ERP_WEBHOOK_SECRET, ERP_WEBHOOK_TOKEN, NTFY_TOKEN
+CONF = '/etc/yallacloud/notify.env'          # secrets only: ERP_WEBHOOK_SECRET, ERP_WEBHOOK_TOKEN, EXTRA_WEBHOOK_SECRET, NTFY_TOKEN
 MAIN = '/etc/yallacloud/odoo.conf.env'       # switches + URLs (ENABLE_NTFY, NTFY_TOPIC, ...)
 FACTS = '/etc/yallacloud/vm-facts.env'
 QDIR = '/var/lib/yallacloud/notify-queue'
@@ -356,19 +359,14 @@ def send_ntfy(c, a, fx):
         return 'FAIL %s' % e
 
 
-def send_webhook(c, a, fx):
-    if c.get('ENABLE_WEBHOOK', 'yes') != 'yes':
-        return 'off'
-    url = c.get('ERP_WEBHOOK_URL', '')
-    if not url:
-        return 'no url'
+def build_event(c, a, fx, with_creds):
     fields = {}
     for kv in (a.field or []):
         if '=' in kv:
             k, v = kv.split('=', 1)
             fields[k] = v
     creds = {}                              # every user/password in ONE section, grouped: vm / odoo / database
-    if c.get('WEBHOOK_SEND_SECRETS', 'yes') == 'yes':
+    if with_creds and c.get('WEBHOOK_SEND_SECRETS', 'yes') == 'yes':
         for kv in (a.secret or []):
             if '=' in kv:
                 k, v = kv.split('=', 1)
@@ -383,6 +381,41 @@ def send_webhook(c, a, fx):
     if a.failed_step:
         ev['failedStep'] = a.failed_step
         ev['error'] = a.error or ''
+    return ev
+
+
+SECRETISH = re.compile(r'(?i)pass|pwd|secret|token|^uri|dsn')
+
+
+def strip_secrets(v):
+    if isinstance(v, dict):
+        return {k: ('REDACTED' if SECRETISH.search(k) and isinstance(x, str) and x else strip_secrets(x)) for k, x in v.items()}
+    if isinstance(v, list):
+        return [strip_secrets(x) for x in v]
+    return v
+
+
+def send_extra(c, a, fx):
+    """optional second webhook: the same event WITHOUT credentials, best effort, no queue"""
+    url, key = c.get('EXTRA_WEBHOOK_URL', ''), c.get('EXTRA_WEBHOOK_SECRET', '')
+    if not (url and key):
+        return 'off'
+    ev = strip_secrets(build_event(c, a, fx, False))
+    body = json.dumps(ev, separators=(',', ':')).encode('utf-8')
+    try:
+        s, _ = post(url, body, {'Content-Type': 'application/json', 'X-Webhook-Secret': key}, 15)
+        return 'ok %s' % s
+    except Exception as e:  # never stop the caller
+        return 'FAIL %s' % e
+
+
+def send_webhook(c, a, fx):
+    if c.get('ENABLE_WEBHOOK', 'yes') != 'yes':
+        return 'off'
+    url = c.get('ERP_WEBHOOK_URL', '')
+    if not url:
+        return 'no url'
+    ev = build_event(c, a, fx, True)
     h = {'Content-Type': 'application/json'}
     if c.get('ERP_WEBHOOK_SECRET'):
         h['X-Webhook-Secret'] = c['ERP_WEBHOOK_SECRET']
@@ -451,12 +484,14 @@ def main():
             print('%-22s %s' % (k, c.get(k, '-')))
         print('%-22s %s' % ('ERP_WEBHOOK_SECRET', 'set' if c.get('ERP_WEBHOOK_SECRET') else 'NOT set'))
         print('%-22s %s' % ('ERP_WEBHOOK_TOKEN', 'set' if c.get('ERP_WEBHOOK_TOKEN') else 'not set'))
+        print('%-22s %s' % ('EXTRA_WEBHOOK_URL', c.get('EXTRA_WEBHOOK_URL') or 'off'))
+        print('%-22s %s' % ('EXTRA_WEBHOOK_SECRET', 'set' if c.get('EXTRA_WEBHOOK_SECRET') else 'NOT set'))
         print('%-22s %d' % ('queued webhook posts', len(glob.glob(QDIR + '/*.json'))))
         return 0
     if a.test:
         a.type, a.title, a.tags, a.line = 'vm.notify.test', 'TEST yc-notify', 'test_tube', ['test    reporting from this VM']
     fx = facts()
-    log('%s "%s" ntfy=%s webhook=%s' % (a.type, a.title, send_ntfy(c, a, fx), send_webhook(c, a, fx)))
+    log('%s "%s" ntfy=%s webhook=%s extra=%s' % (a.type, a.title, send_ntfy(c, a, fx), send_webhook(c, a, fx), send_extra(c, a, fx)))
     return 0
 
 
@@ -468,7 +503,7 @@ chmod 755 /usr/local/sbin/yc-notify
 save_cfg(){   # effective answers, no secrets (those live in secrets.env / notify.env)
   local v; umask 077
   for v in ROLE DOMAIN LE_EMAIL DB_HOST APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEYS TZ_SET LOCALE_SET APT_MIRRORS \
-           BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT ROOT_PW_FROM_CLOUDSTACK VM_PW_USERS \
+           BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL EXTRA_WEBHOOK_URL WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT ROOT_PW_FROM_CLOUDSTACK VM_PW_USERS \
            ENABLE_SALT SALT_JOIN_URL ENABLE_ACRONIS ACRONIS_REGION ACRONIS_SETUP_URL \
            PASS_URL DISABLE_CLOUD_INIT ODOO_DEB_URL REPO_URL; do printf '%s=%q\n' "$v" "${!v}"; done > "$CFG"
   umask 022; }

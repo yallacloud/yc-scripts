@@ -1,6 +1,6 @@
 #cloud-config
 ###############################################################################
-#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.2.0    #
+#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.2.1    #
 #                                                                             #
 #  WHAT TO EDIT:  only the lines under "EDIT THESE" in the nextcloud.conf     #
 #  block below. NOTHING is strictly required - leave FQDN blank and the box   #
@@ -63,6 +63,8 @@ write_files:
       NOTIFY_WEBHOOK=no                  # set yes + WEBHOOK_SECRET to enable
       WEBHOOK_URL=https://api.yallacloud.net/api/v1/webhooks/cloudstack
       WEBHOOK_SECRET=                    # X-Webhook-Secret (required to turn the webhook on)
+      EXTRA_WEBHOOK_URL=                 # optional second webhook (copy of every event, NO passwords), blank = off
+      EXTRA_WEBHOOK_SECRET=              # its X-Webhook-Secret
       # CloudStack context for the webhook (deployer/portal fills these - the guest cannot know them):
       CLOUDSTACK_URL=https://dxb01.oasisstack.io/client  # portal; webhook sends cloudPortal + cloudVmUrl=.../#/vm/<uuid>
       CS_DOMAIN=                         # CloudStack domain/tenant that owns this VM (webhook 'tenant' if Salt has not published yet)

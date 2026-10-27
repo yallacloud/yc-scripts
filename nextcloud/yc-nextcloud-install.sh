@@ -77,6 +77,8 @@ NTFY_TOPIC="9890122212"        # ntfy topic (change per client/deployment)
 NOTIFY_WEBHOOK="no"            # yes|no - POST full JSON incl. credentials (needs WEBHOOK_SECRET)
 WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"  # YallaCloud ERP webhook (changeable)
 WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn the webhook on
+EXTRA_WEBHOOK_URL=""           # optional second webhook: copy of every event, credentials stripped (blank = off)
+EXTRA_WEBHOOK_SECRET=""        # its X-Webhook-Secret
 # CloudStack context for the webhook - the deployer/portal supplies these (the guest
 # cannot know its own tenant/portal); they are reported so the ERP knows exactly where
 # the VM came from. All optional.
@@ -170,9 +172,9 @@ if grep -qs "'installed' => true" /var/www/nextcloud/config/config.php; then
     say "Nextcloud is already installed here - nothing to do (TLS: yc-nc-ssl, domain: yc-nc-domain, facts: yallacloud)"; exit 0
 fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
-: "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"
+: "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.2.0"
+NC_IVER="1.2.1"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -233,8 +235,11 @@ vm      ${VM_NAME:--}  uuid ${VM_UUID:--}${ZONE:+  zone ${ZONE}}
 tenant  ${TENANT:-not published yet}  (${TENANT_SRC:--})  ${CLOUDSTACK_URL:-}
 by      yc-nextcloud-install / ${NC_IVER}  log ${LOG}" "${NTFY_URL%/}/${NTFY_TOPIC}" >/dev/null 2>&1 || true
 }
-notify_webhook(){  # $1 type $2 extra [$3 with-secrets:yes|no] - house YCERP-01 envelope, X-Webhook-Secret
-  [ "${NOTIFY_WEBHOOK:-no}" = yes ] && [ -n "${WEBHOOK_URL:-}" ] || return 0
+notify_webhook(){  # $1 type $2 extra [$3 with-secrets:yes|no] - house YCERP-01 envelope, X-Webhook-Secret (+ optional second webhook)
+  local erp=no xtra=no
+  [ "${NOTIFY_WEBHOOK:-no}" = yes ] && [ -n "${WEBHOOK_URL:-}" ] && erp=yes
+  [ -n "${EXTRA_WEBHOOK_URL:-}" ] && [ -n "${EXTRA_WEBHOOK_SECRET:-}" ] && xtra=yes
+  [ "$erp$xtra" = nono ] && return 0
   local j; j=$(mktemp); chmod 600 "$j"
   WTYPE="$1" WEXTRA="$2" WSEC="${3:-no}" python3 - > "$j" <<'PY'
 import json,os,time,socket
@@ -293,8 +298,24 @@ if e("WSEC")=="yes":   # every secret in ONE place, YC-EVENT v2 shape; empty log
 d["delivery"]={"queued":0}
 print(json.dumps(d))
 PY
-  curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H @<(printf 'X-Webhook-Secret: %s\n' "$WEBHOOK_SECRET")} --data-binary @"$j" "${WEBHOOK_URL}" >/root/yc-webhook-$1.resp 2>&1 || true
-  install -m 600 "$j" "/root/yc-webhook-$1.json"  # root-only copy of what was sent (same secrets as yc-handover.json)
+  if [ "$erp" = yes ]; then
+    curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H @<(printf 'X-Webhook-Secret: %s\n' "$WEBHOOK_SECRET")} --data-binary @"$j" "${WEBHOOK_URL}" >/root/yc-webhook-$1.resp 2>&1 || true
+    install -m 600 "$j" "/root/yc-webhook-$1.json"  # root-only copy of what was sent (same secrets as yc-handover.json)
+  fi
+  if [ "$xtra" = yes ]; then   # second webhook: same event, credentials stripped, best effort
+    local x; x=$(mktemp); chmod 600 "$x"
+    python3 - "$j" > "$x" 2>/dev/null <<'PY' && curl -fsS --max-time 15 -H "Content-Type: application/json" -H @<(printf 'X-Webhook-Secret: %s\n' "$EXTRA_WEBHOOK_SECRET") --data-binary @"$x" "$EXTRA_WEBHOOK_URL" >/dev/null 2>&1 || true
+import json, re, sys, time
+R = re.compile(r'(?i)pass|pwd|secret|token|^uri|dsn')
+def s(v):
+    if isinstance(v, dict): return {k: ('REDACTED' if R.search(k) and isinstance(x, str) and x else s(x)) for k, x in v.items() if k != 'credentials'}
+    if isinstance(v, list): return [s(x) for x in v]
+    return v
+d = s(json.load(open(sys.argv[1]))); d.setdefault('lastUpdated', time.strftime('%Y-%m-%d %H:%M:%S %z'))
+print(json.dumps(d))
+PY
+    rm -f "$x"
+  fi
   rm -f "$j"
 }
 build_deploy_log(){  # $1 = SUCCESS|FAILED - ONE merged log: installer + cloud-init
@@ -338,6 +359,8 @@ NTFY_TOPIC=$NTFY_TOPIC
 NOTIFY_WEBHOOK=$NOTIFY_WEBHOOK
 WEBHOOK_URL=$WEBHOOK_URL
 WEBHOOK_SECRET=$WEBHOOK_SECRET
+EXTRA_WEBHOOK_URL=$EXTRA_WEBHOOK_URL
+EXTRA_WEBHOOK_SECRET=$EXTRA_WEBHOOK_SECRET
 CLOUDSTACK_URL=$CLOUDSTACK_URL
 CS_DOMAIN=$CS_DOMAIN
 CS_ACCOUNT=$CS_ACCOUNT

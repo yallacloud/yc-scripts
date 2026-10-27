@@ -58,7 +58,7 @@ foreach ($f in @('Yc-Event.ps1','Set-LocalWsus.ps1','Yallacloud.ps1')) {
 # inside the notifier, so the VM goes silent rather than reporting a failure.
 $ep = Get-ScriptParams (Join-Path $PayloadDir 'Yc-Event.ps1')
 foreach ($p in @('Type','Step','Extra','NtfyTitle','NtfyPriority','NtfyTags','NtfyLine','Field',
-                 'SetUrl','SetSecret','SetToken','SetNtfy','SetNtfyEnabled','SqlKeyLast5',
+                 'SetUrl','SetSecret','SetToken','SetNtfy','SetNtfyEnabled','SqlKeyLast5','SetExtraUrl','SetExtraSecret',
                  'FailedStep','ErrorText','SelfCheck')) {
   Ok ('Yc-Event.ps1 still takes -' + $p) ($ep -contains $p)
 }

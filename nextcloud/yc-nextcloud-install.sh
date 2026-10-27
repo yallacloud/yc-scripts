@@ -174,7 +174,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.2.3"
+NC_IVER="1.2.4"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -569,6 +569,13 @@ update-locale LANG=en_GB.UTF-8 >/dev/null 2>&1 || true
 # mirrors can be slow or unreachable on some networks. Repoint the archive host
 # at APT_MIRROR (default the UAE mirror ae.archive.ubuntu.com). security.ubuntu.com
 # is left as-is. Handles the deb822 ubuntu.sources and the legacy sources.list.
+# a slow regional mirror (seen live: ae.archive at 15 KB/s) turns the build into hours - measure, fall back
+if [ "${APT_MIRROR}" != archive.ubuntu.com ]; then
+  _ms=$(curl -s -o /dev/null -m 15 -w '%{speed_download}' "http://${APT_MIRROR}/ubuntu/dists/noble/main/binary-amd64/Packages.gz" 2>/dev/null | cut -d. -f1)
+  if [ "${_ms:-0}" -lt 200000 ]; then
+    say "  mirror ${APT_MIRROR} slow or unreachable (${_ms:-0} B/s) - using archive.ubuntu.com"; APT_MIRROR=archive.ubuntu.com
+  else say "  mirror ${APT_MIRROR} ok ($((_ms/1024)) KB/s)"; fi
+fi
 say "pointing apt archive mirror at ${APT_MIRROR}"
 for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
   [ -f "$F" ] || continue

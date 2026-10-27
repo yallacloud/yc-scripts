@@ -174,7 +174,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.2.4"
+NC_IVER="1.2.5"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -569,12 +569,13 @@ update-locale LANG=en_GB.UTF-8 >/dev/null 2>&1 || true
 # mirrors can be slow or unreachable on some networks. Repoint the archive host
 # at APT_MIRROR (default the UAE mirror ae.archive.ubuntu.com). security.ubuntu.com
 # is left as-is. Handles the deb822 ubuntu.sources and the legacy sources.list.
-# a slow regional mirror (seen live: ae.archive at 15 KB/s) turns the build into hours - measure, fall back
+# regional mirrors can crawl on some files (seen live: ae.archive 15 KB/s, stalling the build for hours).
+# Time 3 MB of a big index on the configured mirror AND archive.ubuntu.com, use the faster one.
+_mspeed(){ curl -s -o /dev/null -r 0-3000000 -m 20 -w '%{speed_download}' "http://$1/ubuntu/dists/noble/Contents-amd64.gz" 2>/dev/null | cut -d. -f1; }
 if [ "${APT_MIRROR}" != archive.ubuntu.com ]; then
-  _ms=$(curl -s -o /dev/null -m 15 -w '%{speed_download}' "http://${APT_MIRROR}/ubuntu/dists/noble/main/binary-amd64/Packages.gz" 2>/dev/null | cut -d. -f1)
-  if [ "${_ms:-0}" -lt 200000 ]; then
-    say "  mirror ${APT_MIRROR} slow or unreachable (${_ms:-0} B/s) - using archive.ubuntu.com"; APT_MIRROR=archive.ubuntu.com
-  else say "  mirror ${APT_MIRROR} ok ($((_ms/1024)) KB/s)"; fi
+  _ma=$(_mspeed "$APT_MIRROR"); _mb=$(_mspeed archive.ubuntu.com)
+  say "  mirror speed: ${APT_MIRROR} $(( ${_ma:-0}/1024 )) KB/s, archive.ubuntu.com $(( ${_mb:-0}/1024 )) KB/s"
+  [ "${_mb:-0}" -gt "${_ma:-0}" ] && { say "  using archive.ubuntu.com (faster)"; APT_MIRROR=archive.ubuntu.com; }
 fi
 say "pointing apt archive mirror at ${APT_MIRROR}"
 for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
@@ -582,9 +583,10 @@ for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
   sed -i -E "s#https?://([a-z0-9.-]*\\.)?archive\\.ubuntu\\.com/ubuntu#http://${APT_MIRROR}/ubuntu#g" "$F"
 done
 # a stalled mirror connection otherwise hangs apt forever (seen live: 17 min on one http fetch)
-printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "3";\n' > /etc/apt/apt.conf.d/99yallacloud-timeouts
+# Pipeline-Depth 0: some mirrors drop pipelined keep-alive requests and apt waits on a CLOSE-WAIT socket forever (seen live)
+printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "3";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/99yallacloud-timeouts
 say "apt update"
-timeout 900 apt-get update -qq || { sleep 10; timeout 900 apt-get update -qq; } || die "apt update failed (mirror ${APT_MIRROR} unreachable or stalled)"
+timeout 300 apt-get update -qq || { sleep 10; timeout 300 apt-get update -qq; } || die "apt update failed (mirror ${APT_MIRROR} unreachable or stalled)"
 apt-get upgrade -y -qq
 
 say "installing nginx, mariadb, redis, php $PHPV"

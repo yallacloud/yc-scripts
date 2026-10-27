@@ -1,6 +1,6 @@
 #cloud-config
 ###############################################################################
-#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.2.1    #
+#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.2.5    #
 #                                                                             #
 #  WHAT TO EDIT:  only the lines under "EDIT THESE" in the nextcloud.conf     #
 #  block below. NOTHING is strictly required - leave FQDN blank and the box   #
@@ -14,6 +14,12 @@
 #       still comes up on a self-signed cert and you re-run certbot later.    #
 #    2. Behind a firewall: forward TCP 80 AND 443 from that public IP to      #
 #       this VM.                                                              #
+#    3. Template (CloudStack, both clusters - tested 2026-10-27, PASS):       #
+#       KVM    : LNX-Ubuntu-24.04-LTS-KVM-v263        offering gp.* (General) #
+#       VMware : LNX-Ubuntu-24.04-LTS-VC-v263-fix2    offering VC Standard *  #
+#       (NOT the old LNX-Ubuntu-24.04-LTS-VC-v263 - cloud-init never runs on  #
+#        VMware with it: no network, no userdata.)                            #
+#    4. Public IP on VLAN 101/102: run ipcheck --free + ARP before deploying. #
 #                                                                             #
 #  The installer + the Nextcloud tarball are pulled from GitHub (NOT          #
 #  download.nextcloud.com, which is unreliable on this estate). All the       #

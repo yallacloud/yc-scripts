@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.9  (2026-10-27 23:10 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.10  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -67,10 +67,12 @@ fail(){
   [ "$ENABLE_NTFY" = yes ] && curl -fsS -m 15 -H "Title: FAILED BUILD odoo $ROLE - $h" -H "Priority: 5" -H "Tags: rotating_light,odoo" \
     -d "$(printf 'result  FAILED in userdata\nerror   %s\nhost    %s  %s\nlog     %s' "$1" "$h" "$(hostname -I)" "$LOG")" "${NTFY_SERVER%/}/$NTFY_TOPIC" >/dev/null
   local ev; ev="{\"type\":\"vm.deploy.failed\",\"vmId\":\"$u\",\"smbiosUuid\":\"$u\",\"identitySource\":\"smbios\",\"hostname\":\"$h\",\"ip\":\"$(hostname -I | awk '{print $1}')\",\"utc\":\"$(date -u +%FT%TZ)\",\"lastUpdated\":\"$(date '+%F %T %z')\",\"failedStep\":\"userdata\",\"error\":\"$e\",\"steps\":\"USERDATA-\",\"extra\":\"FAILED BUILD odoo $ROLE\",\"fields\":{\"area\":\"odoo\",\"status\":\"failed\"}}"
+  # extra webhook FIRST (flat body, no secrets, one try), then the ERP (unchanged)
+  [ -n "$EXTRA_WEBHOOK_URL" ] && curl -fsS -m 15 -H 'Content-Type: application/json' -H "X-Webhook-Secret: $EXTRA_WEBHOOK_SECRET" \
+    -d "{\"type\":\"vm.deploy.failed\",\"vmId\":\"$u\",\"hostname\":\"$h\",\"ip\":\"$(hostname -I | awk '{print $1}')\",\"os\":\"$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")\",\"error\":\"$(printf '%s' "$1" | tr -d '"\\' | head -c 300)\",\"lastUpdated\":\"$(date '+%F %T %z')\",\"extra\":\"yc-odoo20-userdata 1.3.10\"}" \
+    "$EXTRA_WEBHOOK_URL" >/dev/null 2>&1
   [ "$ENABLE_WEBHOOK" = yes ] && [ -n "$ERP_WEBHOOK_URL" ] && curl -fsS -m 20 -H 'Content-Type: application/json' \
     ${ERP_WEBHOOK_SECRET:+-H "X-Webhook-Secret: $ERP_WEBHOOK_SECRET"} -d "$ev" "$ERP_WEBHOOK_URL" >/dev/null
-  [ -n "$EXTRA_WEBHOOK_URL" ] && [ -n "$EXTRA_WEBHOOK_SECRET" ] && curl -fsS -m 15 -H 'Content-Type: application/json' \
-    -H "X-Webhook-Secret: $EXTRA_WEBHOOK_SECRET" -d "$ev" "$EXTRA_WEBHOOK_URL" >/dev/null
   exit 1; }
 
 # fast checks before anything is downloaded (the installer re-checks everything)
@@ -124,7 +126,7 @@ say "$(fix_gateway "$GATEWAY")"   # BEFORE the download: a dead .254 gateway mea
 # installer: GitHub (public yallacloud/yc-scripts), then the local mirror repo.oasisstack.io/odoo
 # (ycwsus01, YC ranges), then two more GitHub mirrors - each checked by its .sha256
 R=yallacloud/yc-scripts; F=odoo/yc-odoo20-install.sh; OUT=/root/yc-odoo20-install.sh; ok=""
-MIN_VER="1.4.13"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
+MIN_VER="1.4.14"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
 for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
          "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F?nocache=$(date +%s)" \
          "https://repo.oasisstack.io/odoo/yc-odoo20-install.sh" \

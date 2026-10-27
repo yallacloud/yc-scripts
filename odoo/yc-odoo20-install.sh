@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.12  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.13  (2026-10-27 19:25 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -72,7 +72,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.12
+VER=1.4.13
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -299,12 +299,19 @@ def facts():
     tz = sh('timedatectl show -p Timezone --value') or ''
     f.setdefault('SMBIOS_UUID', uuid)
     ten, tsrc = tenant(f)
+    # vmId: SMBIOS, unless CloudStack's metadata vm-id is a different UUID (VMware: the BIOS UUID is
+    # not the CloudStack id) - then the metadata id, so the ERP can match it (same rule as the DB kit)
+    mdid = f.get('MD_VMID', '').lower()
+    vmid, idsrc = uuid, 'smbios'
+    if len(mdid) == 36 and mdid.count('-') == 4 and mdid != uuid:
+        vmid, idsrc = mdid, 'metadata'
     return {
-        'vmId': uuid, 'smbiosUuid': uuid, 'hostname': socket.gethostname(),
-        'identitySource': 'smbios', 'cloud': f.get('MD_CLOUD') or CLOUD,
+        'vmId': vmid or mdid, 'smbiosUuid': uuid, 'hostname': socket.gethostname(),
+        'identitySource': idsrc, 'cloud': f.get('MD_CLOUD') or CLOUD,
+        'hypervisor': f.get('HYPERVISOR', '') or None, 'guestAgent': f.get('GUEST_AGENT', '') or None,
         'zone': f.get('MD_ZONE', ''), 'offering': f.get('MD_OFFERING', ''),
         'vmIdMismatch': bool(f.get('MD_VMID')) and f.get('MD_VMID', '').lower() != uuid,
-        'routerVmId': f.get('MD_VMID', '') if f.get('MD_VMID', '').lower() != uuid else '',
+        'routerVmId': '',
         'vmName': f.get('MD_NAME', ''),
         'vmUuid': (f.get('MD_VMID') or f.get('MD_INSTANCE') or uuid).lower(),
         'instanceId': f.get('MD_INSTANCE', ''),
@@ -609,7 +616,8 @@ timedatectl set-timezone "$TZ_SET" 2>/dev/null || true   # before START, so its 
 PUB_URL_IP=""; is_priv "$URL_IP" || PUB_URL_IP=$URL_IP
 { printf '%s=%q\n' SMBIOS_UUID "$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)" BIND_IP "$BIND_IP" PUBLIC "$PUB_URL_IP" \
     MD_NAME "$(md local-hostname)" MD_VMID "$(md vm-id)" MD_INSTANCE "$(md instance-id)" MD_ZONE "$(md availability-zone)" \
-    MD_OFFERING "$(md service-offering)" MD_CLOUD "$(md cloud-identifier)" INSTALLER_VERSION "$VER" CS_URL "$CLOUDSTACK_URL"
+    MD_OFFERING "$(md service-offering)" MD_CLOUD "$(md cloud-identifier)" INSTALLER_VERSION "$VER" CS_URL "$CLOUDSTACK_URL" \
+    HYPERVISOR "$(systemd-detect-virt 2>/dev/null || echo unknown)"
   [ -n "$CS_TENANT" ] && printf '%s=%q\n' TENANT "$CS_TENANT" TENANT_SRC config; } > /etc/yallacloud/vm-facts.env
 N -t vm.deploy.started -T "START BUILD odoo $ROLE" -p 2 -g hourglass_flowing_sand,odoo \
   -l "role    $ROLE  ($([ "$ROLE" = combined ] && echo 'DB + Odoo' || { [ "$ROLE" = db ] && echo 'PostgreSQL only'; } || echo "Odoo, DB on $DB_HOST"))" \
@@ -644,6 +652,18 @@ apt-get -y -q install curl ca-certificates gnupg ufw fail2ban chrony locales || 
 # time: estate NTP (ycwsus01, YC ranges) first, Ubuntu pool as fallback
 printf 'server time.oasisstack.io iburst prefer\npool ntp.ubuntu.com iburst maxsources 4\n' > /etc/chrony/sources.d/yallacloud.sources
 systemctl restart chrony; chronyc -a makestep >/dev/null 2>&1 || true
+# guest agent by hypervisor (same as the DB kit): VMware -> open-vm-tools, host time sync off (chrony owns
+# the clock); KVM -> qemu-guest-agent. Recorded as GUEST_AGENT for the webhook and the server card.
+case "$(systemd-detect-virt 2>/dev/null)" in
+  vmware) apt-get -y -q install open-vm-tools >/dev/null 2>&1 || warn "open-vm-tools install failed"
+          systemctl enable --now open-vm-tools.service >/dev/null 2>&1; vmware-toolbox-cmd timesync disable >/dev/null 2>&1
+          GA="open-vm-tools $(systemctl is-active open-vm-tools 2>/dev/null)";;
+  kvm)    apt-get -y -q install qemu-guest-agent >/dev/null 2>&1 || warn "qemu-guest-agent install failed"
+          systemctl enable --now qemu-guest-agent >/dev/null 2>&1; GA="qemu-guest-agent $(systemctl is-active qemu-guest-agent 2>/dev/null)";;
+  *)      GA="none";;
+esac
+sed -i '/^GUEST_AGENT=/d' /etc/yallacloud/vm-facts.env 2>/dev/null; printf 'GUEST_AGENT=%q\n' "$GA" >> /etc/yallacloud/vm-facts.env
+say "hypervisor: $(systemd-detect-virt 2>/dev/null) - $GA"
 
 # PGDG repo: server on db/combined, client on app
 install -d /usr/share/keyrings

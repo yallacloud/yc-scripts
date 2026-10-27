@@ -15,7 +15,7 @@ bootcmd:
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
-# yc-mysql-userdata.sh  v1.0.7  (2026-10-27 21:15 IST)  YallaCloud / OasisStack
+# yc-mysql-userdata.sh  v1.0.8  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Oracle MySQL Community database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Hypervisor: CloudStack KVM or VMware, same file. VMware: use a 'VC Standard' offering (gp.* fails with 533);
@@ -58,7 +58,7 @@ ACRONIS_REGION="AE"        # AE | SG
 NTFY_URL="https://ntfy.sh/9890122212"                          # status only, never secrets
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""      # ERP webhook X-Webhook-Secret (blank = webhook off)
-EXTRA_WEBHOOK_URL=""       # optional second webhook (copy of every event, credentials stripped), blank = off
+EXTRA_WEBHOOK_URL=""       # optional second webhook (Tech Dept): milestone events, never passwords; blank = off
 EXTRA_WEBHOOK_SECRET=""    # its X-Webhook-Secret
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal (cloudPortal / cloudVmUrl in the webhook)
 INSTALLER_REF="main"       # advanced: git branch/tag of yallacloud/yc-scripts

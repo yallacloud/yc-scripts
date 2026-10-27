@@ -1,5 +1,21 @@
+Content-Type: multipart/mixed; boundary="YCDB-PART"
+MIME-Version: 1.0
+
+--YCDB-PART
+Content-Type: text/cloud-config; charset="us-ascii"
+
+#cloud-config
+# YallaCloud OS fix: the v263 templates order cloud-set-guest-password AFTER cloud-final while multi-user.target
+# wants it - an ordering cycle; systemd then drops the cloud-final job at random and the script below never runs.
+# bootcmd runs before cloud-final: when its job is missing, run the final stage from a transient unit instead.
+bootcmd:
+  - [bash, -c, "systemctl list-jobs --no-legend 2>/dev/null | grep -q ' cloud-final.service ' || systemctl is-active -q cloud-final.service || { echo 'yc: cloud-final job missing (template ordering cycle) - final stage via yc-cloud-final'; systemd-run --unit=yc-cloud-final --on-active=30 /usr/bin/cloud-init modules --mode=final; }"]
+
+--YCDB-PART
+Content-Type: text/x-shellscript; charset="us-ascii"
+
 #!/bin/bash
-# yc-mariadb-userdata.sh  v1.0.6  (2026-10-27 19:30 IST)  YallaCloud / OasisStack
+# yc-mariadb-userdata.sh  v1.0.7  (2026-10-27 21:15 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: MariaDB database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Hypervisor: CloudStack KVM or VMware, same file. VMware: use a 'VC Standard' offering (gp.* fails with 533);
@@ -90,3 +106,5 @@ done
 say "installer ok from $ok"
 chmod 700 "$OUT"
 exec bash "$OUT" 1>&3 2>&4   # installer logs to the same file itself
+
+--YCDB-PART--

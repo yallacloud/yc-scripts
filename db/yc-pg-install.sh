@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-pg-install.sh  v1.0.3  (2026-10-27 21:00 IST)  YallaCloud / OasisStack
+# yc-pg-install.sh  v1.0.4  (2026-10-27 21:30 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): PostgreSQL (PGDG packages), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-64.
 # Sibling of yc-db-install.sh (MariaDB / MySQL, STACK4-62): same layout, files, yallacloud command, ERP contract.
@@ -59,7 +59,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.3
+VER=1.0.4
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
 PGENV=/etc/yallacloud/pg.env
@@ -69,7 +69,7 @@ LOG=/var/log/yc-db-deploy.log
 STATUS=/var/log/yc-db-deploy.status
 mkdir -p /etc/yallacloud "$INFO" /var/lib/yallacloud; chmod 700 /etc/yallacloud "$INFO"
 touch "$LOG"; chmod 600 "$LOG"
-exec > >(tee -a "$LOG") 2>&1
+[ "$(readlink -f /proc/self/fd/1)" = "$LOG" ] || exec > >(tee -a "$LOG") 2>&1   # yc-deploy-run already writes stdout to $LOG: tee again = every line twice
 DEPLOY_TAG="YC-POSTGRESQL-DB"; RUN_ID="$(hostname -s)-$(date +%Y%m%dT%H%M%S)"; TSYNC=0; T0=$SECONDS
 say(){ local p="" l; [ "$TSYNC" = 1 ] || p=" [PRESYNC up=$(cut -d. -f1 /proc/uptime)s]"; l="$(date '+%FT%T%z') [$DEPLOY_TAG] [$RUN_ID] [${STEP:-init}]$p $*"; echo "$l"; logger -t "$DEPLOY_TAG" -- "[$RUN_ID] [${STEP:-init}] $*" 2>/dev/null || true; }
 ST_JSON=/var/lib/yallacloud/deploy.status
@@ -77,7 +77,10 @@ status_json(){ printf '{"state":"%s","result":"%s","tag":"%s","run_id":"%s","ste
 WARNS=0; WARN_TXT=""
 warn(){ say "WARN: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; }
 STEP=init; FAIL_REASON=""
-step(){ [ "$STEP" = init ] || echo "$(date '+%FT%T%z') $RUN_ID OK $STEP" >> /var/lib/yallacloud/steps.done; STEP=$1; say "== $1"; }
+step(){ [ "$STEP" = init ] || echo "$(date '+%FT%T%z') $RUN_ID OK $STEP" >> /var/lib/yallacloud/steps.done; STEP=$1; say "== $1"; status_json RUNNING; }
+# apt has no low-speed abort: one degraded HTTPS connection crawled at ~11 KB/s for 10+ min (ycpg-vmw01, fresh curl = 1.8 MB/s).
+# Download only, max 300 s per try, new connection each try (apt resumes partial files); then install without a timeout (never kill dpkg).
+aptdl(){ local n; for n in 1 2 3 4; do timeout 300 apt-get -y -q -d "$@" && return 0; say "apt download slow or stalled (try $n/4, 300 s) - retrying on a new connection"; done; return 1; }
 die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; [ "$STEP" = "0 inputs" ] && exit 2; exit 1; }   # 2 = bad input, no automatic retry
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 exec 9>/var/lock/yc-deploy.lock; flock -n 9 || { echo "another yc-deploy run is active (lock /var/lock/yc-deploy.lock)"; exit 1; }
@@ -619,8 +622,9 @@ if [ "$OSF" = ubuntu ]; then
   mkdir -p /etc/needrestart/conf.d; echo "\$nrconf{restart} = 'a';" > /etc/needrestart/conf.d/99-yallacloud.conf
   say "apt mirror = $MIRROR"
   apt-get update -q || die "apt update failed"
-  apt-get -y -q -o Dpkg::Options::=--force-confold upgrade || warn "apt upgrade had errors"
-  apt-get -y -q install curl ca-certificates gnupg ufw chrony locales xfsprogs cron gzip fail2ban openssh-server || die "base packages failed"
+  aptdl upgrade; apt-get -y -q -o Dpkg::Options::=--force-confold upgrade || warn "apt upgrade had errors"
+  BASE_PKGS="curl ca-certificates gnupg ufw chrony locales xfsprogs cron gzip fail2ban openssh-server"
+  aptdl install $BASE_PKGS; apt-get -y -q install $BASE_PKGS || die "base packages failed"
   locale-gen "$LOCALE_SET" >/dev/null && update-locale LANG="$LOCALE_SET"
   printf 'server time.oasisstack.io iburst prefer\npool ntp.ubuntu.com iburst maxsources 4\n' > /etc/chrony/sources.d/yallacloud.sources
   CHRONY=chrony
@@ -800,9 +804,9 @@ if [ "$OSF" = ubuntu ]; then
     gpg --dearmor --yes -o /usr/share/keyrings/pgdg.gpg $key
     echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list
   else warn "PGDG signing key download failed (postgresql.org and $REPO_URL)"; FALLBACK=1; fi
-  [ -z "$FALLBACK" ] && { apt-get update -q && apt-get -y -q install "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR"; } || {
+  [ -z "$FALLBACK" ] && { apt-get update -q && aptdl install "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR" && apt-get -y -q install "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR"; } || {
     warn "PostgreSQL $PG_MAJOR (PGDG) install failed - using Ubuntu's PostgreSQL 16"; rm -f /etc/apt/sources.list.d/pgdg.list; apt-get update -q
-    apt-get -y -q install postgresql-16 postgresql-client-16 || die "PostgreSQL install failed"; FALLBACK=1; PG_MAJOR=16; }
+    aptdl install postgresql-16 postgresql-client-16; apt-get -y -q install postgresql-16 postgresql-client-16 || die "PostgreSQL install failed"; FALLBACK=1; PG_MAJOR=16; }
   PGBIN=/usr/lib/postgresql/$PG_MAJOR/bin; CONF_DIR=/etc/postgresql/$PG_MAJOR/main; PGDATA=$PGROOT/$PG_MAJOR/main
   SVC=postgresql@$PG_MAJOR-main; DROPIN=postgresql@.service.d; LOG_DIR=/var/log/postgresql
   chown postgres:postgres "$PGROOT"

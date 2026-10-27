@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-pg-install.sh  v1.0.4  (2026-10-27 21:30 IST)  YallaCloud / OasisStack
+# yc-pg-install.sh  v1.0.5  (2026-10-27 22:05 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): PostgreSQL (PGDG packages), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-64.
 # Sibling of yc-db-install.sh (MariaDB / MySQL, STACK4-62): same layout, files, yallacloud command, ERP contract.
@@ -59,7 +59,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.4
+VER=1.0.5
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
 PGENV=/etc/yallacloud/pg.env
@@ -80,7 +80,15 @@ STEP=init; FAIL_REASON=""
 step(){ [ "$STEP" = init ] || echo "$(date '+%FT%T%z') $RUN_ID OK $STEP" >> /var/lib/yallacloud/steps.done; STEP=$1; say "== $1"; status_json RUNNING; }
 # apt has no low-speed abort: one degraded HTTPS connection crawled at ~11 KB/s for 10+ min (ycpg-vmw01, fresh curl = 1.8 MB/s).
 # Download only, max 300 s per try, new connection each try (apt resumes partial files); then install without a timeout (never kill dpkg).
-aptdl(){ local n; for n in 1 2 3 4; do timeout 300 apt-get -y -q -d "$@" && return 0; say "apt download slow or stalled (try $n/4, 300 s) - retrying on a new connection"; done; return 1; }
+# 1.0.5: apt's HTTPS client got ~10 KB/s from apt.postgresql.org (Fastly) on VLAN 101 while curl got 1-6 MB/s, so the exact .deb files
+# are prefetched with curl first (abort < 50 KB/s for 30 s, 3 tries, new connection each); apt verifies every cached file against the signed index.
+aptpre(){ local u f s h n ok=0 bad=0 C=/var/cache/apt/archives
+  while read -r u f s h; do u=${u//\'/}; [ -n "$f" ] && [ ! -s "$C/$f" ] || continue
+    for n in 1 2 3; do curl -fsSL --connect-timeout 20 --speed-limit 50000 --speed-time 30 --max-time 900 -o "$C/partial/$f" "$u" && mv -f "$C/partial/$f" "$C/$f" && break; rm -f "$C/partial/$f"; done
+    [ -s "$C/$f" ] && ok=$((ok+1)) || bad=$((bad+1))
+  done < <(apt-get -qq --print-uris -y "$@" 2>/dev/null | grep "^'")
+  [ $((ok+bad)) -gt 0 ] && say "apt prefetch (curl): $ok file(s) ok, $bad failed - apt checks the hashes"; return 0; }
+aptdl(){ local n; aptpre "$@"; for n in 1 2 3 4; do timeout 300 apt-get -y -q -d "$@" && return 0; say "apt download slow or stalled (try $n/4, 300 s) - retrying on a new connection"; done; return 1; }
 die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; [ "$STEP" = "0 inputs" ] && exit 2; exit 1; }   # 2 = bad input, no automatic retry
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 exec 9>/var/lock/yc-deploy.lock; flock -n 9 || { echo "another yc-deploy run is active (lock /var/lock/yc-deploy.lock)"; exit 1; }

@@ -174,7 +174,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.2.1"
+NC_IVER="1.2.2"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -224,7 +224,7 @@ printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
 # The template's cloud-config gives 'ubuntu' the fixed password 'ubuntu' on every VM, and SSH password
 # login is on: lock it (keys and console still work; owner 2026-10-26, same as db v1.0.9).
 id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1 || true
-export SALT_STATE SSL_STATUS ACRONIS_TOKEN TZ_SET VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
+export HV GA_STATE SALT_STATE SSL_STATUS ACRONIS_TOKEN TZ_SET VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
   curl -fsS --max-time 10 -H "Title: $1 - $(hostname)" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source},nextcloud" --data-binary "$2
@@ -285,7 +285,7 @@ d["cloud"]={"id":e("CLOUD_ID") or None,"zone":d["zone"],"tenant":d["tenant"],"te
 d["service"]={"area":"salt" if T.startswith("vm.salt.") else "nextcloud","catalogue":d["catalogue"],"status":st,
  "result":("SUCCESS" if not warn else "SUCCESS with warnings") if ok else ("FAILED" if st=="failed" else None),
  "warnings":warn,"installer":d["installer"],
- "details":dict(d["app"],sshPort=int(e("SSH_PORT")) if (e("SSH_PORT") or "").isdigit() else None,fqdn=d["fqdn"],shape=d["shape"],salt=e("SALT_STATE") or None,
+ "details":dict(d["app"],hypervisor=e("HV") or None,guestAgent=e("GA_STATE") or None,sshPort=int(e("SSH_PORT")) if (e("SSH_PORT") or "").isdigit() else None,fqdn=d["fqdn"],shape=d["shape"],salt=e("SALT_STATE") or None,
                 acronis="on" if e("ACRONIS_TOKEN") else "off")}
 if e("WSEC")=="yes":   # every secret in ONE place, YC-EVENT v2 shape; empty logins left out
   def up(u,pw,**x): return dict({"user":u,"password":pw},**x) if pw else None
@@ -582,6 +582,20 @@ apt-get install -y -qq \
   php${PHPV}-zip php${PHPV}-redis php${PHPV}-apcu \
   ufw fail2ban unzip bzip2 ghostscript libfontconfig1 curl \
   || die "package installation failed"
+
+# hypervisor guest agent (CloudStack runs VMware and KVM): IP / clean shutdown / quiesce from the
+# hypervisor. Same rule as the DB and PG kits. SOFT - never fails the build.
+HV=$(systemd-detect-virt 2>/dev/null); HV=${HV:-none}
+case "$HV" in vmware) GA=open-vm-tools;; kvm|qemu) GA=qemu-guest-agent;; *) GA="";; esac
+if [ -n "$GA" ]; then
+  apt-get install -y -qq "$GA" >/dev/null 2>&1 || say "  WARN: $GA install failed ($HV)"
+  if [ "$GA" = open-vm-tools ]; then
+    systemctl enable --now open-vm-tools >/dev/null 2>&1 || true
+    vmware-toolbox-cmd timesync disable >/dev/null 2>&1 || true   # timesyncd owns the clock; two sources fight
+  else systemctl start qemu-guest-agent >/dev/null 2>&1 || true; fi
+  GA_STATE="$GA $(systemctl is-active open-vm-tools qemu-guest-agent 2>/dev/null | grep -m1 -x active || echo inactive)"
+else GA_STATE="none ($HV)"; fi
+say "hypervisor: $HV, guest agent: $GA_STATE"
 
 # ------------------------------------------------------------- 5. database
 # --------------------------------------- 15a. operator scripts + data disk + DB backup
@@ -1426,6 +1440,8 @@ cat > "$OUT" <<EOF
   "cloud_init": "${CLOUD_INIT_STATE}",
   "is_public": ${IS_PUBLIC},
   "network_shape": "${NET_SHAPE}",
+  "hypervisor": "${HV:-unknown}",
+  "guest_agent": "${GA_STATE:-none}",
   "gateway": "${NET_GW}",
   "gateway_corrected": "${NET_FIXED}",
   "ip": "${PRIV_IP}",
@@ -1483,7 +1499,7 @@ notify_ntfy "OK BUILD nextcloud" "result  ${_ok}
 url     https://${FQDN}${PORTSFX}/
 tls     ${SSL_STATUS}
 ip      ${NET_IP}  ssh ${SSH_PORT}
-nc      ${NC_VERSION}   php ${PHPV}   data ${DATA_PATH}
+nc      ${NC_VERSION}   php ${PHPV}   data ${DATA_PATH}   hv ${HV:-?} (${GA_STATE:-?})
 addons  salt ${SALT_STATE}   acronis ${ACRONIS_TOKEN:+on}${ACRONIS_TOKEN:-off}
 creds   /root/yc-handover.json (yallacloud secrets)" default "white_check_mark"
 notify_webhook "vm.deploy.completed" "install ok" yes

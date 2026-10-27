@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.14  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.15  (2026-10-28 00:05 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -72,7 +72,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.14
+VER=1.4.15
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -1524,7 +1524,7 @@ rm -f "$INFO/INSTALL-FAILED"; touch "$INFO/INSTALLED"
 # == 10. stop cloud-init re-running on CloudStack
 # Side effect: CloudStack "reset password / reset SSH key" from the UI no longer reaches this VM.
 [ "$DISABLE_CLOUD_INIT" = yes ] && touch /etc/cloud/cloud-init.disabled
-STEPS="$STEPS $STEP+"; STEP=DONE
+STEPS="$STEPS $STEP+"; yc_extra "$(area_of "$STEP")" ok; STEP=DONE
 CERT=-; CERT_EXP=""; CRT_FILE=""
 if [ "$ROLE" != db ]; then
   case "$URL" in

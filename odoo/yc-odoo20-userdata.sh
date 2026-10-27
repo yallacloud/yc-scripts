@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.8  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.9  (2026-10-27 23:10 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -124,7 +124,7 @@ say "$(fix_gateway "$GATEWAY")"   # BEFORE the download: a dead .254 gateway mea
 # installer: GitHub (public yallacloud/yc-scripts), then the local mirror repo.oasisstack.io/odoo
 # (ycwsus01, YC ranges), then two more GitHub mirrors - each checked by its .sha256
 R=yallacloud/yc-scripts; F=odoo/yc-odoo20-install.sh; OUT=/root/yc-odoo20-install.sh; ok=""
-MIN_VER="1.4.12"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
+MIN_VER="1.4.13"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
 for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
          "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F?nocache=$(date +%s)" \
          "https://repo.oasisstack.io/odoo/yc-odoo20-install.sh" \

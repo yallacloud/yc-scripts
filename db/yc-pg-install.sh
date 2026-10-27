@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-pg-install.sh  v1.0.1  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
+# yc-pg-install.sh  v1.0.1  (2026-10-27 18:40 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): PostgreSQL (PGDG packages), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-64.
 # Sibling of yc-db-install.sh (MariaDB / MySQL, STACK4-62): same layout, files, yallacloud command, ERP contract.
@@ -47,8 +47,6 @@ ACRONIS_REGION="AE"         # AE | SG
 NTFY_URL="https://ntfy.sh/9890122212"   # no secrets are ever sent here
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""       # blank = ERP webhook skipped (carries the credentials)
-EXTRA_WEBHOOK_URL=""        # optional second webhook: gets a copy of every ERP event, credentials stripped (blank = off)
-EXTRA_WEBHOOK_SECRET=""     # its X-Webhook-Secret (blank = off)
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # portal this VM came from (cloudPortal / cloudVmUrl in the webhook)
 # advanced
 APT_MIRRORS="ae.archive.ubuntu.com archive.ubuntu.com"
@@ -58,7 +56,7 @@ DISABLE_CLOUD_INIT="yes"
 # ================
 
 VER=1.0.1
-KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
+KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 PGENV=/etc/yallacloud/pg.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -290,25 +288,7 @@ yc_ntfy(){   # title priority tags message - NO secrets here
 time    : $(date '+%F %T %z')  ($(date -u +%FT%TZ))
 by      : $([ -n "${VER:-}" ] && echo "yc-pg-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)" "$NTFY_URL" 2>/dev/null || echo "ntfy: post failed (ignored)"
 }
-yc_extra(){   # json-file - optional second webhook: copy of the ERP event, credentials stripped, best effort
-  [ -n "${EXTRA_WEBHOOK_URL:-}" ] && [ -n "${EXTRA_WEBHOOK_SECRET:-}" ] || return 0
-  local h b; h=$(mktemp); b=$(mktemp); chmod 600 "$h" "$b"; printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$EXTRA_WEBHOOK_SECRET" > "$h"
-  if python3 - "$1" > "$b" 2>/dev/null <<'PY'
-import json, re, sys, time
-R = re.compile(r'(?i)pass|pwd|secret|token|^uri|dsn')   # passwords + connection URIs never go to the second target
-def s(v):
-    if isinstance(v, dict): return {k: ('REDACTED' if R.search(k) and isinstance(x, str) and x else s(x)) for k, x in v.items()}
-    if isinstance(v, list): return [s(x) for x in v]
-    return v
-d = s(json.load(open(sys.argv[1]))); d.setdefault('lastUpdated', time.strftime('%Y-%m-%d %H:%M:%S %z'))
-print(json.dumps(d))
-PY
-  then echo "extra webhook: HTTP $(timeout 15 curl -sS -o /dev/null -w '%{http_code}' -H @"$h" --data-binary @"$b" "$EXTRA_WEBHOOK_URL" 2>/dev/null || echo fail)"
-  else echo "extra webhook: payload sanitise failed - nothing sent"; fi
-  rm -f "$h" "$b"
-}
 yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header file, never argv
-  yc_extra "$1"
   [ -n "${ERP_WEBHOOK_URL:-}" ] && [ -n "${ERP_WEBHOOK_SECRET:-}" ] || { echo "erp webhook: ERP_WEBHOOK_SECRET blank - skipped"; return 0; }
   local h; h=$(mktemp); chmod 600 "$h"; printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$ERP_WEBHOOK_SECRET" > "$h"
   echo "erp webhook: HTTP $(timeout 30 curl -sS -o /dev/null -w '%{http_code}' -H @"$h" --data-binary @"$1" "$ERP_WEBHOOK_URL" 2>/dev/null || echo fail)"
@@ -327,6 +307,7 @@ INSTANCE_ID=$(md instance-id)
 VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$INSTANCE_ID}; VM_UUID=$(printf '%s' "${VM_UUID:-$SMBIOS}" | tr 'A-Z' 'a-z')
 OFFERING=$(md service-offering)
 CLOUD_ID=$(md cloud-identifier)
+HV=$(systemd-detect-virt 2>/dev/null); HV=${HV:-none}   # kvm | vmware | ... (CloudStack runs both)
 PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
 facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout   (same contract as yc-db-install / STACK4-63)
   T="$1" S="$2" W="$3" python3 - <<'PY'
@@ -340,6 +321,7 @@ d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or e("VM_UUID") or Non
      "zone": e("ZONE") or None, "cloud": e("CLOUD_ID") or "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
      "cloudPortal": e("CLOUDSTACK_URL") or None,
      "cloudVmUrl": (e("CLOUDSTACK_URL") + "/#/vm/" + e("VM_UUID")) if e("CLOUDSTACK_URL") and e("VM_UUID") else None, "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
+     "hypervisor": e("HV") or None,
      "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
      "warnings": int(e("WARNS") or 0), "installer": "yc-pg-install " + e("VER"),
      "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
@@ -383,7 +365,7 @@ d["service"] = {"area": "db", "catalogue": d["catalogue"], "status": st,
                 "warnings": [w for w in (e("WARN_TXT") or "").split("; ") if w], "installer": d["installer"],
                 "details": {"engine": e("ENGINE"), "version": e("DB_REAL_VERSION") or e("DB_VERSION"),
                             "host": e("HOST_PUB") or e("HOST_PRIV") or None, "hostPrivate": e("HOST_PRIV") or None,
-                            "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP, sslmode=disable)",
+                            "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP, sslmode=disable)", "hypervisor": e("HV") or None, "guestAgent": e("GA_STATE") or None,
                             "sshPort": num(e("SSH_PORT")), "dataDir": e("PGDATA") or None, "backupDir": e("BACKUP_DIR") or None,
                             "backupRetention": e("RETENTION") or None, "pitr": e("PITR_TXT") or None,
                             "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
@@ -398,7 +380,7 @@ if e("W") == "yes":   # every secret in ONE place; empty logins left out
 print(json.dumps(d))
 PY
 }
-export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT ROOTU
+export HV ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT ROOTU
 RESULT=RUNNING
 finish(){
   local rc=$? title prio tags msg typ j
@@ -493,7 +475,7 @@ SALT_JOIN=$(low "$SALT_JOIN"); case "$SALT_JOIN" in yes|no) ;; *) warn "SALT_JOI
 ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
 ACRONIS_REGION=$(printf '%s' "$ACRONIS_REGION" | tr 'a-z' 'A-Z' | tr -d '[:space:]'); case "$ACRONIS_REGION" in AE|SG) ;; *) warn "ACRONIS_REGION '$ACRONIS_REGION' invalid - AE"; ACRONIS_REGION=AE;; esac
 CLOUDSTACK_URL=${CLOUDSTACK_URL%/}
-for v in NTFY_URL ERP_WEBHOOK_URL EXTRA_WEBHOOK_URL CLOUDSTACK_URL; do [ -z "${!v}" ] || [[ "${!v}" =~ ^https?://[^[:space:]]+$ ]] || { warn "$v invalid - disabled"; printf -v "$v" '%s' ""; }; done
+for v in NTFY_URL ERP_WEBHOOK_URL CLOUDSTACK_URL; do [ -z "${!v}" ] || [[ "${!v}" =~ ^https?://[^[:space:]]+$ ]] || { warn "$v invalid - disabled"; printf -v "$v" '%s' ""; }; done
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 [[ "$REPO_URL" =~ ^https?:// ]] || REPO_URL="https://repo.oasisstack.io/db"
 [ -n "$APT_MIRRORS" ] || APT_MIRRORS="ae.archive.ubuntu.com archive.ubuntu.com"
@@ -506,7 +488,7 @@ case "$ID" in
   rhel|rocky|almalinux|ol|centos) [[ "$OSV" =~ ^(9|10)$ ]] || die "EL 9 or 10 only (found $PRETTY_NAME)"; OSF=el; PGROOT=/var/lib/pgsql ;;
   *) die "unsupported OS $PRETTY_NAME (Ubuntu 24.04, RHEL/Rocky/Alma/Oracle 9-10)" ;;
 esac
-say "config: ENGINE=postgresql $DB_VERSION PORT=$DB_PORT ALLOW=${DB_ALLOW:-auto} ADMIN=$DB_ADMIN_USER DB=${DB_NAME:--}/${DB_USER:--} DATA_DISK=$DATA_DISK BACKUP=${BACKUP_KEEP_DAYS}d/${BACKUP_KEEP_WEEKS}w/${BACKUP_KEEP_MONTHS}m@$BACKUP_TIME PITR=$WAL_ARCHIVE/${WAL_DAYS}d SALT=$SALT_JOIN ACRONIS=$([ -n "$ACRONIS_TOKEN" ] && echo "on/$ACRONIS_REGION" || echo off) ERP=$([ -n "$ERP_WEBHOOK_SECRET" ] && echo on || echo off) EXTRA=$([ -n "$EXTRA_WEBHOOK_SECRET" ] && [ -n "$EXTRA_WEBHOOK_URL" ] && echo on || echo off) OS=$PRETTY_NAME"
+say "config: ENGINE=postgresql $DB_VERSION PORT=$DB_PORT ALLOW=${DB_ALLOW:-auto} ADMIN=$DB_ADMIN_USER DB=${DB_NAME:--}/${DB_USER:--} DATA_DISK=$DATA_DISK BACKUP=${BACKUP_KEEP_DAYS}d/${BACKUP_KEEP_WEEKS}w/${BACKUP_KEEP_MONTHS}m@$BACKUP_TIME PITR=$WAL_ARCHIVE/${WAL_DAYS}d SALT=$SALT_JOIN ACRONIS=$([ -n "$ACRONIS_TOKEN" ] && echo "on/$ACRONIS_REGION" || echo off) ERP=$([ -n "$ERP_WEBHOOK_SECRET" ] && echo on || echo off) OS=$PRETTY_NAME"
 
 
 # ================= 1. network
@@ -567,6 +549,17 @@ else
   systemctl enable --now crond >/dev/null 2>&1
   CHRONY=chronyd
 fi
+# hypervisor guest agent (CloudStack on VMware and KVM): shutdown/IP/quiesce from the hypervisor. SOFT - never fails the build
+case "$HV" in vmware) GA=open-vm-tools;; kvm|qemu) GA=qemu-guest-agent;; *) GA="";; esac
+if [ -n "$GA" ]; then
+  if [ "$OSF" = ubuntu ]; then apt-get -y -q install "$GA" >/dev/null; else dnf -y -q install "$GA" >/dev/null; fi || warn "$GA install failed ($HV)"
+  if [ "$GA" = open-vm-tools ]; then
+    systemctl enable --now open-vm-tools >/dev/null 2>&1 || systemctl enable --now vmtoolsd >/dev/null 2>&1
+    vmware-toolbox-cmd timesync disable >/dev/null 2>&1   # chrony owns the clock; two time sources fight
+  else systemctl start qemu-guest-agent >/dev/null 2>&1; fi
+  GA_STATE="$GA $(systemctl is-active open-vm-tools vmtoolsd qemu-guest-agent 2>/dev/null | grep -m1 -x active || echo inactive)"
+else GA_STATE="none ($HV)"; fi
+say "hypervisor: $HV, guest agent: $GA_STATE"; export GA_STATE
 systemctl enable "$CHRONY" >/dev/null 2>&1; systemctl restart "$CHRONY"; timedatectl set-ntp true 2>/dev/null; chronyc -a makestep >/dev/null 2>&1 || true
 # swap: guards the postmaster against the OOM killer on a spike (swappiness 1 keeps it out of normal use)
 if ! swapon --show | grep -q .; then
@@ -954,7 +947,7 @@ umask 077
 cat <<EOF
 ==================== YallaCloud database server - handover ====================
 created     : $(date '+%F %T %Z')   installer yc-pg-install $VER
-vm          : $VM_NAME   ($PRETTY_NAME)
+vm          : $VM_NAME   ($PRETTY_NAME, $HV, guest agent $GA_STATE)
 tenant      : ${TENANT:--} (CloudStack domain)   vm uuid ${VM_UUID:--}   offering ${OFFERING:--}
 portal      : ${CLOUDSTACK_URL:--}${CLOUDSTACK_URL:+/#/vm/$VM_UUID}
 engine      : PostgreSQL $DB_REAL_VERSION$([ -n "$FALLBACK" ] && echo "   (OS package fallback - PGDG repo failed)")

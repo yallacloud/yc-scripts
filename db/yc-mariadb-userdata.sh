@@ -1,7 +1,9 @@
 #!/bin/bash
-# yc-mariadb-userdata.sh  v1.0.5  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
+# yc-mariadb-userdata.sh  v1.0.6  (2026-10-27 19:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: MariaDB database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
+# Hypervisor: CloudStack KVM or VMware, same file. VMware: use a 'VC Standard' offering (gp.* fails with 533);
+#   VC templates that run cloud-init today: LNX-AlmaLinux-9-VC-v263 (and Oracle Linux 9 VC, intermittent).
 # Paste in CloudStack: Add Instance > Advanced > Userdata. Edit ONLY the block below.
 # Every value is checked on the VM: a wrong REQUIRED value stops with the reason,
 # a wrong optional value falls back to the default (logged as WARN).

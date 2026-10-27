@@ -1,8 +1,8 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.11  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.12  (2026-10-27 19:00 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
-# OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-62.
+# OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
 # Cloud-init: yc-mariadb-userdata.sh / yc-mysql-userdata.sh write the answers to
 # /etc/yallacloud/db.conf.env and start this script. Manual: run as root, values as arguments:
@@ -56,7 +56,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.11
+VER=1.0.12
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -290,6 +290,11 @@ SMBIOS=$(tr 'A-Z' 'a-z' 2>/dev/null < /sys/class/dmi/id/product_uuid)
 ZONE=$(md availability-zone)
 INSTANCE_ID=$(md instance-id)
 VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$INSTANCE_ID}; VM_UUID=$(printf '%s' "${VM_UUID:-$SMBIOS}" | tr 'A-Z' 'a-z')
+# ERP match key: KVM SMBIOS = CloudStack VM uuid; VMware SMBIOS = the vCenter BIOS uuid (unrelated), so the
+# metadata vm-id (a real uuid) wins when the two differ. SMBIOS only when metadata has no uuid.
+VM_ID=$SMBIOS; ID_SRC=smbios
+[[ "$VM_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [ "$VM_UUID" != "$SMBIOS" ] && { VM_ID=$VM_UUID; ID_SRC=metadata; }
+[ -n "$VM_ID" ] || { VM_ID=$VM_UUID; ID_SRC=metadata; }
 OFFERING=$(md service-offering)
 CLOUD_ID=$(md cloud-identifier)
 PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
@@ -297,13 +302,13 @@ facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout
   T="$1" S="$2" W="$3" python3 - <<'PY'
 import json, os, time
 e = os.environ.get
-d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or e("VM_UUID") or None, "smbiosUuid": e("SMBIOS") or None,
+d = {"type": e("T"), "extra": e("S"), "vmId": e("VM_ID") or None, "smbiosUuid": e("SMBIOS") or None,
      "vmName": e("VM_NAME"), "vmUuid": e("VM_UUID") or None,
      "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
      "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
      "hostname": e("VM_NAME"), "ip": e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": e("HOST_PUB") or None,
      "zone": e("ZONE") or None, "cloud": e("CLOUD_ID") or "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
-     "cloudPortal": e("CLOUDSTACK_URL") or None,
+     "cloudPortal": e("CLOUDSTACK_URL") or None, "hypervisor": e("HYPERVISOR") or None,
      "cloudVmUrl": (e("CLOUDSTACK_URL") + "/#/vm/" + e("VM_UUID")) if e("CLOUDSTACK_URL") and e("VM_UUID") else None, "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
      "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
      "warnings": int(e("WARNS") or 0), "installer": "yc-db-install " + e("VER"),
@@ -319,7 +324,7 @@ if e("W") == "yes":
     d["vmUser"] = "root"; d["vmPassword"] = e("VM_PASS") or None
     if e("CHADMIN_PASS"): d["sudoUser"] = "chadmin"; d["sudoPassword"] = e("CHADMIN_PASS")
 # same keys as the Odoo kit / payload events (one ERP contract) - additive only
-d.update({"offering": e("OFFERING") or None, "identitySource": "smbios" if e("SMBIOS") else "metadata",
+d.update({"offering": e("OFFERING") or None, "identitySource": e("ID_SRC") or "metadata",
           "instanceId": e("INSTANCE_ID") or None, "routerVmId": None, "cloudstackUrl": e("CLOUDSTACK_URL") or None,
           "lastUpdated": time.strftime("%Y-%m-%d %H:%M:%S %z ") + (e("TZ_SET") or "UTC").split("/")[-1], "payload": e("VER"), "freeGb": float(e("FREE_GB")) if e("FREE_GB") else None,
           "delivery": {"queued": 0}})
@@ -348,7 +353,7 @@ d["service"] = {"area": "db", "catalogue": d["catalogue"], "status": st,
                 "warnings": [w for w in (e("WARN_TXT") or "").split("; ") if w], "installer": d["installer"],
                 "details": {"engine": e("ENGINE"), "version": e("DB_REAL_VERSION") or e("DB_VERSION"),
                             "host": e("HOST_PUB") or e("HOST_PRIV") or None, "hostPrivate": e("HOST_PRIV") or None,
-                            "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP)",
+                            "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP)", "hypervisor": e("HYPERVISOR") or None, "guestAgent": e("GA_STATE") or None,
                             "sshPort": num(e("SSH_PORT")), "dataDir": e("DATADIR") or None, "backupDir": e("BACKUP_DIR") or None,
                             "backupRetention": e("RETENTION") or None, "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
 if e("W") == "yes":   # every secret in ONE place; empty logins left out
@@ -362,7 +367,8 @@ if e("W") == "yes":   # every secret in ONE place; empty logins left out
 print(json.dumps(d))
 PY
 }
-export ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT
+HYPERVISOR=$(systemd-detect-virt 2>/dev/null || echo unknown)   # kvm | vmware | none
+export HYPERVISOR VM_ID ID_SRC ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT
 RESULT=RUNNING
 finish(){
   local rc=$? title prio tags msg typ j
@@ -493,7 +499,7 @@ if [ -z "$DB_ALLOW" ]; then
 fi
 export HOST_PRIV HOST_PUB PUB_NIC
 TENANT=$(yc_tenant) && TENANT_SRC="salt-inventory (CloudStack domain)" || { TENANT=""; say "tenant: not published yet (Salt inventory syncs every 5 min) - webhook sends null"; }
-say "vm: $VM_NAME uuid ${VM_UUID:-?} smbios ${SMBIOS:-?} tenant ${TENANT:-?} offering ${OFFERING:-?}"
+say "vm: $VM_NAME ($HYPERVISOR) uuid ${VM_UUID:-?} smbios ${SMBIOS:-?} vmId ${VM_ID:-?} (${ID_SRC}) tenant ${TENANT:-?} offering ${OFFERING:-?}"
 say "ips: private=${HOST_PRIV:-none} public=${HOST_PUB:-none} (nic ${PUB_NIC:-none}, static-nat ${MD_PUB:-none}) subnet=${PRIV_CIDR:-none} allow=$DB_ALLOW ssh=$SSH_PORT"
 yc_ntfy "START BUILD $ENGINE - $VM_NAME" 2 "hourglass,db" "vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
 ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
@@ -537,6 +543,17 @@ else
   systemctl enable --now crond >/dev/null 2>&1
   CHRONY=chronyd
 fi
+case "$HYPERVISOR" in
+  vmware) if [ "$OSF" = ubuntu ]; then apt-get -y -q install open-vm-tools; else dnf -y -q install open-vm-tools; fi >/dev/null 2>&1 || warn "open-vm-tools install failed"
+          systemctl enable --now open-vm-tools.service vmtoolsd.service >/dev/null 2>&1
+          vmware-toolbox-cmd timesync disable >/dev/null 2>&1   # chrony owns the clock, not the ESXi host
+          GA_STATE="open-vm-tools $(systemctl is-active open-vm-tools vmtoolsd 2>/dev/null | grep -m1 -x active || echo inactive)"
+          say "hypervisor: VMware - open-vm-tools $(vmware-toolbox-cmd -v 2>/dev/null || echo '?'), host time sync off (chrony)" ;;
+  kvm)    if [ "$OSF" = ubuntu ]; then apt-get -y -q install qemu-guest-agent; else dnf -y -q install qemu-guest-agent; fi >/dev/null 2>&1 || warn "qemu-guest-agent install failed"
+          systemctl enable --now qemu-guest-agent >/dev/null 2>&1; GA_STATE="qemu-guest-agent $(systemctl is-active qemu-guest-agent)"; say "hypervisor: KVM - $GA_STATE" ;;
+  *)      GA_STATE="none ($HYPERVISOR)"; say "hypervisor: $HYPERVISOR - no guest agent installed" ;;
+esac
+export GA_STATE
 systemctl enable "$CHRONY" >/dev/null 2>&1; systemctl restart "$CHRONY"; timedatectl set-ntp true 2>/dev/null; chronyc -a makestep >/dev/null 2>&1 || true
 # swap: guards mysqld against the OOM killer on a spike (swappiness 1 keeps it out of normal use)
 if ! swapon --show | grep -q .; then
@@ -902,7 +919,7 @@ umask 077
 cat <<EOF
 ==================== YallaCloud database server - handover ====================
 created     : $(date '+%F %T %Z')   installer yc-db-install $VER
-vm          : $VM_NAME   ($PRETTY_NAME)
+vm          : $VM_NAME   ($PRETTY_NAME, $HYPERVISOR)
 tenant      : ${TENANT:--} (CloudStack domain)   vm uuid ${VM_UUID:--}   offering ${OFFERING:--}
 portal      : ${CLOUDSTACK_URL:--}${CLOUDSTACK_URL:+/#/vm/$VM_UUID}
 engine      : $ENGINE $DB_REAL_VERSION$([ -n "$FALLBACK" ] && echo "   (OS package fallback - vendor repo failed)")
@@ -977,7 +994,7 @@ info)
   kv engine "$ENGINE $(sqlr 'SELECT VERSION()' 2>/dev/null || echo '(not answering)')"
   kv service "$svc $(systemctl is-active "$svc") since $(systemctl show -p ActiveEnterTimestamp --value "$svc")"
   kv installer "$(cat /etc/yallacloud/db.version 2>/dev/null)   result: $(awk -F= '/^RESULT=/{print $2}' /var/log/yc-db-deploy.status 2>/dev/null)"
-  kv os "$(. /etc/os-release; echo "$PRETTY_NAME") kernel $(uname -r)$({ [ -f /var/run/reboot-required ] || { command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; }; } && echo '  REBOOT PENDING')"
+  kv os "$(. /etc/os-release; echo "$PRETTY_NAME") on $(systemd-detect-virt 2>/dev/null) kernel $(uname -r)$({ [ -f /var/run/reboot-required ] || { command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; }; } && echo '  REBOOT PENDING')"
   kv cpu/ram "$(nproc) vCPU / $(free -h | awk '/Mem:/{print $2}') RAM, swap $(free -h | awk '/Swap:/{print $2}')"
   kv cloud-init "$([ -f /etc/cloud/cloud-init.disabled ] && echo 'disabled after install' || echo enabled)"
   hd "Network"

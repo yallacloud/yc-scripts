@@ -197,6 +197,10 @@ yc_tenant(){ local k w
 VM_NAME="${VM_NAME:-$(md local-hostname)}"; VM_NAME="${VM_NAME:-$(hostname -s)}"
 ZONE=$(md availability-zone); OFFERING=$(md service-offering); CLOUD_ID=$(md cloud-identifier)
 VM_UUID=$(md vm-id); VM_UUID="${VM_UUID:-$(md instance-id)}"; VM_UUID=$(printf '%s' "${VM_UUID:-$VMID}" | tr 'A-Z' 'a-z')
+# ERP match key: SMBIOS, unless CloudStack's vm-id differs (VMware: BIOS uuid != CloudStack id) - same rule as the DB/PG kits
+VM_ID=$VMID; ID_SRC=smbios
+[[ "$VM_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [ "$VM_UUID" != "$VMID" ] && { VM_ID=$VM_UUID; ID_SRC=metadata; }
+[ -n "$VM_ID" ] || { VM_ID=$VM_UUID; ID_SRC=metadata; }
 INSTANCE_ID="${CS_INSTANCE:-$(md instance-id)}"
 if TENANT=$(yc_tenant); then TENANT_SRC="salt-who"; else TENANT="${CS_DOMAIN:-}"; [ -n "$CS_DOMAIN" ] && TENANT_SRC="config" || TENANT_SRC=""; fi
 # root password on a password-enabled CloudStack template (the template itself has no password;
@@ -224,7 +228,7 @@ printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
 # The template's cloud-config gives 'ubuntu' the fixed password 'ubuntu' on every VM, and SSH password
 # login is on: lock it (keys and console still work; owner 2026-10-26, same as db v1.0.9).
 id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1 || true
-export HV GA_STATE SALT_STATE SSL_STATUS ACRONIS_TOKEN TZ_SET VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
+export VM_ID ID_SRC HV GA_STATE SALT_STATE SSL_STATUS ACRONIS_TOKEN TZ_SET VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
 notify_ntfy(){   # $1 title $2 message [$3 priority] [$4 tags] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-no}" = yes ] && [ -n "${NTFY_TOPIC:-}" ] || return 0
   curl -fsS --max-time 10 -H "Title: $1 - $(hostname)" -H "Priority: ${3:-default}" -H "Tags: ${4:-information_source},nextcloud" --data-binary "$2
@@ -254,7 +258,7 @@ def osr():
     return d
 o=osr(); PORTSFX=e("PORTSFX") or ""; CU=e("CLOUDSTACK_URL") or ""; VU=e("VM_UUID") or ""
 d={"type":e("WTYPE"),"extra":e("WEXTRA"),
- "vmId":e("VMID") or None,"smbiosUuid":e("VMID") or None,"identitySource":"smbios",
+ "vmId":e("VM_ID") or e("VMID") or None,"smbiosUuid":e("VMID") or None,"identitySource":e("ID_SRC") or "smbios",
  "vmName":e("VM_NAME") or None,"vmUuid":VU or None,"instanceId":e("INSTANCE_ID") or None,
  "vmIdMismatch":bool(VU and e("VMID") and VU!=e("VMID")),
  "hostname":socket.gethostname(),"fqdn":e("FQDN") or None,
@@ -277,7 +281,7 @@ try: fs=os.statvfs(e("DATA_PATH") or "/")
 except OSError: fs=os.statvfs("/")
 d["schema"]="yc-event/2"; d["summary"]=e("WEXTRA") or T
 d["vm"]={"vmId":d["vmId"],"smbiosUuid":d["smbiosUuid"],"vmUuid":d["vmUuid"],"instanceId":d["instanceId"],
- "identitySource":"smbios","vmIdMismatch":d["vmIdMismatch"],"routerVmId":None,"vmName":d["vmName"],
+ "identitySource":d["identitySource"],"vmIdMismatch":d["vmIdMismatch"],"routerVmId":None,"vmName":d["vmName"],
  "hostname":d["hostname"],"ip":d["ip"],"publicIp":d["publicIp"],"os":d["os"],"osVersion":o.get("VERSION_ID",""),
  "freeGb":round(fs.f_bavail*fs.f_frsize/1073741824,1)}
 d["cloud"]={"id":e("CLOUD_ID") or None,"zone":d["zone"],"tenant":d["tenant"],"tenantSource":d["tenantSource"],

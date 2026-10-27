@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-postgresql-userdata.sh  v1.0.2  (2026-10-27 21:00 IST)  YallaCloud / OasisStack
+# yc-postgresql-userdata.sh  v1.0.3  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: PostgreSQL database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-64.
 # Paste in CloudStack: Add Instance > Advanced > Userdata. Edit ONLY the block below.
@@ -40,7 +40,7 @@ ACRONIS_REGION="AE"        # AE | SG
 NTFY_URL="https://ntfy.sh/9890122212"                          # status only, never secrets
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""      # ERP webhook X-Webhook-Secret (blank = webhook off)
-EXTRA_WEBHOOK_URL=""       # optional second webhook (copy of every event, credentials stripped), blank = off
+EXTRA_WEBHOOK_URL=""       # optional second webhook: one flat event per milestone (vm.<area>.<state>), no secrets, blank = off
 EXTRA_WEBHOOK_SECRET=""    # its X-Webhook-Secret
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal (cloudPortal / cloudVmUrl in the webhook)
 NET_RETRY_INTERVAL="300"   # no internet: check again every N seconds (5 min)

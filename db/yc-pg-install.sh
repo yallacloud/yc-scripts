@@ -74,8 +74,8 @@ DEPLOY_TAG="YC-POSTGRESQL-DB"; RUN_ID="$(hostname -s)-$(date +%Y%m%dT%H%M%S)"; T
 say(){ local p="" l; [ "$TSYNC" = 1 ] || p=" [PRESYNC up=$(cut -d. -f1 /proc/uptime)s]"; l="$(date '+%FT%T%z') [$DEPLOY_TAG] [$RUN_ID] [${STEP:-init}]$p $*"; echo "$l"; logger -t "$DEPLOY_TAG" -- "[$RUN_ID] [${STEP:-init}] $*" 2>/dev/null || true; }
 ST_JSON=/var/lib/yallacloud/deploy.status
 status_json(){ printf '{"state":"%s","result":"%s","tag":"%s","run_id":"%s","step":"%s","time":"%s","warnings":%s,"log":"%s"}\n' "$1" "${2:-}" "$DEPLOY_TAG" "$RUN_ID" "${STEP:-init}" "$(date '+%FT%T%z')" "${WARNS:-0}" "$LOG" > "$ST_JSON" 2>/dev/null || true; }
-WARNS=0; WARN_TXT=""
-warn(){ say "WARN: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; }
+WARNS=0; WARN_TXT=""; WARN_LIST=""
+warn(){ say "WARN: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; WARN_LIST="${WARN_LIST:+$WARN_LIST$'\n'}$*"; }   # WARN_LIST: one per line (a message may contain ';')
 STEP=init; FAIL_REASON=""
 step(){ [ "$STEP" = init ] || echo "$(date '+%FT%T%z') $RUN_ID OK $STEP" >> /var/lib/yallacloud/steps.done; STEP=$1; say "== $1"; status_json RUNNING; }
 # apt has no low-speed abort: one degraded HTTPS connection crawled at ~11 KB/s for 10+ min (ycpg-vmw01, fresh curl = 1.8 MB/s).
@@ -407,7 +407,7 @@ d["cloud"] = {"id": e("CLOUD_ID") or None, "zone": d["zone"], "tenant": d["tenan
 num = lambda x: int(x) if (x or "").isdigit() else None
 d["service"] = {"area": "db", "catalogue": d["catalogue"], "status": st,
                 "result": e("RESULT") if e("RESULT") not in (None, "", "RUNNING") else None, "steps": e("STEP"),
-                "warnings": [w for w in (e("WARN_TXT") or "").split("; ") if w], "installer": d["installer"],
+                "warnings": [w for w in (e("WARN_LIST") or "").split("\n") if w], "installer": d["installer"],
                 "details": {"engine": e("ENGINE"), "version": e("DB_REAL_VERSION") or e("DB_VERSION"),
                             "host": e("HOST_PUB") or e("HOST_PRIV") or None, "hostPrivate": e("HOST_PRIV") or None,
                             "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP, sslmode=disable)", "hypervisor": e("HV") or None, "guestAgent": e("GA_STATE") or None,
@@ -455,7 +455,7 @@ finish(){
   FREE_GB=$({ df -BM --output=avail "$PGROOT" || df -BM --output=avail /var/lib; } 2>/dev/null | tail -1 | tr -dc 0-9 | awk '{printf "%.1f", $1/1024}')
   DURATION=$((SECONDS-T0)); SALT_ID=$(cat /etc/salt/minion_id 2>/dev/null); status_json "$RESULT" "$RESULT"
   [ "$RESULT" = SUCCESS ] && { touch /var/lib/yallacloud/deploy.done; systemctl disable yc-deploy.service >/dev/null 2>&1; }
-  export DURATION SALT_ID SSH_KEY_FP RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB VM_PASS VM_PASS_SRC CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER PGDATA BACKUP_DIR RETENTION SSH_PORT PITR_TXT
+  export DURATION SALT_ID SSH_KEY_FP RESULT STEP WARNS WARN_TXT WARN_LIST SALT_STATE ACRONIS_STATE FREE_GB VM_PASS VM_PASS_SRC CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER PGDATA BACKUP_DIR RETENTION SSH_PORT PITR_TXT
   {
     echo "RESULT=$RESULT"; echo "TIME=$(date '+%F %T %Z')"; echo "INSTALLER=yc-pg-install $VER"
     echo "ENGINE=$ENGINE ${DB_REAL_VERSION:-$DB_VERSION}"; echo "STEP=$STEP"; echo "WARNINGS=$WARNS${WARN_TXT:+ ($WARN_TXT)}"

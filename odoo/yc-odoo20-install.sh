@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.13  (2026-10-27 19:25 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.4.14  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -72,7 +72,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.13
+VER=1.4.14
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -84,15 +84,27 @@ exec > >(tee -a "$LOG") 2>&1
 say(){ echo "[$(date +%F' '%T)] $*"; }
 STEP=""; STEPS=""; WARNS=""; DIED=""
 N(){ [ -x /usr/local/sbin/yc-notify ] && /usr/local/sbin/yc-notify "$@"; true; }
+# extra webhook milestones (house sender): flat JSON, no secrets, one try 15 s, never blocks the build
+yc_extra() {  # yc_extra <area> <state> [error]
+  [ -n "${EXTRA_WEBHOOK_URL:-}" ] || return 0
+  local b; b=$(printf '{"type":"vm.%s.%s","vmId":"%s","hostname":"%s","ip":"%s","os":"%s","error":"%s","lastUpdated":"%s","extra":"%s"}' \
+    "$1" "$2" "${VM_ID:-$(hostname)}" "$(hostname)" "$(hostname -I 2>/dev/null | awk '{print $1}')" \
+    "$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")" "$(printf '%s' "${3:-}" | tr -d '"\\' | head -c 300)" \
+    "$(date '+%F %T %z')" "yc-odoo20-install ${VER:-?}")
+  curl -fsS -m 15 -H 'Content-Type: application/json' -H "X-Webhook-Secret: ${EXTRA_WEBHOOK_SECRET:-}" \
+    -d "$b" "$EXTRA_WEBHOOK_URL" >/dev/null 2>&1 || true
+}
+area_of(){ case "$1" in PG) echo db;; WEB) echo ssl;; *) echo "$1" | tr 'A-Z' 'a-z';; esac; }
 die(){
   echo "YC-FATAL: $*" | tee "$INFO/INSTALL-FAILED"; DIED=1
   echo "FAILED step ${STEP:-init}: $* ($(date '+%F %T %Z'))" > "$STATUS"
+  yc_extra "$(area_of "${STEP:-init}")" failed "$*"
   N -t vm.deploy.failed -T "FAILED BUILD odoo ${ROLE:-?}" -p 5 -g rotating_light,odoo \
     --steps "${STEPS:+$STEPS }${STEP:-init}-" --failed-step "${STEP:-init}" --error "$*" \
     -l "result  FAILED at step ${STEP:-init}" -l "error   $*" -l "fix     read /var/log/yc-odoo-deploy.log, then: yc-odoo-install" \
     -f area=odoo -f role="${ROLE:-?}" -f status=failed -f summary="FAILED ${STEP:-init}: $*"
   exit 1; }
-step(){ [ -n "$STEP" ] && STEPS="${STEPS:+$STEPS }$STEP+"; STEP=$1
+step(){ [ -n "$STEP" ] && { STEPS="${STEPS:+$STEPS }$STEP+"; yc_extra "$(area_of "$STEP")" ok; }; STEP=$1
         echo "RUNNING step $1 ($(date '+%F %T %Z'))" > "$STATUS"; say "== step $1"; }
 skip(){ STEPS="${STEPS:+$STEPS }$1~"; }
 # cloud-init's own logs go into the same file at the end (only when started by cloud-init)
@@ -402,15 +414,24 @@ def strip_secrets(v):
     return v
 
 
+EXTRA_STATES = ('failed', 'ok', 'joined', 'registered', 'backtogreen', 'waiting', 'waitforhuman', 'completed')
+
+
 def send_extra(c, a, fx):
-    """optional second webhook: the same event WITHOUT credentials, best effort, no queue"""
+    """second webhook (house contract): FLAT body, strings only, NO secrets, one try 15 s, never raises.
+    Only types vm.<area>.<state> with a contract state are sent (vm.deploy.started is not one)."""
     url, key = c.get('EXTRA_WEBHOOK_URL', ''), c.get('EXTRA_WEBHOOK_SECRET', '')
-    if not (url and key):
-        return 'off'
-    ev = strip_secrets(build_event(c, a, fx, False))
-    body = json.dumps(ev, separators=(',', ':')).encode('utf-8')
+    parts = (a.type or '').split('.')
+    if not url or len(parts) != 3 or parts[0] != 'vm' or parts[2] not in EXTRA_STATES:
+        return 'off' if not url else 'skip'
+    body = {'type': a.type, 'vmId': str(fx.get('vmId') or fx.get('hostname') or ''), 'hostname': str(fx.get('hostname') or ''),
+            'ip': str(fx.get('ip') or ''), 'os': str(fx.get('os') or ''),
+            'error': ''.join(ch for ch in (a.error or '') if ch not in '"\\')[:300],
+            'lastUpdated': time.strftime('%Y-%m-%d %H:%M:%S %z'),
+            'extra': 'yc-notify %s' % (fx.get('payload') or '')}
     try:
-        s, _ = post(url, body, {'Content-Type': 'application/json', 'X-Webhook-Secret': key}, 15)
+        s, _ = post(url, json.dumps(body, separators=(',', ':')).encode('utf-8'),
+                    {'Content-Type': 'application/json', 'X-Webhook-Secret': key}, 15)
         return 'ok %s' % s
     except Exception as e:  # never stop the caller
         return 'FAIL %s' % e
@@ -498,7 +519,8 @@ def main():
     if a.test:
         a.type, a.title, a.tags, a.line = 'vm.notify.test', 'TEST yc-notify', 'test_tube', ['test    reporting from this VM']
     fx = facts()
-    log('%s "%s" ntfy=%s webhook=%s extra=%s' % (a.type, a.title, send_ntfy(c, a, fx), send_webhook(c, a, fx), send_extra(c, a, fx)))
+    ex = send_extra(c, a, fx)                 # house rule: the extra webhook first, then the ERP
+    log('%s "%s" ntfy=%s webhook=%s extra=%s' % (a.type, a.title, send_ntfy(c, a, fx), send_webhook(c, a, fx), ex))
     return 0
 
 
@@ -619,6 +641,7 @@ PUB_URL_IP=""; is_priv "$URL_IP" || PUB_URL_IP=$URL_IP
     MD_OFFERING "$(md service-offering)" MD_CLOUD "$(md cloud-identifier)" INSTALLER_VERSION "$VER" CS_URL "$CLOUDSTACK_URL" \
     HYPERVISOR "$(systemd-detect-virt 2>/dev/null || echo unknown)"
   [ -n "$CS_TENANT" ] && printf '%s=%q\n' TENANT "$CS_TENANT" TENANT_SRC config; } > /etc/yallacloud/vm-facts.env
+VM_ID=$(md vm-id); [[ "$VM_ID" =~ ^[0-9a-f-]{36}$ ]] || VM_ID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)   # CloudStack id (VMware: not the BIOS UUID)
 N -t vm.deploy.started -T "START BUILD odoo $ROLE" -p 2 -g hourglass_flowing_sand,odoo \
   -l "role    $ROLE  ($([ "$ROLE" = combined ] && echo 'DB + Odoo' || { [ "$ROLE" = db ] && echo 'PostgreSQL only'; } || echo "Odoo, DB on $DB_HOST"))" \
   -l "ip      $BIND_IP  url ip $URL_IP" -l "domain  ${DOMAIN:-<sslip / ip>}" -l "pg      $PG_VERSION   tz $TZ_SET   ssh $SSH_PORT" \
@@ -1308,7 +1331,7 @@ salt_join(){
   say "salt: $r"
   local t=vm.salt.failed p=4 g=x st=failed
   case "$r" in JOINED*) t=vm.salt.joined p=3 g=white_check_mark st=joined;; WAITING*) t=vm.salt.waiting p=4 g=hourglass st=waiting;; esac
-  N -t "$t" -T "SALT ${st^^}" -p "$p" -g "$g,salt" -l "result  $r" \
+  N -t "$t" -T "SALT ${st^^}" -p "$p" -g "$g,salt" -l "result  $r" --error "$([ "$st" = joined ] || echo "$r")" \
     -l "retry   $([ -f /etc/cron.d/yc-salt-join ] && echo '/etc/cron.d/yc-salt-join every 15 min until JOINED' || echo none needed)" \
     -l "log     /var/lib/yc-salt/last.log" -f area=salt -f status="$st" -f summary="$r"
   return "$rc"
@@ -1332,7 +1355,7 @@ acronis(){
     *)  st=failed t=vm.acronis.failed p=4 g=x r="${r:-acronis-setup exit $rc} - see /var/log/yc-acronis-setup.log";;
   esac
   say "acronis: $r (exit $rc)"
-  N -t "$t" -T "ACRONIS ${st^^}" -p "$p" -g "$g,acronis" -l "result  $r" -l "region  ${ACRONIS_REGION:-AE}" \
+  N -t "$t" -T "ACRONIS ${st^^}" -p "$p" -g "$g,acronis" -l "result  $r" -l "region  ${ACRONIS_REGION:-AE}" --error "$([ "$st" = registered ] || echo "$r")" \
     -l "log     /var/log/yc-acronis-setup.log" -f area=acronis -f status="$st" -f summary="$r"
   return "$rc"
 }

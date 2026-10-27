@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-postgresql-userdata.sh  v1.0.1  (2026-10-27 16:30 IST)  YallaCloud / OasisStack
+# yc-postgresql-userdata.sh  v1.0.2  (2026-10-27 21:00 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: PostgreSQL database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-64.
 # Paste in CloudStack: Add Instance > Advanced > Userdata. Edit ONLY the block below.
@@ -43,6 +43,8 @@ ERP_WEBHOOK_SECRET=""      # ERP webhook X-Webhook-Secret (blank = webhook off)
 EXTRA_WEBHOOK_URL=""       # optional second webhook (copy of every event, credentials stripped), blank = off
 EXTRA_WEBHOOK_SECRET=""    # its X-Webhook-Secret
 CLOUDSTACK_URL="https://dxb01.oasisstack.io/client"   # CloudStack portal (cloudPortal / cloudVmUrl in the webhook)
+NET_RETRY_INTERVAL="300"   # no internet: check again every N seconds (5 min)
+NET_MAX_WAIT="0"           # give up after N seconds (0 = wait forever)
 INSTALLER_REF="main"       # advanced: git branch/tag of yallacloud/yc-scripts
 # ======================================================
 
@@ -68,23 +70,59 @@ fi
 
 # answers for the installer (it validates everything again; re-run: yc-db-install)
 umask 077; mkdir -p /etc/yallacloud
-for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL; do
+for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL NET_RETRY_INTERVAL NET_MAX_WAIT; do
   printf '%s=%q\n' "$v" "${!v}"
 done > /etc/yallacloud/db.conf.env
 umask 022
 
-# installer: GitHub (public yallacloud/yc-scripts) -> repo.oasisstack.io/db (YC ranges) -> GitHub mirrors, sha256 checked
-R=yallacloud/yc-scripts; F=db/yc-pg-install.sh; OUT=/root/yc-pg-install.sh; ok=""
-for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
-         "https://repo.oasisstack.io/db/yc-pg-install.sh" \
-         "https://cdn.jsdelivr.net/gh/$R@$INSTALLER_REF/$F" \
-         "https://github.com/$R/raw/$INSTALLER_REF/$F"; do
-  if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 -o "$OUT" "$u" \
-     && curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 -o "$OUT.sha256" "$u.sha256" \
-     && [ "$(sha256sum "$OUT" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$OUT.sha256")" ]; then ok=$u; break; fi
-  say "mirror failed or sha256 mismatch: $u"
+# cloud-init only drops the runner and starts yc-deploy.service: the internet wait, the download and the install
+# survive reboots (Restart=on-failure, 5 min), up to 3 failed installer runs. Watch: journalctl -t YC-POSTGRESQL-DB
+cat > /usr/local/sbin/yc-deploy-run <<EOF
+#!/bin/bash
+# yc-deploy-run - fetch yc-pg-install.sh (GitHub -> repo.oasisstack.io -> mirrors, sha256 checked), then run it. STACK4-64
+REF=$(printf '%q' "$INSTALLER_REF"); RETRY=$(printf '%q' "${NET_RETRY_INTERVAL:-300}"); MAXW=$(printf '%q' "${NET_MAX_WAIT:-0}")
+EOF
+cat >> /usr/local/sbin/yc-deploy-run <<'EOF'
+LOG=/var/log/yc-db-deploy.log; exec >> "$LOG" 2>&1
+say(){ echo "$(date '+%FT%T%z') [YC-POSTGRESQL-DB] [runner] $*"; logger -t YC-POSTGRESQL-DB -- "[runner] $*"; }
+[ -f /var/lib/yallacloud/deploy.done ] && { say "already deployed - nothing to do"; exit 0; }
+mkdir -p /var/lib/yallacloud; n=$(( $(cat /var/lib/yallacloud/deploy.attempts 2>/dev/null || echo 0) + 1 )); echo $n > /var/lib/yallacloud/deploy.attempts
+[ $n -gt 3 ] && { say "FAILED 3 times - giving up (fix, then: yallacloud deploy resume)"; systemctl disable yc-deploy.service; exit 0; }
+[[ "$RETRY" =~ ^[0-9]+$ ]] && [ "$RETRY" -ge 30 ] || RETRY=300; [[ "$MAXW" =~ ^[0-9]+$ ]] || MAXW=0
+R=yallacloud/yc-scripts; F=db/yc-pg-install.sh; OUT=/root/yc-pg-install.sh; waited=0
+while :; do
+  for u in "https://raw.githubusercontent.com/$R/$REF/$F" "https://repo.oasisstack.io/db/yc-pg-install.sh" \
+           "https://cdn.jsdelivr.net/gh/$R@$REF/$F" "https://github.com/$R/raw/$REF/$F"; do
+    if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 -o "$OUT" "$u" \
+       && curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 -o "$OUT.sha256" "$u.sha256" \
+       && [ "$(sha256sum "$OUT" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$OUT.sha256")" ]; then
+      say "installer ok from $u (attempt $n)"; chmod 700 "$OUT"; exec bash "$OUT"
+    fi
+    say "mirror failed or sha256 mismatch: $u"
+  done
+  printf '{"state":"WAITING_NETWORK","tag":"YC-POSTGRESQL-DB","step":"download","time":"%s"}\n' "$(date '+%FT%T%z')" > /var/lib/yallacloud/deploy.status
+  [ "$MAXW" -gt 0 ] && [ "$waited" -ge "$MAXW" ] && { say "ERROR: no installer after ${waited}s - check DNS / outbound 443 / GATEWAY"; exit 1; }
+  say "ERROR: no installer source reachable - next try in ${RETRY}s (waited ${waited}s)"; sleep "$RETRY"; waited=$((waited+RETRY))
 done
-[ -n "$ok" ] || fail "installer download failed from GitHub and repo.oasisstack.io (check DNS / outbound 443 / GATEWAY)"
-say "installer ok from $ok"
-chmod 700 "$OUT"
-exec bash "$OUT" 1>&3 2>&4   # installer logs to the same file itself
+EOF
+chmod 700 /usr/local/sbin/yc-deploy-run
+cat > /etc/systemd/system/yc-deploy.service <<'EOF'
+[Unit]
+Description=YallaCloud PostgreSQL deploy (STACK4-64) - internet wait, download, install; resumes after reboot
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/yallacloud/deploy.done
+StartLimitIntervalSec=0
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/yc-deploy-run
+Restart=on-failure
+RestartSec=300
+RestartPreventExitStatus=2
+TimeoutStartSec=0
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload; systemctl enable yc-deploy.service >/dev/null 2>&1
+systemctl start --no-block yc-deploy.service || fail "yc-deploy.service did not start"
+say "yc-deploy.service started - log $LOG, journalctl -t YC-POSTGRESQL-DB"

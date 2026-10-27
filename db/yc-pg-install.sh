@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-pg-install.sh  v1.0.2  (2026-10-27 19:10 IST)  YallaCloud / OasisStack
+# yc-pg-install.sh  v1.0.3  (2026-10-27 21:00 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): PostgreSQL (PGDG packages), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-64.
 # Sibling of yc-db-install.sh (MariaDB / MySQL, STACK4-62): same layout, files, yallacloud command, ERP contract.
@@ -55,10 +55,12 @@ APT_MIRRORS="ae.archive.ubuntu.com archive.ubuntu.com"
 PASS_URL="https://pass.oasisstack.io/?len=16"
 REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC ranges only)
 DISABLE_CLOUD_INIT="yes"
+NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master prompt 1A)
+NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.2
-KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
+VER=1.0.3
+KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
 PGENV=/etc/yallacloud/pg.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -68,14 +70,18 @@ STATUS=/var/log/yc-db-deploy.status
 mkdir -p /etc/yallacloud "$INFO" /var/lib/yallacloud; chmod 700 /etc/yallacloud "$INFO"
 touch "$LOG"; chmod 600 "$LOG"
 exec > >(tee -a "$LOG") 2>&1
-say(){ echo "[$(date '+%F %T %z')] $*"; }
+DEPLOY_TAG="YC-POSTGRESQL-DB"; RUN_ID="$(hostname -s)-$(date +%Y%m%dT%H%M%S)"; TSYNC=0; T0=$SECONDS
+say(){ local p="" l; [ "$TSYNC" = 1 ] || p=" [PRESYNC up=$(cut -d. -f1 /proc/uptime)s]"; l="$(date '+%FT%T%z') [$DEPLOY_TAG] [$RUN_ID] [${STEP:-init}]$p $*"; echo "$l"; logger -t "$DEPLOY_TAG" -- "[$RUN_ID] [${STEP:-init}] $*" 2>/dev/null || true; }
+ST_JSON=/var/lib/yallacloud/deploy.status
+status_json(){ printf '{"state":"%s","result":"%s","tag":"%s","run_id":"%s","step":"%s","time":"%s","warnings":%s,"log":"%s"}\n' "$1" "${2:-}" "$DEPLOY_TAG" "$RUN_ID" "${STEP:-init}" "$(date '+%FT%T%z')" "${WARNS:-0}" "$LOG" > "$ST_JSON" 2>/dev/null || true; }
 WARNS=0; WARN_TXT=""
 warn(){ say "WARN: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; }
 STEP=init; FAIL_REASON=""
-step(){ STEP=$1; say "== $1"; }
-die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; exit 1; }
+step(){ [ "$STEP" = init ] || echo "$(date '+%FT%T%z') $RUN_ID OK $STEP" >> /var/lib/yallacloud/steps.done; STEP=$1; say "== $1"; }
+die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; [ "$STEP" = "0 inputs" ] && exit 2; exit 1; }   # 2 = bad input, no automatic retry
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
-say "yc-pg-install v$VER start (pid $$)"
+exec 9>/var/lock/yc-deploy.lock; flock -n 9 || { echo "another yc-deploy run is active (lock /var/lock/yc-deploy.lock)"; exit 1; }
+say "yc-pg-install v$VER start (pid $$)"; status_json RUNNING
 
 # answers: defaults < cfg file < arguments (KEY=value)
 [ -f "$CFG" ] && . "$CFG"
@@ -310,8 +316,20 @@ PY
 yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header file, never argv
   yc_extra "$1"
   [ -n "${ERP_WEBHOOK_URL:-}" ] && [ -n "${ERP_WEBHOOK_SECRET:-}" ] || { echo "erp webhook: ERP_WEBHOOK_SECRET blank - skipped"; return 0; }
-  local h; h=$(mktemp); chmod 600 "$h"; printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$ERP_WEBHOOK_SECRET" > "$h"
-  echo "erp webhook: HTTP $(timeout 30 curl -sS -o /dev/null -w '%{http_code}' -H @"$h" --data-binary @"$1" "$ERP_WEBHOOK_URL" 2>/dev/null || echo fail)"
+  local h c w; h=$(mktemp); chmod 600 "$h"
+  printf '%s' "$ERP_WEBHOOK_SECRET" | python3 -c '
+import hashlib, hmac, json, sys
+k = sys.stdin.read().encode(); b = open(sys.argv[1], "rb").read(); d = json.loads(b)
+print("X-Webhook-Secret: " + k.decode()); print("Content-Type: application/json")
+print("X-YC-Signature: sha256=" + hmac.new(k, b, hashlib.sha256).hexdigest())
+for n, f in (("X-YC-Tag", "tag"), ("X-YC-Run-Id", "run_id"), ("X-YC-Event", "event"), ("X-YC-Timestamp", "timestamp")):
+    print(n + ": " + str(d.get(f) or ""))' "$1" > "$h" || { echo "erp webhook: header build failed - nothing sent"; rm -f "$h"; return 0; }
+  for w in 10 30 60 120 300 0; do
+    c=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' -H @"$h" --data-binary @"$1" "$ERP_WEBHOOK_URL" 2>/dev/null); c=${c:-000}
+    case "$c" in 2??|4??) break;; esac   # 4xx = the ERP said no - retrying will not change it
+    [ "$w" = 0 ] || { echo "erp webhook: HTTP $c - retry in ${w}s"; sleep "$w"; }
+  done
+  echo "erp webhook: HTTP $c"
   rm -f "$h"
 }
 LIBEOF
@@ -328,12 +346,16 @@ VM_UUID=$(md vm-id); VM_UUID=${VM_UUID:-$INSTANCE_ID}; VM_UUID=$(printf '%s' "${
 OFFERING=$(md service-offering)
 CLOUD_ID=$(md cloud-identifier)
 HV=$(systemd-detect-virt 2>/dev/null); HV=${HV:-none}   # kvm | vmware | ... (CloudStack runs both)
+# ERP match key: KVM SMBIOS = CloudStack VM uuid; VMware SMBIOS = the vCenter BIOS uuid (unrelated) -> metadata vm-id wins
+VM_ID=$SMBIOS; ID_SRC=smbios
+[[ "$VM_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [ "$VM_UUID" != "$SMBIOS" ] && { VM_ID=$VM_UUID; ID_SRC=metadata; }
+[ -n "$VM_ID" ] || { VM_ID=$VM_UUID; ID_SRC=metadata; }
 PREV_RESULT=$(awk -F= '/^RESULT=/{print $2}' "$STATUS" 2>/dev/null)
 facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout   (same contract as yc-db-install / STACK4-63)
   T="$1" S="$2" W="$3" python3 - <<'PY'
 import json, os, time
 e = os.environ.get
-d = {"type": e("T"), "extra": e("S"), "vmId": e("SMBIOS") or e("VM_UUID") or None, "smbiosUuid": e("SMBIOS") or None,
+d = {"type": e("T"), "extra": e("S"), "vmId": e("VM_ID") or None, "smbiosUuid": e("SMBIOS") or None,
      "vmName": e("VM_NAME"), "vmUuid": e("VM_UUID") or None,
      "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
      "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
@@ -356,7 +378,7 @@ if e("W") == "yes":
     d["vmUser"] = "root"; d["vmPassword"] = e("VM_PASS") or None
     if e("CHADMIN_PASS"): d["sudoUser"] = "chadmin"; d["sudoPassword"] = e("CHADMIN_PASS")
 # same keys as the Odoo kit / payload events (one ERP contract) - additive only
-d.update({"offering": e("OFFERING") or None, "identitySource": "smbios" if e("SMBIOS") else "metadata",
+d.update({"offering": e("OFFERING") or None, "identitySource": e("ID_SRC") or "metadata",
           "instanceId": e("INSTANCE_ID") or None, "routerVmId": None, "cloudstackUrl": e("CLOUDSTACK_URL") or None,
           "lastUpdated": time.strftime("%Y-%m-%d %H:%M:%S %z ") + (e("TZ_SET") or "UTC").split("/")[-1], "payload": e("VER"), "freeGb": float(e("FREE_GB")) if e("FREE_GB") else None,
           "delivery": {"queued": 0}})
@@ -397,10 +419,30 @@ if e("W") == "yes":   # every secret in ONE place; empty logins left out
     c = {"vm": up("root", e("VM_PASS"), source=e("VM_PASS_SRC") or None), "sudo": up("chadmin", e("CHADMIN_PASS")),
          "db": {k: v for k, v in db.items() if v}}
     d["credentials"] = {k: v for k, v in c.items() if v}
+# master prompt v1.9.3 section 7.3 / 3B / 5A keys - additive, the ERP keys above stay
+ev = {"vm.deploy.started": "deploy.started", "vm.deploy.completed": "deploy.succeeded", "vm.deploy.waiting_network": "deploy.waiting_network"}.get(e("T"), "deploy.failed")
+d.update({"event": ev, "tag": e("DEPLOY_TAG"), "run_id": e("RUN_ID"), "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+          "software": "postgresql", "version": e("DB_REAL_VERSION") or e("DB_VERSION"), "role": "db", "topology": "single",
+          "result": d["service"]["result"], "duration_s": int(e("DURATION") or 0), "log": "/var/log/yc-db-deploy.log",
+          "instanceName": "unknown"})
+d["vm"]["instanceName"] = "unknown"; d["vm"]["hypervisor"] = e("HV") or None
+d["ssh"] = {"port": num(e("SSH_PORT")), "users": ["root"] + (["chadmin"] if e("CHADMIN_PASS") else []),
+            "key_fingerprints": [x for x in (e("SSH_KEY_FP") or "").split() if x.startswith("SHA256:")], "password_auth": True}
+d["salt"] = {"joined": e("SALT_STATE") == "JOINED", "minion_id": e("SALT_ID") or None, "state": e("SALT_STATE") or None}
+d["acronis"] = {"installed": (e("ACRONIS_STATE") or "").startswith(("registered", "installed")), "reason": e("ACRONIS_STATE") or None}
+if e("W") == "yes":
+    d["db"].update({"host": e("HOST_PRIV") or e("HOST_PUB") or None, "public_host": e("HOST_PUB") or None, "bind": "0.0.0.0",
+                    "allowed_sources": (e("DB_ALLOW") or "").split(), "name": e("DB_NAME") or None,
+                    "user": e("DB_USER") or e("DB_ADMIN_USER"),
+                    "password": (e("DB_USER_PASS") if e("DB_USER") else e("DB_ADMIN_PASS")) or None})
+    srcmap = {"cloudstack": "cloudstack-cloudinit", "cloudstack-password-server": "cloudstack-vr", "generated": "script-generated"}
+    osu = [{"user": "root", "password": e("VM_PASS"), "source": srcmap.get(e("VM_PASS_SRC") or "", e("VM_PASS_SRC") or None)}]
+    if e("CHADMIN_PASS"): osu.append({"user": "chadmin", "password": e("CHADMIN_PASS"), "source": "script-generated"})
+    d.setdefault("credentials", {})["os_users"] = osu
 print(json.dumps(d))
 PY
 }
-export HV ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT ROOTU
+export DEPLOY_TAG RUN_ID VM_ID ID_SRC HV ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT ROOTU
 RESULT=RUNNING
 finish(){
   local rc=$? title prio tags msg typ j
@@ -408,13 +450,15 @@ finish(){
   [ -n "${CANCELLED:-}" ] && rc=130
   if [ "$rc" = 0 ]; then RESULT=SUCCESS; elif [ "$rc" = 130 ]; then RESULT=CANCELLED; else RESULT=FAILED; fi
   FREE_GB=$({ df -BM --output=avail "$PGROOT" || df -BM --output=avail /var/lib; } 2>/dev/null | tail -1 | tr -dc 0-9 | awk '{printf "%.1f", $1/1024}')
-  export RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB VM_PASS VM_PASS_SRC CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER PGDATA BACKUP_DIR RETENTION SSH_PORT PITR_TXT
+  DURATION=$((SECONDS-T0)); SALT_ID=$(cat /etc/salt/minion_id 2>/dev/null); status_json "$RESULT" "$RESULT"
+  [ "$RESULT" = SUCCESS ] && { touch /var/lib/yallacloud/deploy.done; systemctl disable yc-deploy.service >/dev/null 2>&1; }
+  export DURATION SALT_ID SSH_KEY_FP RESULT STEP WARNS WARN_TXT SALT_STATE ACRONIS_STATE FREE_GB VM_PASS VM_PASS_SRC CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER PGDATA BACKUP_DIR RETENTION SSH_PORT PITR_TXT
   {
     echo "RESULT=$RESULT"; echo "TIME=$(date '+%F %T %Z')"; echo "INSTALLER=yc-pg-install $VER"
     echo "ENGINE=$ENGINE ${DB_REAL_VERSION:-$DB_VERSION}"; echo "STEP=$STEP"; echo "WARNINGS=$WARNS${WARN_TXT:+ ($WARN_TXT)}"
     [ "$RESULT" = SUCCESS ] || echo "REASON=${FAIL_REASON:-exit $rc in step $STEP}"
   } > "$STATUS"
-  say "RESULT $RESULT (step $STEP, warnings $WARNS) - status $STATUS"
+  say "DEPLOY_RESULT=$RESULT step=$STEP warnings=$WARNS duration=${DURATION}s - status $STATUS + $ST_JSON"
   # one log for everything: append cloud-init's own logs
   { echo; echo "========== merged: cloud-init status =========="; cloud-init status --long 2>/dev/null
     for f in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
@@ -524,6 +568,29 @@ if [ -z "$DB_ALLOW" ]; then
   else DB_ALLOW=$PRIV_CIDR; fi
 fi
 export HOST_PRIV HOST_PUB PUB_NIC
+net_ok(){
+  NETFAIL=""
+  ip -4 route show default | grep -q . || { NETFAIL=route; return 1; }
+  { getent hosts github.com || getent hosts repo.oasisstack.io; } >/dev/null || { NETFAIL=dns; return 1; }
+  curl -fsS -o /dev/null --max-time 10 https://github.com 2>/dev/null || curl -fsS -o /dev/null --max-time 10 "$REPO_URL/VERSION.txt" 2>/dev/null || { NETFAIL=https; return 1; }
+}
+waited=0
+until net_ok; do
+  say "ERROR: internet gate failed at check '$NETFAIL' - waiting ${NET_RETRY_INTERVAL}s (waited ${waited}s, max ${NET_MAX_WAIT}s, 0 = forever)"; status_json WAITING_NETWORK
+  [ "$NETFAIL" = dns ] && command -v resolvectl >/dev/null && resolvectl dns "$(ip -4 route show default | awk '{print $5; exit}')" 1.1.1.1 8.8.8.8 2>/dev/null
+  fix_gateway "$GATEWAY" >/dev/null 2>&1
+  [ "$NET_MAX_WAIT" -gt 0 ] && [ "$waited" -ge "$NET_MAX_WAIT" ] && die "no internet after ${waited}s (failed check: $NETFAIL)"
+  sleep "$NET_RETRY_INTERVAL"; waited=$((waited+NET_RETRY_INTERVAL))
+done
+[ "$waited" -gt 0 ] && say "internet back after ${waited}s"
+status_json RUNNING
+# time first (7.2): NTP sync before anything TLS-heavy, max 2 min, then ISO 8601 stamps without [PRESYNC]
+timedatectl set-timezone "$TZ_SET" 2>/dev/null; timedatectl set-ntp true 2>/dev/null
+for _ in $(seq 1 24); do [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] && break; sleep 5; done
+TSYNC=1
+if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; then
+  say "TIME_SYNCED source=$(timedatectl show-timesync -p ServerName --value 2>/dev/null || chronyc -n sources 2>/dev/null | awk '/^\^\*/{print $2}') tz=$TZ_SET time=$(date '+%FT%T%z')"
+else warn "time not synchronised after 2 min - continuing on RTC time ($(date '+%FT%T%z'))"; fi
 TENANT=$(yc_tenant) && TENANT_SRC="salt-inventory (CloudStack domain)" || { TENANT=""; say "tenant: not published yet (Salt inventory syncs every 5 min) - webhook sends null"; }
 say "vm: $VM_NAME uuid ${VM_UUID:-?} smbios ${SMBIOS:-?} tenant ${TENANT:-?} offering ${OFFERING:-?}"
 say "ips: private=${HOST_PRIV:-none} public=${HOST_PUB:-none} (nic ${PUB_NIC:-none}, static-nat ${MD_PUB:-none}) subnet=${PRIV_CIDR:-none} allow=$DB_ALLOW ssh=$SSH_PORT"
@@ -669,7 +736,7 @@ if ! id chadmin >/dev/null 2>&1; then CHADMIN_PASS=""
 elif [ -z "$CHADMIN_PASS" ]; then CHADMIN_PASS=$(genpw) && printf 'chadmin:%s\n' "$CHADMIN_PASS" | chpasswd || warn "chadmin password not set"; fi
 id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1
 say "os logins: root password = $VM_PASS_SRC, chadmin $([ -n "$CHADMIN_PASS" ] && echo 'password generated' || echo 'not present'), ubuntu locked (template defaults removed)"
-( umask 077; printf "DB_ROOT_PASS=%q\nDB_ADMIN_PASS=%q\nDB_USER_PASS=%q\nVM_PASS=%q\nCHADMIN_PASS=%q\n" "$DB_ROOT_PASS" "$DB_ADMIN_PASS" "${DB_USER_PASS:-}" "$VM_PASS" "$CHADMIN_PASS" > "$INFO/secrets.env" )
+( umask 077; printf "DB_ROOT_PASS=%q\nDB_ADMIN_PASS=%q\nDB_USER_PASS=%q\nVM_PASS=%q\nVM_PASS_SRC=%q\nCHADMIN_PASS=%q\n" "$DB_ROOT_PASS" "$DB_ADMIN_PASS" "${DB_USER_PASS:-}" "$VM_PASS" "$VM_PASS_SRC" "$CHADMIN_PASS" > "$INFO/secrets.env" )
 
 # answers file without passwords (re-run, retune, yallacloud, backup read it)
 ( umask 077; for v in $KEYS; do case $v in *_PASS) continue;; esac; printf '%s=%q\n' "$v" "${!v}"; done > "$CFG" )
@@ -1029,7 +1096,7 @@ cat > /usr/local/sbin/yallacloud <<'YCEOF'
 #   yallacloud newdb NAME [USER]         database + owner with a generated password
 #   yallacloud top          top 10 statements by total time (pg_stat_statements)
 #   yallacloud retune       re-calculate memory tuning after a resize, restart PostgreSQL
-#   yallacloud log          deployment log
+#   yallacloud log          deployment log      yallacloud deploy status|resume|log
 . /etc/yallacloud/db.conf.env 2>/dev/null; . /usr/local/lib/yc-db-common.sh
 export HOME=/root
 kv(){ printf '  %-22s %s\n' "$1" "$2"; }
@@ -1126,7 +1193,14 @@ uri         : postgresql://$u:$(urlpw "$p")@$h:$DB_PORT/$n?sslmode=disable"
 top) need_root; pgrun "$PGBIN/psql" -X -p "$DB_PORT" -d postgres -c "SELECT round(total_exec_time::numeric,0) AS total_ms, calls, round(mean_exec_time::numeric,1) AS mean_ms, left(regexp_replace(query,'\s+',' ','g'),90) AS query FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10" ;;
 retune) need_root; pg_tune && echo "wal_compression = lz4" >> "$CONF_D/90-yallacloud-tuning.conf" && systemctl restart "$SVC" && echo "restarted $SVC" ;;
 log) less +G /var/log/yc-db-deploy.log ;;
-*) sed -n '2,12p' "$0" | sed 's/^# //' ;;
+deploy)
+  case "${2:-status}" in
+    status) cat /var/lib/yallacloud/deploy.status 2>/dev/null; echo; cat /var/log/yc-db-deploy.status 2>/dev/null; tail -n 3 /var/lib/yallacloud/steps.done 2>/dev/null ;;
+    resume|rerun) need_root; rm -f /var/lib/yallacloud/deploy.done /var/lib/yallacloud/deploy.attempts; systemctl start --no-block yc-deploy.service 2>/dev/null && echo "yc-deploy.service started - follow: yallacloud deploy log" || /usr/local/sbin/yc-db-install ;;
+    log) journalctl -t YC-POSTGRESQL-DB -n 200 --no-pager ;;
+    *) echo "usage: yallacloud deploy status|resume|log" ;;
+  esac ;;
+*) sed -n '2,13p' "$0" | sed 's/^# //' ;;
 esac
 YCEOF
 chmod 755 /usr/local/sbin/yallacloud

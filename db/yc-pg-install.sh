@@ -69,7 +69,7 @@ LOG=/var/log/yc-db-deploy.log
 STATUS=/var/log/yc-db-deploy.status
 mkdir -p /etc/yallacloud "$INFO" /var/lib/yallacloud; chmod 700 /etc/yallacloud "$INFO"
 touch "$LOG"; chmod 600 "$LOG"
-[ "$(readlink -f /proc/self/fd/1)" = "$LOG" ] || exec > >(tee -a "$LOG") 2>&1   # yc-deploy-run already writes stdout to $LOG: tee again = every line twice
+[ "$(readlink -f /proc/$$/fd/1)" = "$LOG" ] || exec > >(tee -a "$LOG") 2>&1   # yc-deploy-run already writes stdout to $LOG: tee again = every line twice
 DEPLOY_TAG="YC-POSTGRESQL-DB"; RUN_ID="$(hostname -s)-$(date +%Y%m%dT%H%M%S)"; TSYNC=0; T0=$SECONDS
 say(){ local p="" l; [ "$TSYNC" = 1 ] || p=" [PRESYNC up=$(cut -d. -f1 /proc/uptime)s]"; l="$(date '+%FT%T%z') [$DEPLOY_TAG] [$RUN_ID] [${STEP:-init}]$p $*"; echo "$l"; logger -t "$DEPLOY_TAG" -- "[$RUN_ID] [${STEP:-init}] $*" 2>/dev/null || true; }
 ST_JSON=/var/lib/yallacloud/deploy.status

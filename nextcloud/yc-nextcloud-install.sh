@@ -174,7 +174,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.2.2"
+NC_IVER="1.2.3"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
 # --- CloudStack metadata reader: cloud-init instance-data first, then the VR metadata server ---
@@ -574,8 +574,10 @@ for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
   [ -f "$F" ] || continue
   sed -i -E "s#https?://([a-z0-9.-]*\\.)?archive\\.ubuntu\\.com/ubuntu#http://${APT_MIRROR}/ubuntu#g" "$F"
 done
+# a stalled mirror connection otherwise hangs apt forever (seen live: 17 min on one http fetch)
+printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "3";\n' > /etc/apt/apt.conf.d/99yallacloud-timeouts
 say "apt update"
-apt-get update -qq || die "apt update failed"
+timeout 900 apt-get update -qq || { sleep 10; timeout 900 apt-get update -qq; } || die "apt update failed (mirror ${APT_MIRROR} unreachable or stalled)"
 apt-get upgrade -y -qq
 
 say "installing nginx, mariadb, redis, php $PHPV"

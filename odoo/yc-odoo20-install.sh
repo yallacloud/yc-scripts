@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.4.15  (2026-10-28 00:05 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.5.0  (2026-10-28 13:00 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -72,7 +72,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.4.15
+VER=1.5.0
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -80,8 +80,110 @@ NOTIFY_ENV=/etc/yallacloud/notify.env       # secrets of the reporting channels,
 LOG=/var/log/yc-odoo-deploy.log             # the ONE log: userdata + installer + cloud-init
 STATUS=/var/log/yc-odoo-deploy.status
 mkdir -p /etc/yallacloud "$INFO"; chmod 700 "$INFO"
+# central log (deploy + day-2): yc-log writes it, 'yallacloud logs' reads it - installed first so every line lands there
+cat > /usr/local/sbin/yc-log <<'YCLOGEOF'
+#!/bin/bash
+# yc-log LEVEL COMPONENT MESSAGE... - the ONE central YallaCloud log of this VM: deploy AND day-2 (STACK4-61)
+#   LEVEL      INFO | OK | WARN | ERROR
+#   COMPONENT  userdata deploy ssl backup domain salt acronis notify cron ...   step tag: $YC_STEP (else -)
+# Writes  /var/log/yallacloud/odoo.log    2026-10-28 12:30:01 +0400 | OK    | deploy    | PG       | message
+#         /var/log/yallacloud/errors.log  WARN + ERROR lines only
+#         /var/log/yallacloud/odoo.jsonl  same, one JSON object per line (ts level component step host msg)
+#         journald/syslog                 tag yallacloud-odoo   ->  journalctl -t yallacloud-odoo
+# Read it: yallacloud logs. Callers pass status text only - never a password. Always exits 0.
+lvl=${1:-INFO}; comp=${2:-misc}; shift 2 2>/dev/null
+case "$lvl" in INFO|OK|WARN|ERROR) ;; *) lvl=INFO;; esac
+D=/var/log/yallacloud; mkdir -p "$D" 2>/dev/null && chmod 750 "$D" 2>/dev/null
+ts=$(date '+%F %T %z'); st=${YC_STEP:--}
+msg=$(printf '%s' "$*" | tr '\r\n\t' '   ' | cut -c1-2000)
+line=$(printf '%s | %-5s | %-9s | %-8s | %s' "$ts" "$lvl" "$comp" "$st" "$msg")
+printf '%s\n' "$line" >> "$D/odoo.log" 2>/dev/null
+case "$lvl" in WARN|ERROR) printf '%s\n' "$line" >> "$D/errors.log" 2>/dev/null;; esac
+python3 -c 'import json,sys;print(json.dumps(dict(zip(("ts","level","component","step","host","msg"),sys.argv[1:]))))' \
+  "$ts" "$lvl" "$comp" "$st" "$(hostname)" "$msg" >> "$D/odoo.jsonl" 2>/dev/null
+pr=info; [ "$lvl" = WARN ] && pr=warning; [ "$lvl" = ERROR ] && pr=err
+logger -t yallacloud-odoo -p "user.$pr" -- "$lvl $comp $st: $msg" 2>/dev/null
+exit 0
+YCLOGEOF
+cat > /usr/local/sbin/yc-logs <<'YCLOGSEOF'
+#!/bin/bash
+# yallacloud logs [option] - read the central YallaCloud log (deploy + day-2), STACK4-61
+#   (none)          summary for everyone: deploy result + steps, notifications sent, day-2 jobs, problems + what to do
+#   --errors        every WARN / ERROR line          --all      the whole central log
+#   -c COMPONENT    one part: deploy userdata ssl backup domain salt acronis notify
+#   --follow        live (Ctrl+C to stop)            --json     machine-readable lines
+#   --deploy        the full first-build log (userdata + installer + cloud-init)
+D=/var/log/yallacloud; L=$D/odoo.log
+case "${1:-}" in
+  --errors) cat "$D/errors.log" 2>/dev/null || echo "no warnings or errors logged"; exit 0;;
+  --all) cat "$L"; exit 0;;
+  -c|--component) [ -n "${2:-}" ] || { echo "usage: yallacloud logs -c deploy|ssl|backup|domain|salt|acronis|notify"; exit 2; }
+     awk -F' [|] ' -v c="$2" '{g=$3; gsub(/ /,"",g)} g==c' "$L"; exit 0;;
+  -f|--follow) exec tail -F "$L";;
+  --json) cat "$D/odoo.jsonl"; exit 0;;
+  --deploy) cat /var/log/yc-odoo-deploy.log; exit 0;;
+  ""|--summary) ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2;;
+esac
+[ -f "$L" ] || { echo "no central log yet ($L)"; exit 0; }
+h(){ printf '\n== %s\n' "$1"; }
+word(){ case "$1" in NET) echo "Network + gateway";; OS) echo "OS updates, time, packages";; SSH) echo "SSH access + keys";;
+  SECRETS) echo "Passwords";; PG) echo "PostgreSQL database";; FW) echo "Firewall";; ODOO) echo "Odoo application";;
+  TOOLS) echo "Backups, SSL, add-on tools";; WEB) echo "Web address + certificate";; HANDOVER) echo "Handover file";; *) echo "$1";; esac; }
+hint(){ case "$1" in
+  deploy|userdata) echo "read: yallacloud logs --deploy ; fix the cause, then run: yc-odoo-install";;
+  ssl) echo "check: odoo-ssl status ; port 80/443 open to the internet? DNS points here?";;
+  backup) echo "check: odoo-backup list ; free disk: df -h ; run again: odoo-backup run";;
+  salt) echo "check: yc-addons status ; ports 4505/4506 to salt.oasisstack.io ; retries every 15 min";;
+  acronis) echo "check: /var/log/yc-acronis-setup.log ; token + region; re-run: yc-addons acronis";;
+  notify) echo "check: yc-notify --show ; yc-notify --test";;
+  *) echo "see: yallacloud logs -c $1";; esac; }
+echo "YallaCloud log summary - $(hostname) - $(date '+%F %T %Z')"
+echo "Central log: $L   (yallacloud logs --help for more)"
+
+h "1. Deploy (first build)"
+S=$(cat /var/log/yc-odoo-deploy.status 2>/dev/null || echo "unknown")
+case "$S" in SUCCESS*) echo "  Result : OK - the server was built completely";;
+  FAILED*) echo "  Result : FAILED - the build stopped (see Problems below)";;
+  RUNNING*) echo "  Result : STILL RUNNING";; *) echo "  Result : $S";; esac
+echo "  Status : $S"
+printf '  %-9s %-28s %-7s %s\n' STEP "WHAT IT DOES" RESULT "FINISHED"
+awk -F' [|] ' '$3 ~ /^deploy/ && $5 ~ /^step [A-Z]+ (done|FAILED)/ {split($5,a," "); r=(a[3]=="done")?"OK":"FAILED"; print a[2], r, substr($1,12,8)}' "$L" |
+  while read -r s r t; do printf '  %-9s %-28s %-7s %s\n' "$s" "$(word "$s")" "$r" "$t"; done
+
+h "2. Messages sent (phone = ntfy, ERP = YallaCloud ERP webhook, Tech = extra webhook)"
+printf '  %-19s %-24s %-8s %-10s %s\n' TIME EVENT PHONE ERP TECH
+awk -F' [|] ' '$3 ~ /^notify/ {print $1 "\t" $5 "\t" $7 "\t" $8 "\t" $9}' "$L" | tail -12 |
+  while IFS=$'\t' read -r ts ev n e x; do
+    v(){ case "$1" in *=ok*) echo "sent";; *=off*|*=skip*|*=no*) echo "-";; *) echo "FAILED";; esac; }
+    ea=$(v "$e"); case "$e" in *"NOT applied"*) ea="sent*";; esac
+    printf '  %-19s %-24s %-8s %-10s %s\n' "${ts:0:19}" "$ev" "$(v "$n")" "$ea" "$(v "$x")"
+  done
+echo "  (* = ERP received it but has no matching instance yet)"
+
+h "3. Day-2 jobs (last result of each)"
+for c in backup ssl domain salt acronis; do
+  l=$(awk -F' [|] ' -v c="$c" '{g=$3; gsub(/ /,"",g)} g==c' "$L" | tail -1)
+  [ -n "$l" ] && printf '  %-8s %s  %s\n' "$c" "$(echo "$l" | awk -F' [|] ' '{gsub(/ /,"",$2); print $2}')" "$(echo "$l" | awk -F' [|] ' '{print substr($1,1,16)"  "$5}')" || printf '  %-8s %s\n' "$c" "no entry yet"
+done
+
+h "4. Problems (last 10 warnings / errors) and what to do"
+if [ -s "$D/errors.log" ]; then
+  tail -10 "$D/errors.log" | while IFS= read -r l; do
+    c=$(echo "$l" | awk -F' [|] ' '{g=$3; gsub(/ /,"",g); print g}')
+    echo "  $(echo "$l" | awk -F' [|] ' '{gsub(/ +$/,"",$2); print substr($1,1,16)"  "$2"  "$3"  "$5}')"
+    echo "      -> $(hint "$c")"
+  done
+else echo "  none - nothing went wrong"; fi
+
+h "Where everything is"
+printf '  %-14s %s\n' central "$L (all parts, one line per event)" errors "$D/errors.log" json "$D/odoo.jsonl" \
+  journal "journalctl -t yallacloud-odoo" deploy "/var/log/yc-odoo-deploy.log (+ cloud-init)" \
+  webhooks "/var/log/yc-notify.events.jsonl (full bodies + answers, root only)" odoo "/var/log/odoo/odoo-server.log"
+YCLOGSEOF
+chmod 755 /usr/local/sbin/yc-log /usr/local/sbin/yc-logs
 exec > >(tee -a "$LOG") 2>&1
-say(){ echo "[$(date +%F' '%T)] $*"; }
+say(){ echo "[$(date +%F' '%T)] $*"; /usr/local/sbin/yc-log INFO deploy "$*"; }
 STEP=""; STEPS=""; WARNS=""; DIED=""
 N(){ [ -x /usr/local/sbin/yc-notify ] && /usr/local/sbin/yc-notify "$@"; true; }
 # extra webhook milestones (house sender): flat JSON, no secrets, one try 15 s, never blocks the build
@@ -97,6 +199,7 @@ yc_extra() {  # yc_extra <area> <state> [error]
 area_of(){ case "$1" in PG) echo db;; WEB) echo ssl;; *) echo "$1" | tr 'A-Z' 'a-z';; esac; }
 die(){
   echo "YC-FATAL: $*" | tee "$INFO/INSTALL-FAILED"; DIED=1
+  YC_STEP=${STEP:-init} /usr/local/sbin/yc-log ERROR deploy "step ${STEP:-init} FAILED: $*"
   echo "FAILED step ${STEP:-init}: $* ($(date '+%F %T %Z'))" > "$STATUS"
   yc_extra "$(area_of "${STEP:-init}")" failed "$*"
   N -t vm.deploy.failed -T "FAILED BUILD odoo ${ROLE:-?}" -p 5 -g rotating_light,odoo \
@@ -104,7 +207,8 @@ die(){
     -l "result  FAILED at step ${STEP:-init}" -l "error   $*" -l "fix     read /var/log/yc-odoo-deploy.log, then: yc-odoo-install" \
     -f area=odoo -f role="${ROLE:-?}" -f status=failed -f summary="FAILED ${STEP:-init}: $*"
   exit 1; }
-step(){ [ -n "$STEP" ] && { STEPS="${STEPS:+$STEPS }$STEP+"; yc_extra "$(area_of "$STEP")" ok; }; STEP=$1
+step(){ [ -n "$STEP" ] && { STEPS="${STEPS:+$STEPS }$STEP+"; YC_STEP=$STEP /usr/local/sbin/yc-log OK deploy "step $STEP done"; yc_extra "$(area_of "$STEP")" ok; }
+        STEP=$1; export YC_STEP=$1
         echo "RUNNING step $1 ($(date '+%F %T %Z'))" > "$STATUS"; say "== step $1"; }
 skip(){ STEPS="${STEPS:+$STEPS }$1~"; }
 # cloud-init's own logs go into the same file at the end (only when started by cloud-init)
@@ -119,11 +223,14 @@ merge_cloudinit(){
 finish(){ local rc=$?
   if [ "$rc" -ne 0 ] && [ -z "$DIED" ]; then DIED=1
     echo "FAILED step ${STEP:-?}: unexpected exit $rc ($(date '+%F %T %Z'))" > "$STATUS"
+    /usr/local/sbin/yc-log ERROR deploy "step ${STEP:-?} FAILED: unexpected exit $rc"
+    yc_extra "$(area_of "${STEP:-init}")" failed "unexpected exit $rc"
     N -t vm.deploy.failed -T "FAILED BUILD odoo ${ROLE:-?}" -p 5 -g rotating_light,odoo --steps "$STEPS ${STEP:-?}-" \
       --failed-step "${STEP:-?}" --error "unexpected exit $rc" -l "result  FAILED at step ${STEP:-?} (exit $rc)" -f area=odoo -f status=failed
   fi
   merge_cloudinit
   echo "RESULT: $(cat "$STATUS" 2>/dev/null)"
+  YC_STEP=- /usr/local/sbin/yc-log "$([ "$rc" -eq 0 ] && echo OK || echo ERROR)" deploy "deploy finished: $(cat "$STATUS" 2>/dev/null)"
 }
 trap finish EXIT
 [ "$(id -u)" = 0 ] || die "run as root"
@@ -135,7 +242,7 @@ echo "RUNNING step init ($(date '+%F %T %Z'))" > "$STATUS"
 [ -f "$NOTIFY_ENV" ] && . "$NOTIFY_ENV"
 SELF=$(readlink -f "$0"); [ "$SELF" != /usr/local/sbin/yc-odoo-install ] && install -m 700 "$SELF" /usr/local/sbin/yc-odoo-install
 # == 0. check every input: required -> stop with the reason; optional -> warn + safe default
-warn(){ say "WARN: $*"; WARNS="${WARNS:+$WARNS; }$*"; }
+warn(){ echo "[$(date +%F' '%T)] WARN: $*"; /usr/local/sbin/yc-log WARN deploy "$*"; WARNS="${WARNS:+$WARNS; }$*"; }
 ip4(){ [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1; local n; for n in "${BASH_REMATCH[@]:1}"; do [ "$n" -le 255 ] || return 1; done; }
 fqdn(){ [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
 ROLE=$(printf '%s' "$ROLE" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
@@ -190,6 +297,7 @@ BACKUP_DIR=${BACKUP_DIR%/}
 [[ "$BACKUP_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { warn "BACKUP_TIME '$BACKUP_TIME' invalid (HH:MM) - using 02:30"; BACKUP_TIME=02:30; }
 [[ "$NTFY_SERVER" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] || { warn "NTFY_SERVER '$NTFY_SERVER' invalid - using https://ntfy.sh"; NTFY_SERVER=https://ntfy.sh; }
 NTFY_SERVER=${NTFY_SERVER%/}
+[ -n "$NTFY_TOPIC" ] || NTFY_TOPIC=9890122212   # blank = the house topic
 [[ "$NTFY_TOPIC" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { [ "$ENABLE_NTFY" = yes ] && warn "NTFY_TOPIC '$NTFY_TOPIC' invalid - ntfy off"; ENABLE_NTFY=no; }
 [ -z "$NTFY_TOKEN" ] || [[ "$NTFY_TOKEN" =~ ^[A-Za-z0-9_.-]{8,200}$ ]] || { warn "NTFY_TOKEN has bad characters - ignored"; NTFY_TOKEN=""; }
 if [ "$ENABLE_WEBHOOK" = yes ]; then
@@ -255,6 +363,18 @@ def envfile(path):
     except OSError:
         pass
     return d
+
+
+def central(typ, title, nt, wh, ex):
+    """one line per event in the central log (yallacloud logs): which of the 3 outputs got it"""
+    state = (typ or '').rsplit('.', 1)[-1]
+    bad = any(str(x).startswith(('FAIL', 'no ')) for x in (nt, wh, ex))
+    lvl = 'ERROR' if state == 'failed' else ('WARN' if bad or state in ('waiting', 'expiring', 'waitforhuman') else 'OK')
+    try:
+        subprocess.run(['/usr/local/sbin/yc-log', lvl, 'notify', '%s | %s | ntfy=%s | erp=%s | extra=%s' % (typ, title, nt, wh, ex)],
+                       timeout=10, check=False)
+    except Exception:
+        pass
 
 
 def log(msg):
@@ -351,11 +471,9 @@ def ascii_hdr(s):
 
 
 def send_ntfy(c, a, fx):
-    if c.get('ENABLE_NTFY', 'yes') != 'yes':
+    if c.get('ENABLE_NTFY', 'yes') != 'yes' or a.no_ntfy:
         return 'off'
-    url = c.get('NTFY_SERVER', 'https://ntfy.sh').rstrip('/') + '/' + c.get('NTFY_TOPIC', '')
-    if not c.get('NTFY_TOPIC'):
-        return 'no topic'
+    url = c.get('NTFY_SERVER', 'https://ntfy.sh').rstrip('/') + '/' + (c.get('NTFY_TOPIC') or '9890122212')
     lines = list(a.line or [])
     if a.steps:
         lines.append('steps   ' + a.steps)
@@ -422,9 +540,13 @@ def send_extra(c, a, fx):
     Only types vm.<area>.<state> with a contract state are sent (vm.deploy.started is not one)."""
     url, key = c.get('EXTRA_WEBHOOK_URL', ''), c.get('EXTRA_WEBHOOK_SECRET', '')
     parts = (a.type or '').split('.')
+    if len(parts) == 4 and parts[1] == 'odoo':          # vm.odoo.backup.failed -> vm.backup.failed
+        parts = [parts[0], parts[2], parts[3]]
+    if len(parts) == 3:
+        parts[2] = {'expiring': 'waiting', 'renewed': 'ok', 'installed': 'ok'}.get(parts[2], parts[2])
     if not url or len(parts) != 3 or parts[0] != 'vm' or parts[2] not in EXTRA_STATES:
         return 'off' if not url else 'skip'
-    body = {'type': a.type, 'vmId': str(fx.get('vmId') or fx.get('hostname') or ''), 'hostname': str(fx.get('hostname') or ''),
+    body = {'type': '.'.join(parts), 'vmId': str(fx.get('vmId') or fx.get('hostname') or ''), 'hostname': str(fx.get('hostname') or ''),
             'ip': str(fx.get('ip') or ''), 'os': str(fx.get('os') or ''),
             'error': ''.join(ch for ch in (a.error or '') if ch not in '"\\')[:300],
             'lastUpdated': time.strftime('%Y-%m-%d %H:%M:%S %z'),
@@ -503,6 +625,7 @@ def main():
     p.add_argument('--failed-step', default='')
     p.add_argument('--error', default='')
     p.add_argument('--test', action='store_true')
+    p.add_argument('--no-ntfy', action='store_true', help='webhooks only (routine OK events, no phone message)')
     p.add_argument('--show', action='store_true')
     a = p.parse_args()
     c = envfile(MAIN)
@@ -520,7 +643,9 @@ def main():
         a.type, a.title, a.tags, a.line = 'vm.notify.test', 'TEST yc-notify', 'test_tube', ['test    reporting from this VM']
     fx = facts()
     ex = send_extra(c, a, fx)                 # house rule: the extra webhook first, then the ERP
-    log('%s "%s" ntfy=%s webhook=%s extra=%s' % (a.type, a.title, send_ntfy(c, a, fx), send_webhook(c, a, fx), ex))
+    nt, wh = send_ntfy(c, a, fx), send_webhook(c, a, fx)
+    log('%s "%s" ntfy=%s webhook=%s extra=%s' % (a.type, a.title, nt, wh, ex))
+    central(a.type, a.title, nt, wh, ex)
     return 0
 
 
@@ -1076,10 +1201,11 @@ elif [ "$MODE" = fqdn ]; then
     install -d /etc/letsencrypt/renewal-hooks/deploy
     printf '#!/bin/sh\nsystemctl reload nginx\n' > /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh; chmod +x /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
     systemctl enable --now certbot.timer >/dev/null 2>&1
-  else echo "certbot failed - serving HTTP (port 80 reachable from internet?)"; fi
+  else echo "certbot failed - serving HTTP (port 80 reachable from internet?)"; yc-log WARN domain "Let's Encrypt failed for $HOST - serving HTTP (port 80 reachable from the internet? DNS points here?)"; fi
 fi
 [ -n "$HOST" ] && hostnamectl set-hostname "$HOST"
 echo "$URL" > "$INFO/URL"
+yc-log OK domain "web address is now $URL"
 # web.base.url so emails/links use the new host (Odoo also updates it on admin login).
 if [ -n "${ODOO_DB:-}" ]; then
   sudo -u odoo odoo shell -c /etc/odoo/odoo.conf -d "$ODOO_DB" --no-http --logfile= --log-level=error >/dev/null 2>&1 <<PY
@@ -1216,13 +1342,14 @@ case "$cmd" in
     mkdir -p "$(dirname "$WARN")"; : > "$WARN"
     for c in "$SSL"/*/fullchain.pem "$LE"/*/fullchain.pem; do
       [ -f "$c" ] || continue; dl=$(days_left "$c"); h=$(basename "$(dirname "$c")"); ty=free; [[ "$c" == "$SSL"/* ]] && ty=paid
-      echo "$(date '+%F %T') $ty $h $dl days left"
+      echo "$(date '+%F %T') $ty $h $dl days left"; yc-log "$([ "$dl" -lt 20 ] && echo WARN || echo OK)" ssl "$ty certificate $h: $dl days left"
       if [ "$dl" -lt 30 ]; then
         [ $ty = paid ] && echo "  SSL: PAID certificate for $h expires in $dl days - renew: odoo-ssl csr $h --reuse-key, then odoo-ssl install" >> "$WARN"
         [ $ty = free ] && [ "$dl" -lt 20 ] && echo "  SSL: free certificate for $h expires in $dl days and did not renew - check: certbot renew --dry-run" >> "$WARN"
       fi
     done
-    [ -s "$WARN" ] && N vm.odoo.ssl.expiring "SSL EXPIRING on $(hostname)" 4 warning "$(sed 's/^ *//' "$WARN" | head -3)"; true;;
+    if [ -s "$WARN" ]; then N vm.odoo.ssl.expiring "SSL EXPIRING on $(hostname)" 4 warning "$(sed 's/^ *//' "$WARN" | head -3)"
+    else /usr/local/sbin/yc-notify -t vm.odoo.ssl.ok -T "SSL OK" --no-ntfy -f area=odoo-ssl -f status=ok >/dev/null 2>&1; fi; true;;
   *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2;;
 esac
 SSLEOF
@@ -1258,8 +1385,9 @@ run(){
   last=$(du -sb "$(ls -d "$DIR"/20* 2>/dev/null | grep -v "$set" | tail -1)" 2>/dev/null | cut -f1); need=$(( ${last:-0} * 2 ))
   free=$(df -B1 --output=avail "$DIR" | tail -1)
   if [ "$need" -gt "$free" ]; then echo "$(date '+%F %T') FAIL not enough space in $DIR (need ~$((need/1048576)) MB, free $((free/1048576)) MB)" | tee "$ST"; rmdir "$set"
+    yc-log ERROR backup "$(cut -d' ' -f3- "$ST")"
     [ -x /usr/local/sbin/yc-notify ] && /usr/local/sbin/yc-notify -t vm.odoo.backup.failed -T "BACKUP FAIL disk full" -p 4 -g floppy_disk,warning,odoo -f area=odoo-backup -l "result  $(cat "$ST")" >/dev/null 2>&1; exit 1; fi
-  local list; list=$(dbs) || { echo "$(date '+%F %T') FAIL cannot list databases" | tee "$ST"; rmdir "$set"; exit 1; }
+  local list; list=$(dbs) || { echo "$(date '+%F %T') FAIL cannot list databases" | tee "$ST"; rmdir "$set"; yc-log ERROR backup "cannot list databases"; exit 1; }
   for d in $list; do
     n=$((n+1))
     if dump "$d" "$set/$d.dump"; then echo "dump  $d $(du -h "$set/$d.dump" | cut -f1)"; else echo "FAIL  dump $d"; fail=$((fail+1)); fi
@@ -1274,6 +1402,9 @@ run(){
   find "$DIR" -mindepth 1 -maxdepth 1 -type d -name '20*' -mtime +"$((KEEP-1))" -print -exec rm -rf {} + | sed 's/^/expired /'
   local r=OK; [ $fail -gt 0 ] && r="FAIL ($fail errors)"; [ $n -eq 0 ] && r="WARN no databases"
   echo "$(date '+%F %T') $r set $set size $(du -sh "$set" | cut -f1) dbs $n keep ${KEEP}d sets $(ls -d "$DIR"/20* 2>/dev/null | wc -l)" | tee "$ST"
+  yc-log "$([ "$r" = OK ] && echo OK || echo ERROR)" backup "$(cut -d' ' -f3- "$ST")"
+  # routine OK goes to the webhooks only (turns a red backup green), failures also to the phone
+  [ "$r" = OK ] && [ -x /usr/local/sbin/yc-notify ] && /usr/local/sbin/yc-notify -t vm.odoo.backup.ok -T "BACKUP OK" --no-ntfy -f area=odoo-backup -f status=ok -l "result  $(cat "$ST")" >/dev/null 2>&1
   if [ "$r" != OK ] && [ -x /usr/local/sbin/yc-notify ]; then
     /usr/local/sbin/yc-notify -t vm.odoo.backup.failed -T "BACKUP $r" -p 4 -g floppy_disk,warning,odoo -f area=odoo-backup -f status=failed -l "result  $(cat "$ST")" -l "log     /var/log/yc-odoo-backup.log" >/dev/null 2>&1
   fi
@@ -1310,7 +1441,10 @@ set -uo pipefail
 LOG=/var/log/yc-odoo-deploy.log
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 cd /tmp || exit 1
-say(){ echo "[$(date +%F' '%T)] addon $*" | tee -a "$LOG"; }
+say(){ echo "[$(date +%F' '%T)] addon $*" | tee -a "$LOG"
+  local c=${1%%:*} l=INFO; case "$c" in salt|acronis) ;; *) c=addon;; esac
+  case "$*" in *FAILED*|*failed*) l=ERROR;; *JOINED*|*registered*|*CONFIGURED*) l=OK;; *WAITING*|*WAIT*|*skipped*) l=WARN;; esac
+  yc-log "$l" "$c" "${*#*: }"; }
 N(){ [ -x /usr/local/sbin/yc-notify ] && /usr/local/sbin/yc-notify "$@" >>"$LOG" 2>&1; true; }
 fetch(){   # URL OUT : download, and check URL.sha256 when the server publishes one
   curl -fsSL --retry 3 --connect-timeout 20 -m 300 -o "$2" "$1" || return 1
@@ -1380,7 +1514,7 @@ BH=${BACKUP_TIME%:*}; BM=${BACKUP_TIME#*:}
     echo "0 8 * * * root odoo-ssl check >> /var/log/yc-odoo-ssl.log 2>&1"
   fi; } > /etc/cron.d/yallacloud-odoo
 chmod 644 /etc/cron.d/yallacloud-odoo
-printf '/var/log/yc-odoo-backup.log /var/log/yc-odoo-ssl.log /var/log/yc-notify.log /var/log/yc-notify.events.jsonl {\n  monthly\n  rotate 12\n  compress\n  missingok\n  notifempty\n}\n' > /etc/logrotate.d/yc-odoo-tools
+printf '/var/log/yc-odoo-backup.log /var/log/yc-odoo-ssl.log /var/log/yc-notify.log /var/log/yc-notify.events.jsonl /var/log/yallacloud/*.log /var/log/yallacloud/*.jsonl {\n  monthly\n  rotate 12\n  compress\n  missingok\n  notifempty\n}\n' > /etc/logrotate.d/yc-odoo-tools
 say "backups: $BACKUP_DIR daily $BACKUP_TIME, keep $BACKUP_KEEP_DAYS days; cert renew 03:15/15:15, cert check 08:00 (/etc/cron.d/yallacloud-odoo)"
 
 # persist effective config (no secrets) for re-runs, odoo-domain, odoo-backup, yc-notify
@@ -1417,6 +1551,8 @@ echo "postgres    : $DB_HOST:5432  role odoo / $DB_PASS"
 fi
 echo "backups     : odoo-backup list | run | restore <set> <db> --yes   ($BACKUP_DIR, daily $BACKUP_TIME, $BACKUP_KEEP_DAYS days)"
 echo "add-ons     : salt $ENABLE_SALT, acronis $([ "$ENABLE_ACRONIS" = yes ] && [ -n "$ACRONIS_TOKEN" ] && echo "yes ($ACRONIS_REGION)" || echo "skipped")   (background; yc-addons status)"
+echo "logs        : yallacloud logs  (summary: build steps, messages sent, day-2 jobs, problems + fixes)"
+echo "            : /var/log/yallacloud/odoo.log (central)  errors.log  odoo.jsonl  journalctl -t yallacloud-odoo"
 echo "deploy log  : /var/log/yc-odoo-deploy.log   status: /var/log/yc-odoo-deploy.status"
 } > "$INFO/handover.txt"
 umask 022
@@ -1427,7 +1563,8 @@ echo; echo "  YallaCloud Odoo 20 - role $(. /etc/yallacloud/odoo.conf.env; echo 
 echo "  Deploy: $(cat /var/log/yc-odoo-deploy.status 2>/dev/null)"
 [ -s /var/lib/yallacloud/ssl-warn ] && cat /var/lib/yallacloud/ssl-warn
 grep -q FAIL /var/lib/yallacloud/backup.status 2>/dev/null && echo "  BACKUP: $(cat /var/lib/yallacloud/backup.status)"
-echo "  Credentials: /root/odoo-info/handover.txt   Full picture: yallacloud"; echo
+[ -s /var/log/yallacloud/errors.log ] && echo "  Problems logged: $(wc -l < /var/log/yallacloud/errors.log) - see: yallacloud logs"
+echo "  Credentials: /root/odoo-info/handover.txt   Full picture: yallacloud   Logs: yallacloud logs"; echo
 EOF
 chmod 755 /etc/update-motd.d/99-yallacloud-odoo
 # == 9b. 'yallacloud' command: the whole picture of this server for a tech or the client
@@ -1435,6 +1572,8 @@ echo "yc-odoo20-install v$VER installed $(date '+%F %T %Z')" > /etc/yallacloud/o
 cat > /usr/local/sbin/yallacloud <<'YCEOF'
 #!/bin/bash
 # yallacloud - what is installed here and how it is set up (STACK4-61). --secrets also prints passwords (root).
+# yallacloud logs [--errors|--all|-c PART|--follow|--json|--deploy] - the central log, summary first
+[ "${1:-}" = logs ] && { shift; exec /usr/local/sbin/yc-logs "$@"; }
 . /etc/yallacloud/odoo.conf.env 2>/dev/null
 INFO=/root/odoo-info; C=/etc/odoo/odoo.conf
 h(){ printf '\n== %s\n' "$1"; }; kv(){ printf '  %-18s %s\n' "$1" "$2"; }
@@ -1500,6 +1639,8 @@ h "Reporting (ntfy + ERP webhook)"
 h "Logs and retention"
 kv odoo "/var/log/odoo/odoo-server.log (weekly, 8 kept)"
 kv nginx "/var/log/nginx/ (daily, 14 kept)"
+kv central "/var/log/yallacloud/odoo.log - ONE line per event, deploy + day-2 (read: yallacloud logs)"
+kv errors "/var/log/yallacloud/errors.log ($(wc -l < /var/log/yallacloud/errors.log 2>/dev/null || echo 0) warnings/errors), json: odoo.jsonl, journal: journalctl -t yallacloud-odoo"
 kv deploy "/var/log/yc-odoo-deploy.log (userdata + installer + cloud-init), status /var/log/yc-odoo-deploy.status"
 kv tools "/var/log/yc-odoo-backup.log, yc-odoo-ssl.log, yc-notify.log (monthly, 12 kept); webhook bodies + ERP answers /var/log/yc-notify.events.jsonl"
 kv journal "$(journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*[KMGT]')"
@@ -1513,7 +1654,7 @@ kv "odoo-backup" "list | run | restore <set> <db> --yes"
 kv "yc-addons" "status | salt | acronis   (re-run the Salt join / Acronis agent)"
 kv "yc-notify" "--show | --test   (switches: ENABLE_NTFY / ENABLE_WEBHOOK in /etc/yallacloud/odoo.conf.env)"
 kv "yc-odoo-install" "re-run the installer (answers: /etc/yallacloud/odoo.conf.env)"
-kv "logs" "journalctl -u odoo -f ; tail -f /var/log/odoo/odoo-server.log"
+kv "logs" "yallacloud logs (summary) | --errors | -c ssl|backup|salt|notify | --follow ; Odoo: journalctl -u odoo -f"
 kv "restart" "systemctl restart odoo nginx"
 kv "credentials" "$INFO/handover.txt  (yallacloud --secrets)"
 [ "${1:-}" = --secrets ] && { h "Credentials"; cat "$INFO/handover.txt"; }
@@ -1524,7 +1665,7 @@ rm -f "$INFO/INSTALL-FAILED"; touch "$INFO/INSTALLED"
 # == 10. stop cloud-init re-running on CloudStack
 # Side effect: CloudStack "reset password / reset SSH key" from the UI no longer reaches this VM.
 [ "$DISABLE_CLOUD_INIT" = yes ] && touch /etc/cloud/cloud-init.disabled
-STEPS="$STEPS $STEP+"; yc_extra "$(area_of "$STEP")" ok; STEP=DONE
+STEPS="$STEPS $STEP+"; /usr/local/sbin/yc-log OK deploy "step $STEP done"; yc_extra "$(area_of "$STEP")" ok; STEP=DONE
 CERT=-; CERT_EXP=""; CRT_FILE=""
 if [ "$ROLE" != db ]; then
   case "$URL" in

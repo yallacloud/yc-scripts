@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.5.0  (2026-10-28 13:00 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.5.1  (2026-10-28 15:00 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -72,7 +72,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.5.0
+VER=1.5.1
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -93,7 +93,7 @@ cat > /usr/local/sbin/yc-log <<'YCLOGEOF'
 # Read it: yallacloud logs. Callers pass status text only - never a password. Always exits 0.
 lvl=${1:-INFO}; comp=${2:-misc}; shift 2 2>/dev/null
 case "$lvl" in INFO|OK|WARN|ERROR) ;; *) lvl=INFO;; esac
-D=/var/log/yallacloud; mkdir -p "$D" 2>/dev/null && chmod 750 "$D" 2>/dev/null
+umask 027; D=/var/log/yallacloud; mkdir -p "$D" 2>/dev/null && chmod 750 "$D" 2>/dev/null
 ts=$(date '+%F %T %z'); st=${YC_STEP:--}
 msg=$(printf '%s' "$*" | tr '\r\n\t' '   ' | cut -c1-2000)
 line=$(printf '%s | %-5s | %-9s | %-8s | %s' "$ts" "$lvl" "$comp" "$st" "$msg")
@@ -103,6 +103,7 @@ python3 -c 'import json,sys;print(json.dumps(dict(zip(("ts","level","component",
   "$ts" "$lvl" "$comp" "$st" "$(hostname)" "$msg" >> "$D/odoo.jsonl" 2>/dev/null
 pr=info; [ "$lvl" = WARN ] && pr=warning; [ "$lvl" = ERROR ] && pr=err
 logger -t yallacloud-odoo -p "user.$pr" -- "$lvl $comp $st: $msg" 2>/dev/null
+chmod 640 "$D"/*.log "$D"/*.jsonl 2>/dev/null   # root + adm only
 exit 0
 YCLOGEOF
 cat > /usr/local/sbin/yc-logs <<'YCLOGSEOF'
@@ -489,11 +490,15 @@ def send_ntfy(c, a, fx):
          'Tags': ascii_hdr(a.tags or 'yallacloud'), 'Content-Type': 'text/plain; charset=utf-8'}
     if c.get('NTFY_TOKEN'):
         h['Authorization'] = 'Bearer ' + c['NTFY_TOKEN']
-    try:
-        s, _ = post(url, '\n'.join(lines).encode('utf-8'), h, 15)
-        return 'ok %s' % s
-    except Exception as e:  # never stop the caller
-        return 'FAIL %s' % e
+    for n in (1, 2):                        # one retry: the first message often goes out while the network is still settling
+        try:
+            s, _ = post(url, '\n'.join(lines).encode('utf-8'), h, 15)
+            return 'ok %s' % s + (' (2nd try)' if n == 2 else '')
+        except Exception as e:  # never stop the caller
+            err = e
+            if n == 1:
+                time.sleep(5)
+    return 'FAIL %s' % err
 
 
 def build_event(c, a, fx, with_creds):
@@ -1700,5 +1705,5 @@ N -t vm.deploy.completed -T "OK BUILD odoo $ROLE${WARNS:+ (warnings)}" -p "$PRI"
 for a in salt acronis; do
   systemd-run --quiet --collect --unit "yc-addon-$a-$(date +%s)" /usr/local/sbin/yc-addons "$a" || warn "could not start add-on $a (run: yc-addons $a)"
 done
-say "DONE. $(grep -E '^(odoo url|postgres)' "$INFO/handover.txt" | tr '\n' ' ')"
+say "DONE. $(grep -E '^odoo url' "$INFO/handover.txt" | tr -s ' ')  - logins + passwords: $INFO/handover.txt (root only, never in the logs)"
 cat "$INFO/handover.txt"

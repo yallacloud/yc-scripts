@@ -1,0 +1,29 @@
+#cloud-config
+# YallaCloud Nextcloud - MINI userdata v1.3.4 | Ubuntu 24.04 | CloudStack KVM + VMware
+# Template: KVM LNX-Ubuntu-24.04-LTS-KVM-v263 | VMware LNX-Ubuntu-24.04-LTS-VC-v263-fix2
+# Not listed here = installer default. Result: ntfy + /root/yc-handover.json | log: yallacloud logs
+package_update: false
+write_files:
+  - path: /etc/yallacloud/nextcloud.conf
+    permissions: '0600'
+    content: |
+      FQDN=                  # blank = <ip>.sslip.io | real domain: DNS A -> public IP first
+      ADMIN_USER=admin       # Nextcloud admin (password generated)
+      SUDO_USER_NAME=chadmin
+      SUDO_PASS=             # blank = random | common: SUDO_PASS='MyPass#2026xyz'
+      TIER=standard          # basic | standard | hardened (2FA)
+      DATA_PATH=/nc_data
+      TZ_SET=Asia/Dubai
+      TARBALL_URL=https://github.com/yallacloud/yc-scripts/releases/download/nc-latest
+      NTFY_TOPIC=9890122212  # status only, blank = 9890122212
+      NOTIFY_WEBHOOK=no      # ERP: yes + WEBHOOK_SECRET
+      WEBHOOK_SECRET=
+      EXTRA_WEBHOOK_URL=     # blank = off
+      EXTRA_WEBHOOK_SECRET=
+      CS_DOMAIN=             # tenant, until Salt publishes it
+      JOIN_SALT=yes
+      ACRONIS_TOKEN=         # blank = no Acronis
+      ACRONIS_REGION=AE      # AE | SG
+      PUBLIC_IP=             # only behind NAT: the firewall public IP
+runcmd:
+  - [ sh, -c, 'mkdir -p /opt/yc-nc && curl -fsSL --retry 6 --retry-delay 10 -o /opt/yc-nc/install.sh https://raw.githubusercontent.com/yallacloud/yc-scripts/main/nextcloud/yc-nextcloud-install.sh && chmod +x /opt/yc-nc/install.sh && setsid /opt/yc-nc/install.sh </dev/null >>/var/log/yc-nextcloud-install.log 2>&1 &' ]

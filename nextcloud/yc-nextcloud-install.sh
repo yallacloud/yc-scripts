@@ -272,7 +272,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.3.3"
+NC_IVER="1.3.4"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -1262,7 +1262,7 @@ if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos --deploy-hook
   nginx -t && systemctl reload nginx
   say "certificate issued and installed"
   SSL_OK=yes
-elif [ "${FQDN_AUTO:-no}" = yes ] && grep -q 'rateLimited' "$_le_out" && _alt="${PUBLIC_IP:-$NET_IP}.sslip.io" && [ "$_alt" != "$FQDN" ]; then
+elif [ "${FQDN_AUTO:-no}" = yes ] && grep -qiE 'rateLimited|too many certificates' "$_le_out" && _alt="${PUBLIC_IP:-$NET_IP}.sslip.io" && [ "$_alt" != "$FQDN" ]; then
   # LE allows 5 certs/week per exact name: repeat deploys on one IP use them up. The dotted sslip
   # name is a different name for the same IP - move to it once (domain + cert in one step).
   warn "Let's Encrypt weekly limit reached for $FQDN - retrying once as $_alt"

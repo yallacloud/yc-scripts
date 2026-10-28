@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-pg-install.sh  v1.0.7  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
+# yc-pg-install.sh  v1.0.8  (2026-10-28 13:30 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): PostgreSQL (PGDG packages), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-64.
 # Sibling of yc-db-install.sh (MariaDB / MySQL, STACK4-62): same layout, files, yallacloud command, ERP contract.
@@ -44,7 +44,9 @@ LOCALE_SET="en_US.UTF-8"
 SALT_JOIN="yes"             # join salt.oasisstack.io (zero-input join.sh)
 ACRONIS_TOKEN=""            # blank = Acronis skipped
 ACRONIS_REGION="AE"         # AE | SG
-NTFY_URL="https://ntfy.sh/9890122212"   # no secrets are ever sent here
+NTFY_TOPIC="9890122212"     # ntfy topic for people (phone alerts, never secrets). blank = 9890122212, off = no ntfy
+NTFY_SERVER="https://ntfy.sh"   # ntfy server
+NTFY_URL=""                 # advanced: full ntfy URL, overrides NTFY_SERVER/NTFY_TOPIC (older userdata)
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""       # blank = ERP webhook skipped (carries the credentials)
 EXTRA_WEBHOOK_URL=""        # optional second webhook: one flat event per milestone (vm.<area>.<state>), never secrets (blank = off)
@@ -59,9 +61,9 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.7
+VER=1.0.8
 SCRIPT_TAG="yc-pg-install $VER"
-KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
+KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
 PGENV=/etc/yallacloud/pg.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -76,7 +78,7 @@ say(){ local p="" l; [ "$TSYNC" = 1 ] || p=" [PRESYNC up=$(cut -d. -f1 /proc/upt
 ST_JSON=/var/lib/yallacloud/deploy.status
 status_json(){ printf '{"state":"%s","result":"%s","tag":"%s","run_id":"%s","step":"%s","time":"%s","warnings":%s,"log":"%s"}\n' "$1" "${2:-}" "$DEPLOY_TAG" "$RUN_ID" "${STEP:-init}" "$(date '+%FT%T%z')" "${WARNS:-0}" "$LOG" > "$ST_JSON" 2>/dev/null || true; }
 WARNS=0; WARN_TXT=""; WARN_LIST=""
-warn(){ say "WARN: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; WARN_LIST="${WARN_LIST:+$WARN_LIST$'\n'}$*"; }   # WARN_LIST: one per line (a message may contain ';')
+warn(){ say "WARN: $*"; declare -F yc_log >/dev/null && yc_log WARN deploy warning "step ${STEP:-init}: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; WARN_LIST="${WARN_LIST:+$WARN_LIST$'\n'}$*"; }   # WARN_LIST: one per line (a message may contain ';')
 STEP=init; FAIL_REASON=""
 step(){ [ "$STEP" = init ] || echo "$(date '+%FT%T%z') $RUN_ID OK $STEP" >> /var/lib/yallacloud/steps.done; STEP=$1; say "== $1"; status_json RUNNING; }
 # apt has no low-speed abort: one degraded HTTPS connection crawled at ~11 KB/s for 10+ min (ycpg-vmw01, fresh curl = 1.8 MB/s).
@@ -90,7 +92,7 @@ aptpre(){ local u f s h n ok=0 bad=0 C=/var/cache/apt/archives
   done < <(apt-get -qq --print-uris -y "$@" 2>/dev/null | grep "^'https://apt.postgresql.org/")   # 1.0.6: PGDG only - the Ubuntu mirror is fast for apt's one pipelined connection but ~3 s per new curl connection
   [ $((ok+bad)) -gt 0 ] && say "apt prefetch (curl): $ok file(s) ok, $bad failed - apt checks the hashes"; return 0; }
 aptdl(){ local n; aptpre "$@"; for n in 1 2 3 4; do timeout 300 apt-get -y -q -d "$@" && return 0; say "apt download slow or stalled (try $n/4, 300 s) - retrying on a new connection"; done; return 1; }
-die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; [ "$STEP" = "0 inputs" ] && exit 2; exit 1; }   # 2 = bad input, no automatic retry
+die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; declare -F yc_log >/dev/null && yc_log ERROR deploy fatal "step $STEP: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; [ "$STEP" = "0 inputs" ] && exit 2; exit 1; }   # 2 = bad input, no automatic retry
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 exec 9>/var/lock/yc-deploy.lock; flock -n 9 || { echo "another yc-deploy run is active (lock /var/lock/yc-deploy.lock)"; exit 1; }
 say "yc-pg-install v$VER start (pid $$)"; status_json RUNNING
@@ -302,11 +304,12 @@ fw_db(){   # add|del CIDR
   fi
 }
 # notifications: separate, best effort, never block or fail the work
+yc_ntfy_url(){ [ -n "${NTFY_URL:-}" ] && { echo "$NTFY_URL"; return 0; }; local t=${NTFY_TOPIC:-9890122212}; [ "$t" = off ] && return 1; echo "${NTFY_SERVER:-https://ntfy.sh}/$t"; }
 yc_ntfy(){   # title priority tags message - NO secrets here
-  [ -n "${NTFY_URL:-}" ] || return 0
+  local u; u=$(yc_ntfy_url) || { NTFY_LAST=off; return 0; }
   timeout 20 curl -fsS -o /dev/null -H "Title: $1" -H "Priority: $2" -H "Tags: $3" --data-binary "$4
 time    : $(date '+%F %T %z')  ($(date -u +%FT%TZ))
-by      : $([ -n "${VER:-}" ] && echo "yc-pg-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)" "$NTFY_URL" 2>/dev/null || echo "ntfy: post failed (ignored)"
+by      : $([ -n "${VER:-}" ] && echo "yc-pg-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)" "$u" 2>/dev/null && NTFY_LAST=sent || { NTFY_LAST=failed; echo "ntfy: post failed (ignored)"; }
 }
 yc_extra(){   # yc_extra <area> <state> [error] - flat milestone event to the optional second webhook. NO secrets, one try, 15 s, never blocks
   [ -n "${EXTRA_WEBHOOK_URL:-}" ] || return 0
@@ -316,7 +319,7 @@ yc_extra(){   # yc_extra <area> <state> [error] - flat milestone event to the op
     "$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")" "$(printf '%s' "${3:-}" | tr -d '"\\' | tr '\n\r\t' '   ' | head -c 300)" \
     "$(date '+%F %T %z')" "${SCRIPT_TAG:-$(basename "$0")}")
   c=$(curl -sS -o /dev/null -w '%{http_code}' -m 15 -H @"$h" -d "$b" "$EXTRA_WEBHOOK_URL" 2>/dev/null) || true
-  rm -f "$h"; echo "extra webhook vm.$1.$2: HTTP ${c:-000}"
+  rm -f "$h"; EXTRA_LAST="HTTP ${c:-000}"; echo "extra webhook vm.$1.$2: HTTP ${c:-000}"
 }
 yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header file, never argv
   [ -n "${ERP_WEBHOOK_URL:-}" ] && [ -n "${ERP_WEBHOOK_SECRET:-}" ] || { echo "erp webhook: ERP_WEBHOOK_SECRET blank - skipped"; return 0; }
@@ -333,12 +336,89 @@ for n, f in (("X-YC-Tag", "tag"), ("X-YC-Run-Id", "run_id"), ("X-YC-Event", "eve
     case "$c" in 2??|4??) break;; esac   # 4xx = the ERP said no - retrying will not change it
     [ "$w" = 0 ] || { echo "erp webhook: HTTP $c - retry in ${w}s"; sleep "$w"; }
   done
-  echo "erp webhook: HTTP $c"
+  echo "erp webhook: HTTP $c"; ERP_LAST="HTTP $c"
   rm -f "$h"
+}
+# ---- central log for deploy AND day2: /var/log/yallacloud/events.jsonl (every event, JSON), errors.log (WARN/ERROR), journald tag YC-POSTGRESQL-DB
+YC_LOGDIR=/var/log/yallacloud; declare -A YC_MS 2>/dev/null
+yc_log(){   # yc_log LEVEL AREA STATE MESSAGE
+  local lv=$1 p=info vm sc m
+  mkdir -p "$YC_LOGDIR" 2>/dev/null; vm=$(cat /var/lib/yallacloud/vm_id 2>/dev/null || hostname); sc=${SCRIPT_TAG:-$(basename "$0")}; m=$(printf '%s' "${4:-}" | tr '\n\r\t' '   ')
+  if command -v python3 >/dev/null; then
+    YL="$lv|$2|$3|$vm|${RUN_ID:-day2}|$sc" YM="$m" python3 -c 'import json,os,socket,time; l,a,s,v,r,c=os.environ["YL"].split("|",5); print(json.dumps({"ts":time.strftime("%Y-%m-%dT%H:%M:%S%z"),"level":l,"tag":"YC-POSTGRESQL-DB","event":"vm.%s.%s"%(a,s),"host":socket.gethostname(),"vm_id":v,"run_id":r,"script":c,"msg":os.environ["YM"]}))' >> "$YC_LOGDIR/events.jsonl" 2>/dev/null
+  else printf '{"ts":"%s","level":"%s","tag":"YC-POSTGRESQL-DB","event":"vm.%s.%s","host":"%s","vm_id":"%s","run_id":"%s","script":"%s","msg":"%s"}\n' "$(date '+%FT%T%z')" "$lv" "$2" "$3" "$(hostname)" "$vm" "${RUN_ID:-day2}" "$sc" "$(printf '%s' "$m" | tr -d '"\\')" >> "$YC_LOGDIR/events.jsonl" 2>/dev/null; fi
+  case $lv in ERROR) p=err;; WARN) p=warning;; esac
+  [ "$lv" = INFO ] || printf '%s | %-5s | vm.%s.%s | %s | %s | %s\n' "$(date '+%F %T %z')" "$lv" "$2" "$3" "$(hostname -s)" "$m" "$sc" >> "$YC_LOGDIR/errors.log" 2>/dev/null
+  logger -t YC-POSTGRESQL-DB -p "user.$p" -- "[${RUN_ID:-day2}] [vm.$2.$3] $m" 2>/dev/null || true
+}
+yc_explain(){   # AREA STATE -> "what happened|what to do", plain words for non-technical readers
+  case "$1.$2" in
+    network.waiting) echo "The server cannot reach the internet yet. The build waits and tries again every ${NET_RETRY_INTERVAL:-300} seconds.|Check the gateway and firewall of this VM: outbound DNS and HTTPS (443) must be allowed.";;
+    network.ok) echo "Internet access works.|Nothing.";;
+    os.ok) echo "Operating system updated, tuned and hardened.|Nothing.";;
+    db.ok) echo "PostgreSQL is installed, tuned and accepts logins.|Nothing.";;
+    backup.ok) echo "Database backup finished.|Nothing.";;
+    backup.backtogreen) echo "Backups work again after an earlier failure.|Nothing.";;
+    backup.failed) echo "The database backup FAILED - the newest data is not protected.|Check free disk space (df -h) and: yallacloud errors - then run: yallacloud backup";;
+    salt.joined) echo "The server joined YallaCloud management (Salt).|Nothing.";;
+    salt.waiting) echo "The management agent (Salt) cannot reach salt.oasisstack.io yet. It tries again every 15 minutes.|Network team: allow TCP 4505 and 4506 from this server to salt.oasisstack.io.";;
+    salt.failed) echo "Joining YallaCloud management (Salt) failed.|Run: curl -fsS https://repo.oasisstack.io/salt/join.sh | sh - and read the last lines.";;
+    acronis.registered) echo "Acronis backup agent installed and registered.|Nothing.";;
+    acronis.waitforhuman) echo "The Acronis agent is installed but NOT registered.|Register it in the Acronis console, or deploy again with a valid ACRONIS_TOKEN.";;
+    acronis.failed) echo "The Acronis agent install failed.|See /var/log/yc-acronis-setup.log, then retry with a valid token.";;
+    deploy.waitforhuman) echo "The database is ready, but one item needs a person.|See NEEDS A PERSON in the summary.";;
+    deploy.completed) echo "The PostgreSQL server is ready to use.|Nothing. Credentials: yallacloud secrets (as root).";;
+    deploy.failed) echo "The build STOPPED before the server was ready.|Fix the reason, then run: yallacloud deploy resume";;
+    day2.ok) echo "An administrator changed this server.|Nothing - audit record.";;
+    day2.failed) echo "An administrator command on this server failed.|See: yallacloud errors";;
+    *) echo "Event $1.$2.|See: yallacloud events";;
+  esac
+}
+yc_step_help(){   # failed STEP -> "plain reason|what to do"
+  case "${1%% *}" in
+    0) echo "A value in the userdata EDIT block is wrong.|Fix the value named in REASON and deploy again.";;
+    1) echo "The server has no working network or internet.|Check gateway and firewall egress; on a private VM set GATEWAY= to the firewall LAN IP.";;
+    2) echo "The operating system update or base packages failed.|Check that the package mirrors are reachable, then run: yallacloud deploy resume";;
+    3|4) echo "SSH or password setup failed.|See the log, then run: yallacloud deploy resume";;
+    5) echo "Storage (data disk) setup failed.|Make sure the extra disk is empty, or set DATA_DISK=none.";;
+    6) echo "PostgreSQL could not be installed.|Check access to apt.postgresql.org / download.postgresql.org, then run: yallacloud deploy resume";;
+    7|8|12) echo "PostgreSQL did not start or did not accept logins.|See: yallacloud errors and the PostgreSQL log in /var/log/postgresql/";;
+    9) echo "Firewall setup failed.|See the log; check ufw / firewalld.";;
+    *) echo "The build stopped at step $1.|See: yallacloud errors, then run: yallacloud deploy resume";;
+  esac
+}
+yc_card(){   # WHAT HAPPENED / WHAT TO DO for everyone, technical part below. NO secrets
+  printf 'WHAT HAPPENED : %s\nSERVER        : %s (%s)\nWHAT TO DO    : %s\n\n-- technical --\nevent  : %s\ndetail : %s\nrun    : %s\nlogs   : yallacloud events | yallacloud errors | /var/log/yallacloud/' \
+    "$1" "$(hostname -s)" "$(hostname -I 2>/dev/null | awk '{print $1}')" "$2" "$3" "${4:--}" "${RUN_ID:-day2}"
+}
+yc_event(){   # yc_event AREA STATE [ERROR] -> central log + extra webhook + ntfy (people-relevant states only). The ERP gets deploy start/finish (credentials)
+  local lv=INFO wh td t pr tg
+  case $2 in failed) lv=ERROR;; waiting|waitforhuman) lv=WARN;; esac
+  IFS='|' read -r wh td <<< "$(yc_explain "$1" "$2")"
+  yc_log "$lv" "$1" "$2" "$wh${3:+ - $3}"
+  YC_MS[$1]=$2
+  yc_extra "$1" "$2" "${3:-}"
+  case "$1" in deploy) return 0;; esac   # deploy start / finish ntfy = the full summary (installer)
+  case $2 in failed) t="FAILED"; pr=4; tg="x";; waiting|waitforhuman) t="NEEDS A PERSON"; pr=4; tg="raising_hand";; backtogreen) t="BACK TO GREEN"; pr=3; tg="green_circle";;
+    ok) [ "$1" = day2 ] || return 0; t="CHANGE"; pr=2; tg="memo";; *) return 0;; esac
+  yc_ntfy "$t $1 - PostgreSQL $(hostname -s)" "$pr" "$tg,db" "$(yc_card "$wh" "$td" "vm.$1.$2" "${3:-}")"
 }
 LIBEOF
 chmod 644 "$LIB"
 . "$LIB"
+mkdir -p /var/log/yallacloud; chmod 750 /var/log/yallacloud
+ln -sfn /var/log/yc-db-deploy.log /var/log/yallacloud/deploy.log; ln -sfn /var/log/yc-db-backup.log /var/log/yallacloud/backup.log
+cat > /etc/logrotate.d/yallacloud <<'EOF'
+/var/log/yallacloud/events.jsonl /var/log/yallacloud/errors.log /var/log/yallacloud/day2.log /var/log/yc-db-backup.log {
+  weekly
+  rotate 12
+  compress
+  delaycompress
+  missingok
+  notifempty
+  create 0640 root adm
+}
+EOF
 
 TENANT=""; TENANT_SRC=""; HOST_PRIV=""; HOST_PUB=""; PUB_NIC=""; ROOTU=postgres; PGROOT=${PGROOT:-/var/lib/postgresql}
 # facts for notifications
@@ -449,6 +529,24 @@ PY
 }
 export DEPLOY_TAG RUN_ID VM_ID ID_SRC HV ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT ROOTU
 RESULT=RUNNING
+yc_summary(){   # $1=yes: add the delivery lines. Plain first, technical after. NO secrets (shown in ntfy, console, SUMMARY.txt)
+  local plain todo m n=0 w ck=""
+  if [ "$RESULT" = SUCCESS ]; then plain="READY - the PostgreSQL server can be used now"; todo=${WAIT_HUMAN:-nothing}
+  else IFS='|' read -r plain todo <<< "$(yc_step_help "$STEP")"; plain="STOPPED - $plain"; fi
+  for m in network os db backup salt acronis; do
+    case "${YC_MS[$m]:-}" in ok|joined|registered|backtogreen) ck="$ck [OK] $m";; failed) ck="$ck [FAIL] $m";; waiting|waitforhuman) ck="$ck [WAIT] $m";; *) ck="$ck [--] $m";; esac; done
+  echo "==================== YALLACLOUD DEPLOY SUMMARY ===================="
+  printf ' %-15s: %s\n' "RESULT" "$RESULT - $plain" "SERVER" "$VM_NAME  ${HOST_PUB:-${HOST_PRIV:--}}  tenant ${TENANT:--}" \
+    "DATABASE" "PostgreSQL ${DB_REAL_VERSION:-$DB_VERSION}, port $DB_PORT, open to ${DB_ALLOW:--}" \
+    "TIME" "$((DURATION/60)) min $((DURATION%60)) s, finished $(date '+%F %T %z')" "NEEDS A PERSON" "$todo"
+  [ "$RESULT" = SUCCESS ] || printf ' %-15s: %s\n' "REASON" "step $STEP - ${FAIL_REASON:-exit code}"
+  printf ' %-15s: %s\n' "CHECKLIST" "${ck# }" "WARNINGS" "$WARNS"
+  while IFS= read -r w; do [ -n "$w" ] && { n=$((n+1)); printf '   %d. %s\n' "$n" "$w"; }; done <<< "${WARN_LIST:-}"
+  printf ' %-15s: %s\n' "CREDENTIALS" "yallacloud secrets (as root) - never sent to ntfy or the extra webhook" "SALT / ACRONIS" "${SALT_STATE:-not run} / ${ACRONIS_STATE:-not run}"
+  [ "${1:-no}" = yes ] && printf ' %-15s: %s\n' "DELIVERED" "ntfy ${NTFY_LAST:-not sent} ($(yc_ntfy_url 2>/dev/null || echo off)) | extra webhook ${EXTRA_LAST:-off} | ERP webhook ${ERP_LAST:-off}"
+  printf ' %-15s: %s\n' "RUN" "$RUN_ID  yc-pg-install $VER  ${HV:-?}  step $STEP" "LOGS" "/var/log/yallacloud/ deploy.log events.jsonl errors.log | yallacloud events | yallacloud errors"
+  echo "==================================================================="
+}
 finish(){
   local rc=$? title prio tags msg typ j
   trap - EXIT INT TERM
@@ -469,14 +567,7 @@ finish(){
     for f in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
       [ -f "$f" ] && { echo "========== merged: $f (last 400 lines) =========="; tail -n 400 "$f"; }; done
   } >> "$LOG" 2>/dev/null
-  msg="vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
-ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
-engine  : $ENGINE ${DB_REAL_VERSION:-$DB_VERSION} port $DB_PORT
-allow   : ${DB_ALLOW:-?}
-step    : $STEP   warnings: $WARNS
-detail  : ${FAIL_REASON:-${WARN_TXT:-none}}
-salt    : ${SALT_STATE:-not run}   acronis: ${ACRONIS_STATE:-not run}
-log     : $LOG"
+  msg=$(yc_summary no)
   case "$RESULT" in
     SUCCESS)
       typ=vm.deploy.completed
@@ -489,12 +580,13 @@ human   : $WAIT_HUMAN"
     *) typ=vm.deploy.failed; title="FAILED BUILD $ENGINE - $VM_NAME"; prio=4; tags="x,db" ;;
   esac
   yc_ntfy "$title" "$prio" "$tags" "$msg"
-  [ "$RESULT" = SUCCESS ] && [ -n "${WAIT_HUMAN:-}" ] && yc_extra deploy waitforhuman "$WAIT_HUMAN"
-  if [ "$RESULT" = SUCCESS ]; then yc_extra deploy completed; else yc_extra deploy failed "step $STEP: ${FAIL_REASON:-exit $rc}"; fi
+  [ "$RESULT" = SUCCESS ] && [ -n "${WAIT_HUMAN:-}" ] && yc_event deploy waitforhuman "$WAIT_HUMAN"
+  if [ "$RESULT" = SUCCESS ]; then yc_event deploy completed; else yc_event deploy failed "step $STEP: ${FAIL_REASON:-exit $rc}"; fi
   j=$(mktemp); chmod 600 "$j"
   facts_json "$typ" "$title | step $STEP | warnings $WARNS${FAIL_REASON:+ | $FAIL_REASON}" "$([ "$RESULT" = SUCCESS ] && echo yes || echo no)" > "$j" && yc_erp "$j" || say "erp webhook: payload build failed - nothing sent"
   [ "$RESULT" = SUCCESS ] && install -m 600 "$j" "$INFO/handover.json"   # = the exact body the ERP received
   rm -f "$j"
+  yc_summary yes | tee "$INFO/SUMMARY.txt"; chmod 600 "$INFO/SUMMARY.txt"
   exit "$rc"
 }
 trap finish EXIT
@@ -546,6 +638,8 @@ SALT_JOIN=$(low "$SALT_JOIN"); case "$SALT_JOIN" in yes|no) ;; *) warn "SALT_JOI
 ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
 ACRONIS_REGION=$(printf '%s' "$ACRONIS_REGION" | tr 'a-z' 'A-Z' | tr -d '[:space:]'); case "$ACRONIS_REGION" in AE|SG) ;; *) warn "ACRONIS_REGION '$ACRONIS_REGION' invalid - AE"; ACRONIS_REGION=AE;; esac
 CLOUDSTACK_URL=${CLOUDSTACK_URL%/}
+NTFY_TOPIC=${NTFY_TOPIC:-9890122212}; [ "$NTFY_TOPIC" = off ] || [[ "$NTFY_TOPIC" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { warn "NTFY_TOPIC '$NTFY_TOPIC' invalid - 9890122212"; NTFY_TOPIC=9890122212; }
+[[ "${NTFY_SERVER:-}" =~ ^https?://[^[:space:]]+$ ]] || NTFY_SERVER=https://ntfy.sh; NTFY_SERVER=${NTFY_SERVER%/}
 for v in NTFY_URL ERP_WEBHOOK_URL EXTRA_WEBHOOK_URL CLOUDSTACK_URL; do [ -z "${!v}" ] || [[ "${!v}" =~ ^https?://[^[:space:]]+$ ]] || { warn "$v invalid - disabled"; printf -v "$v" '%s' ""; }; done
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 [[ "$REPO_URL" =~ ^https?:// ]] || REPO_URL="https://repo.oasisstack.io/db"
@@ -583,14 +677,14 @@ net_ok(){
 }
 waited=0
 until net_ok; do
-  say "ERROR: internet gate failed at check '$NETFAIL' - waiting ${NET_RETRY_INTERVAL}s (waited ${waited}s, max ${NET_MAX_WAIT}s, 0 = forever)"; status_json WAITING_NETWORK; yc_extra network waiting "internet gate: $NETFAIL"
+  say "ERROR: internet gate failed at check '$NETFAIL' - waiting ${NET_RETRY_INTERVAL}s (waited ${waited}s, max ${NET_MAX_WAIT}s, 0 = forever)"; status_json WAITING_NETWORK; yc_event network waiting "internet gate: $NETFAIL"
   [ "$NETFAIL" = dns ] && command -v resolvectl >/dev/null && resolvectl dns "$(ip -4 route show default | awk '{print $5; exit}')" 1.1.1.1 8.8.8.8 2>/dev/null
   fix_gateway "$GATEWAY" >/dev/null 2>&1
   [ "$NET_MAX_WAIT" -gt 0 ] && [ "$waited" -ge "$NET_MAX_WAIT" ] && die "no internet after ${waited}s (failed check: $NETFAIL)"
   sleep "$NET_RETRY_INTERVAL"; waited=$((waited+NET_RETRY_INTERVAL))
 done
 [ "$waited" -gt 0 ] && say "internet back after ${waited}s"
-yc_extra network ok
+yc_event network ok
 status_json RUNNING
 # time first (7.2): NTP sync before anything TLS-heavy, max 2 min, then ISO 8601 stamps without [PRESYNC]
 timedatectl set-timezone "$TZ_SET" 2>/dev/null; timedatectl set-ntp true 2>/dev/null
@@ -602,11 +696,17 @@ else warn "time not synchronised after 2 min - continuing on RTC time ($(date '+
 TENANT=$(yc_tenant) && TENANT_SRC="salt-inventory (CloudStack domain)" || { TENANT=""; say "tenant: not published yet (Salt inventory syncs every 5 min) - webhook sends null"; }
 say "vm: $VM_NAME uuid ${VM_UUID:-?} smbios ${SMBIOS:-?} tenant ${TENANT:-?} offering ${OFFERING:-?}"
 say "ips: private=${HOST_PRIV:-none} public=${HOST_PUB:-none} (nic ${PUB_NIC:-none}, static-nat ${MD_PUB:-none}) subnet=${PRIV_CIDR:-none} allow=$DB_ALLOW ssh=$SSH_PORT"
-yc_ntfy "START BUILD $ENGINE - $VM_NAME" 2 "hourglass,db" "vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
-ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
-engine  : $ENGINE $DB_VERSION port $DB_PORT
-os      : $PRETTY_NAME
-installer: yc-pg-install $VER"
+yc_log INFO deploy started "build started: PostgreSQL $DB_VERSION on $VM_NAME"
+yc_ntfy "START BUILD PostgreSQL - $VM_NAME" 2 "hourglass,db" "WHAT HAPPENED : A new PostgreSQL $DB_VERSION database server is being built (usually 5-10 minutes).
+SERVER        : $VM_NAME (${HOST_PUB:-${HOST_PRIV:-?}})  tenant ${TENANT:--}
+WHAT TO DO    : Nothing. You get one more message when it is ready or if it stops.
+
+-- technical --
+vm uuid : ${VM_UUID:--}
+os      : $PRETTY_NAME   hypervisor ${HV:-?}
+engine  : postgresql $DB_VERSION  port $DB_PORT  allow $DB_ALLOW
+run     : $RUN_ID   installer yc-pg-install $VER
+logs    : /var/log/yallacloud/ (deploy.log events.jsonl errors.log)"
 j=$(mktemp); chmod 600 "$j"; facts_json vm.deploy.started "deploy started $ENGINE $DB_VERSION" no > "$j" && yc_erp "$j"; rm -f "$j"
 
 # ================= 2. base OS: time, locale, repos, updates, kernel
@@ -692,7 +792,7 @@ EOF
 systemctl daemon-reload; systemctl enable --now yc-thp-off.service >/dev/null 2>&1
 
 # ================= 3. SSH: root + password, no "login as ubuntu"
-yc_extra os ok
+yc_event os ok
 step "3 ssh"
 SSHD=/etc/ssh/sshd_config.d/00-yallacloud.conf
 printf 'Port %s\nPermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nUsePAM yes\n' "$SSH_PORT" > "$SSHD"
@@ -1022,9 +1122,9 @@ res=OK; [ -n "$err" ] && res=FAILED
 printf 'RESULT=%s\nTIME=%s\nDIR=%s\nSIZE=%s\nDETAIL=%s\n' "$res" "$(date '+%F %T')" "$out" "$(du -sh "$out" | cut -f1)" "${err:-none}" > $ST
 log "backup $res -> $out ${err}"
 h=$(hostname -s)
-[ "$res" = FAILED ] && yc_ntfy "BACKUP FAILED $ENGINE $h" 4 "x,db,floppy_disk" "$err"
-[ "$res" = OK ] && [ "$prev" = FAILED ] && yc_ntfy "BACKUP BACK TO GREEN $ENGINE $h" 3 "green_circle,db" "backup ok again -> $out"
-if [ "$res" = OK ]; then yc_extra backup ok; else yc_extra backup failed "$err"; fi
+if [ "$res" = FAILED ]; then yc_event backup failed "$err ($h)"
+elif [ "$prev" = FAILED ]; then yc_event backup backtogreen "-> $out"
+else yc_event backup ok "-> $out $(du -sh "$out" 2>/dev/null | cut -f1)"; fi
 [ "$res" = OK ]
 EOF
 chmod 700 /usr/local/sbin/yc-db-backup
@@ -1032,8 +1132,8 @@ echo "${BACKUP_TIME#*:} $((10#${BACKUP_TIME%%:*})) * * * root /usr/local/sbin/yc
 chmod 644 /etc/cron.d/yc-db-backup
 printf '/var/log/yc-db-backup.log /var/log/yc-db-deploy.log {\n  monthly\n  rotate 6\n  compress\n  missingok\n  notifempty\n}\n' > /etc/logrotate.d/yallacloud-db
 RETENTION="daily ${BACKUP_KEEP_DAYS}d, weekly ${BACKUP_KEEP_WEEKS}, monthly ${BACKUP_KEEP_MONTHS} at $BACKUP_TIME -> $BACKUP_DIR"
-if /usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1; then say "first backup ok ($RETENTION; PITR $PITR_TXT)"
-else warn "first backup failed - see /var/log/yc-db-backup.log"; fi   # the backup script itself sends vm.backup.ok|failed
+if /usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1; then say "first backup ok ($RETENTION; PITR $PITR_TXT)"; YC_MS[backup]=ok
+else warn "first backup failed - see /var/log/yc-db-backup.log"; YC_MS[backup]=failed; fi   # the backup script itself sends vm.backup.ok|failed
 
 # ================= 11. handover + yallacloud command
 step "11 handover"
@@ -1109,15 +1209,49 @@ cat > /usr/local/sbin/yallacloud <<'YCEOF'
 #   yallacloud top          top 10 statements by total time (pg_stat_statements)
 #   yallacloud retune       re-calculate memory tuning after a resize, restart PostgreSQL
 #   yallacloud log          deployment log      yallacloud deploy status|resume|log
+#   yallacloud health       OK/WARN/FAIL per area   yallacloud events [N]   yallacloud errors [N]   yallacloud audit   yallacloud summary
 . /etc/yallacloud/db.conf.env 2>/dev/null; . /usr/local/lib/yc-db-common.sh
 export HOME=/root
 kv(){ printf '  %-22s %s\n' "$1" "$2"; }
 st(){ systemctl cat "$1" >/dev/null 2>&1 && systemctl is-active "$1" || echo "not installed"; }
 hd(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 need_root(){ [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }; }
+SCRIPT_TAG=yallacloud
+case "${1:-}" in allow|deny|restore|newdb|retune)   # day2 audit: who changed what -> central log + extra webhook + ntfy (never passwords)
+  YC_ACT="$1 ${2:-} ${3:-}"; YC_WHO="${SUDO_USER:-$(logname 2>/dev/null || id -un)}"
+  trap 'rc=$?; if [ $rc = 0 ]; then yc_event day2 ok "$YC_ACT by $YC_WHO"; else yc_event day2 failed "$YC_ACT by $YC_WHO (exit $rc)"; fi; printf "%s | %s | %s | exit %s\n" "$(date "+%F %T %z")" "$YC_WHO" "$YC_ACT" "$rc" >> /var/log/yallacloud/day2.log' EXIT ;;
+esac
+health(){   # one line per area: OK / WARN / FAIL + what it means
+  hd "Health at a glance"
+  hk(){ printf '  %-5s %-10s %s\n' "$1" "$2" "$3"; }
+  local b bt d e
+  systemctl is-active -q "$SVC" && hk OK database "PostgreSQL is running" || hk FAIL database "PostgreSQL is NOT running - systemctl status $SVC"
+  ss -ltnH "sport = :$DB_PORT" | grep -q . && hk OK network "accepting connections on port $DB_PORT" || hk FAIL network "nothing listens on port $DB_PORT"
+  b=$(awk -F= '/^RESULT=/{print $2}' /var/lib/yallacloud/db-backup.status 2>/dev/null); bt=$(awk -F= '/^TIME=/{print $2}' /var/lib/yallacloud/db-backup.status 2>/dev/null)
+  [ "$b" = OK ] && hk OK backup "last backup $bt" || hk FAIL backup "last backup ${b:-never} ${bt} - run: yallacloud backup"
+  [ "${WAL_ARCHIVE:-no}" = yes ] && { [ "$(sqlr "SELECT COALESCE(last_failed_time > COALESCE(last_archived_time,'epoch'),false) FROM pg_stat_archiver" 2>/dev/null)" = t ] && hk FAIL pitr "WAL archiving is failing - check $WAL_DIR disk" || hk OK pitr "point-in-time recovery archive working"; }
+  d=$(df --output=pcent "$PGDATA" 2>/dev/null | tail -1 | tr -dc 0-9); [ "${d:-0}" -lt 85 ] && hk OK disk "${d}% used" || hk WARN disk "${d}% used - add disk space soon"
+  if systemctl is-active -q salt-minion; then hk OK salt "managed by Salt ($(grep -hs '^id:' /etc/salt/minion.d/*.conf | head -1 | cut -d' ' -f2))"
+  elif [ -f /etc/cron.d/yc-salt-join ]; then hk WAIT salt "not joined yet - retry every 15 min ($(salt_ports))"; else hk -- salt "off"; fi
+  e=$(awk -v d="$(date -d '-24 hours' '+%F %T')" '$0 >= d' /var/log/yallacloud/errors.log 2>/dev/null | wc -l)
+  [ "$e" = 0 ] && hk OK problems "no warnings or errors in the last 24 h" || hk WARN problems "$e warning(s)/error(s) in the last 24 h - yallacloud errors"
+  { [ -f /var/run/reboot-required ] || { command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; }; } && hk WARN os "reboot pending (kernel/library update)" || hk OK os "no reboot pending"
+}
 case "${1:-info}" in
+health) need_root; health; echo ;;
+events) need_root; tail -n "${2:-30}" /var/log/yallacloud/events.jsonl 2>/dev/null | python3 -c '
+import json, sys
+print("%-24s %-5s %-24s %s" % ("TIME", "LEVEL", "EVENT", "WHAT HAPPENED"))
+for l in sys.stdin:
+    try: e = json.loads(l)
+    except Exception: continue
+    print("%-24s %-5s %-24s %s" % (e["ts"], e["level"], e["event"], e["msg"][:150]))' || echo "no events yet" ;;
+errors) need_root; if [ -s /var/log/yallacloud/errors.log ]; then echo "TIME                      | LEVEL | EVENT | HOST | WHAT HAPPENED | SCRIPT"; tail -n "${2:-30}" /var/log/yallacloud/errors.log; else echo "no warnings or errors logged"; fi ;;
+summary) need_root; cat /root/yc-db/SUMMARY.txt 2>/dev/null || echo "no summary yet (deploy not finished)" ;;
+audit) need_root; cat /var/log/yallacloud/day2.log 2>/dev/null || echo "no changes recorded" ;;
 info)
   need_root; detect_ips
+  health
   hd "YallaCloud PostgreSQL server - $(hostname -s)"
   kv engine "$(sqlr 'SELECT version()' 2>/dev/null | cut -d, -f1 || echo '(not answering)')"
   kv service "$SVC $(systemctl is-active "$SVC") since $(systemctl show -p ActiveEnterTimestamp --value "$SVC")"
@@ -1167,7 +1301,10 @@ info)
   kv "yallacloud top" "slowest statements"
   kv "yallacloud retune" "after a CPU/RAM change"
   kv psql "as root: psql (postgres superuser via ~/.pgpass)"
-  kv logs "/var/log/yc-db-deploy.log  /var/log/yc-db-backup.log  $LOG_DIR/"
+  kv "yallacloud health" "OK / WARN / FAIL per area"
+  kv "yallacloud events" "[N] every event (deploy + day2), plain text"
+  kv "yallacloud errors" "warnings and errors only   (audit = who changed what, summary = deploy result)"
+  kv logs "/var/log/yallacloud/ (deploy.log backup.log events.jsonl errors.log day2.log)  $LOG_DIR/  journalctl -t YC-POSTGRESQL-DB"
   kv re-install "yc-db-install (answers: /etc/yallacloud/db.conf.env)"
   echo ;;
 secrets) need_root; cat /root/yc-db/handover.txt ;;
@@ -1212,7 +1349,7 @@ deploy)
     log) journalctl -t YC-POSTGRESQL-DB -n 200 --no-pager ;;
     *) echo "usage: yallacloud deploy status|resume|log" ;;
   esac ;;
-*) sed -n '2,13p' "$0" | sed 's/^# //' ;;
+*) sed -n '2,14p' "$0" | sed 's/^# //' ;;
 esac
 YCEOF
 chmod 755 /usr/local/sbin/yallacloud
@@ -1242,24 +1379,32 @@ rm -f "$pf"
 [ "$WAL_ARCHIVE" = yes ] && { sqlr "SELECT pg_switch_wal()" >/dev/null; sleep 3; say "verify: wal archive $(sqlr "SELECT archived_count||' archived, '||failed_count||' failed' FROM pg_stat_archiver")"; }
 
 # ================= 13. agents: Salt, Acronis (never fail the DB build)
-yc_extra db ok
+yc_event db ok
 step "13 agents"
 if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
   # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
-  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock timeout 900 sh -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
+  cat > /usr/local/sbin/yc-salt-retry <<'EOF'
+#!/bin/bash
+# yc-salt-retry - cron every 15 min until JOINED: zero-input join to salt.oasisstack.io, reports the result (STACK4-64)
+. /etc/yallacloud/db.conf.env; . /usr/local/lib/yc-db-common.sh; SCRIPT_TAG=yc-salt-retry
+out=$(timeout 900 bash -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
+case "$out" in *JOINED*) yc_event salt joined; rm -f /etc/cron.d/yc-salt-join;; *) yc_log WARN salt waiting "retry: ${out:-no output} - $(salt_ports)";; esac
+EOF
+  chmod 700 /usr/local/sbin/yc-salt-retry
+  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock /usr/local/sbin/yc-salt-retry >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
   SALT_STATE="BLOCKED - $sp (retry every 15 min)"; warn "salt: $sp - join skipped, retry cron /etc/cron.d/yc-salt-join"
-  WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }open $SALT_MASTER 4505/4506 for this VM"; yc_extra salt waiting "$sp"
+  WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }open $SALT_MASTER 4505/4506 for this VM"; yc_event salt waiting "$sp"
 elif [ "$SALT_JOIN" = yes ]; then
   say "salt: $sp"
   SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
   say "salt: $SALT_STATE"; [[ "$SALT_STATE" == *JOINED* ]] || { warn "salt join not confirmed: $SALT_STATE"; SALT_STATE="not joined"; }
-  [[ "$SALT_STATE" == *JOINED* ]] && { SALT_STATE=JOINED; yc_extra salt joined; } || yc_extra salt failed "$SALT_STATE"
+  [[ "$SALT_STATE" == *JOINED* ]] && { SALT_STATE=JOINED; yc_event salt joined; } || yc_event salt failed "$SALT_STATE"
 else SALT_STATE="off (SALT_JOIN=no)"; fi
 if [ -n "$ACRONIS_TOKEN" ]; then
   YC_AT="$ACRONIS_TOKEN" YC_AR="$ACRONIS_REGION" timeout 3600 bash -c 'curl -fsSL --retry 3 --max-time 120 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s "$YC_AT" "$YC_AR"'; arc=$?   # shortcut: token is argv of the inner bash -s (acronis-setup.sh takes no env token yet)
   case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 8|10) ACRONIS_STATE="installed, NOT registered (exit $arc)"; WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }acronis needs a human (exit $arc)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac
   say "acronis: $ACRONIS_STATE"
-  case $arc in 0) yc_extra acronis registered;; 8|10) yc_extra acronis waitforhuman "$ACRONIS_STATE";; *) yc_extra acronis failed "$ACRONIS_STATE";; esac
+  case $arc in 0) yc_event acronis registered;; 8|10) yc_event acronis waitforhuman "$ACRONIS_STATE";; *) yc_event acronis failed "$ACRONIS_STATE";; esac
 else ACRONIS_STATE="off (ACRONIS_TOKEN blank)"; fi
 
 # tenant for the final webhook: a VM deployed minutes ago may not be in the Salt inventory yet (5-min sync)

@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.5.1  (2026-10-28 15:00 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.5.2  (2026-10-28 16:30 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -72,7 +72,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.5.1
+VER=1.5.2
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -1463,14 +1463,16 @@ salt_join(){
   if ! fetch "${SALT_JOIN_URL:-https://repo.oasisstack.io/salt/join.sh}" "$f"; then
     r="FAILED: cannot download ${SALT_JOIN_URL:-}"; rc=6
   else
-    r=$(sh "$f" 2>&1 </dev/null); rc=$?
+    local nt=${NTFY_TOPIC:-9890122212}; [ "${ENABLE_NTFY:-yes}" = yes ] || nt=off   # join.sh sends the salt phone message to OUR topic
+    r=$(NTFY_TOPIC="$nt" NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}" sh "$f" 2>&1 </dev/null); rc=$?
     printf '%s\n' "$r" | sed 's/^/[salt] /' >> "$LOG"
     r=$(printf '%s\n' "$r" | grep -E '^(JOINED|CONFIGURED|WAITING:|FAILED:)' | tail -1); r=${r:-FAILED: no result line (rc $rc)}
   fi
   say "salt: $r"
   local t=vm.salt.failed p=4 g=x st=failed
   case "$r" in JOINED*) t=vm.salt.joined p=3 g=white_check_mark st=joined;; WAITING*) t=vm.salt.waiting p=4 g=hourglass st=waiting;; esac
-  N -t "$t" -T "SALT ${st^^}" -p "$p" -g "$g,salt" -l "result  $r" --error "$([ "$st" = joined ] || echo "$r")" \
+  # --no-ntfy: join.sh (1.3+) already sends the phone message, also on its 15-min retries
+  N --no-ntfy -t "$t" -T "SALT ${st^^}" -p "$p" -g "$g,salt" -l "result  $r" --error "$([ "$st" = joined ] || echo "$r")" \
     -l "retry   $([ -f /etc/cron.d/yc-salt-join ] && echo '/etc/cron.d/yc-salt-join every 15 min until JOINED' || echo none needed)" \
     -l "log     /var/lib/yc-salt/last.log" -f area=salt -f status="$st" -f summary="$r"
   return "$rc"

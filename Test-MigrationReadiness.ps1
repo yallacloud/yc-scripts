@@ -72,7 +72,7 @@ $script:Notes    = New-Object System.Collections.Generic.List[string]
 $script:Report   = [ordered]@{
   schema='ycmig.readiness/1'; host=$env:COMPUTERNAME
   generatedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
-  tool='Test-MigrationReadiness.ps1'; version='1.4.0'
+  tool='Test-MigrationReadiness.ps1'; version='1.5.0'
 }
 $script:Log = New-Object System.Collections.Generic.List[string]
 
@@ -81,7 +81,7 @@ function Say {
   $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
   $script:Log.Add($stamp + '  [' + $Level + '] ' + $Text) | Out-Null
   $c = switch ($Level) { 'BLOCK' {'Red'} 'RISK' {'Yellow'} 'OK' {'Green'} 'HEAD' {'Cyan'} default {'Gray'} }
-  if ($Level -eq 'HEAD') { Write-Host ''; Write-Host ('  ' + $Text) -ForegroundColor $c }
+  if ($Level -eq 'HEAD') { Close-PremigSection; Open-PremigSection $Text; Write-Host ''; Write-Host ('  ' + $Text) -ForegroundColor $c }
   else { Write-Host ('  ' + $Text) -ForegroundColor $c }
 }
 # Inline, an L1 gets ONE SHORT LINE per finding, numbered, so the run reads as a list rather than
@@ -108,6 +108,469 @@ function Risk {
   $script:Log.Add('        full: ' + $T) | Out-Null
 }
 function Note  { param([string]$T) $script:Notes.Add($T)    | Out-Null }
+
+# ================================================================================================
+# REPORTING - each section and the verdict go to the ERP webhook, the second webhook and ntfy, so
+# the result is known off this machine the moment it exists. Nothing here changes the machine:
+# a network post is not a write, and the journal file is OFF ($script:YcJournalFile = '') because
+# this script writes nothing outside -OutDir. Every line lands in this run's report instead.
+# Settings: environment set on the line before the paste line - ERP_WEBHOOK_SECRET,
+# EXTRA_WEBHOOK_URL, EXTRA_WEBHOOK_SECRET, NTFY_TOPIC (default topic 9890122212; NTFY_TOPIC=off).
+# The block below is a VERBATIM COPY of the WEBHOOK MILESTONES block at the end of _yc-lib.ps1
+# (a source VM has no C:\Scripts); test-webhook-milestones.ps1 fails the build if they differ.
+# ================================================================================================
+# ------------------------------------------------------------------------------------
+# WEBHOOK MILESTONES (lib 2.1.0)
+#   Every action script reports how its run ended - to the ERP webhook, to the optional second
+#   webhook and to ntfy - so nobody has to open a log to find out. The hook is in Stop-YcLog, the
+#   one exit path every script already takes, so no script had to be edited to get it.
+#
+#   Settings, first non-empty wins:
+#     1. variables in the calling script: $ErpWebhookUrl  $ErpWebhookSecret  $ExtraWebhookUrl  $ExtraWebhookSecret
+#     2. environment: ERP_WEBHOOK_URL  ERP_WEBHOOK_SECRET  EXTRA_WEBHOOK_URL  EXTRA_WEBHOOK_SECRET
+#     3. C:\ProgramData\YallaCloud\yc-event.json (url, secret, token, extraUrl, extraSecret)
+#   The ERP url defaults to the public ERP endpoint. A webhook is only posted to when its secret
+#   is known; with no secrets anywhere no webhook is posted to.
+#   ntfy: $NtfyServer / $NtfyTopic, env NTFY_SERVER / NTFY_TOPIC, else yc-event.json "ntfy", else
+#   https://ntfy.sh/9890122212. NTFY_TOPIC=off turns it off. A phone is not a log: ntfy gets the
+#   states a human must act on (failed, waiting, waitforhuman) and the final word of a whole run
+#   (-Ntfy always); a nightly "ok" is not pushed.
+#
+#   Transport: HTTPS POST, flat JSON, header X-Webhook-Secret. One try per webhook, 15 s, the
+#   second webhook first and then the ERP. It never throws and never changes an exit code.
+#   The body carries no secret: secret-shaped text in the error is replaced with REDACTED.
+#   Body: type vm.<area>.<state>, vmId, hostname, ip, os, error, lastUpdated (Dubai, +04), extra.
+#
+#   ONE PLACE FOR EVERY OUTCOME ON THE VM. Whatever the network does, every milestone is also
+#   written - always, settings or not - to:
+#     C:\ProgramData\YallaCloud\logs\yc-milestones.log   one line per milestone, every command
+#     the Application event log, source YallaCloud: 1700 ok, 1701 failed, 1702 needs a human
+#     the command's own log (C:\Scripts\<command>.log), the same line
+#   The line is built to be searched. Fixed keywords, then key=value:
+#     2026-10-28 10:15:02 +04 [YALLACLOUD][YC-MILESTONE][YC-FAILED] type=vm.acronis.failed
+#       area=acronis state=failed host=WEB01 vmId=<uuid> by="acronis-register payload 2.45.0"
+#       error="exit 4: ..." sent=extra:202,erp:200,ntfy:200
+#   Find every failure on a box:  Select-String C:\ProgramData\YallaCloud\logs\yc-milestones.log -Pattern YC-FAILED
+#   The same keywords are used by the adopt script and the pre-migration check, and by the
+#   Linux kits' own logs, so one search pattern works across the estate.
+#   Not sent for read-only runs (-Help -Report -Status -Check -SelfCheck -DryRun -WhatIf ...),
+#   for read-only commands (compliance, inventory, diagnostics) or for commands that report for
+#   themselves (yc-event, the adopt script, salt-join whose join line reports vm.salt.*).
+# ------------------------------------------------------------------------------------
+$script:YcErpDefaultUrl = 'https://api.yallacloud.net/api/v1/webhooks/cloudstack'
+$script:YcMsCfgFile   = 'C:\ProgramData\YallaCloud\yc-event.json'
+$script:YcNtfyDefault   = 'https://ntfy.sh/9890122212'
+$script:YcJournalFile   = 'C:\ProgramData\YallaCloud\logs\yc-milestones.log'
+$script:YcMsSkipTags  = @('yc-event','yc-compliance','yc-integrity','report-inventory','diag','rootcause',
+                            'collect-logs','vss-check','licence-report','yc-health','yallacloud','command-name',
+                            'adopt-migrated-vm','salt-join','passgen','yc-keyguard')
+$script:YcMsReadOnly  = @('Help','Report','Status','Check','SelfCheck','DryRun','WhatIf','List','Show',
+                            'Test','Plan','Preview','Audit','Info','Version','Diagnose')
+
+function Get-YcMsFirst{
+    param([object[]]$Values)
+    foreach($v in @($Values)){ if($null -ne $v -and ([string]$v).Trim()){ return ([string]$v).Trim() } }
+    return ''
+}
+
+# Pure: settings from the three sources. -Vars and -Env are hashtables so a test can feed them.
+function Resolve-YcMsConfig{
+    param([hashtable]$Vars,[hashtable]$Env,$Json)
+    $jv = @{}
+    if($Json){ foreach($k in 'url','secret','token','extraUrl','extraSecret','ntfy'){ if($Json.$k){ $jv[$k] = [string]$Json.$k } } }
+    $c = @{
+        erpUrl      = Get-YcMsFirst @($Vars.ErpWebhookUrl,      $Env.ERP_WEBHOOK_URL,      $jv.url, $script:YcErpDefaultUrl)
+        erpSecret   = Get-YcMsFirst @($Vars.ErpWebhookSecret,   $Env.ERP_WEBHOOK_SECRET,   $jv.secret)
+        erpToken    = Get-YcMsFirst @($jv.token)
+        extraUrl    = Get-YcMsFirst @($Vars.ExtraWebhookUrl,    $Env.EXTRA_WEBHOOK_URL,    $jv.extraUrl)
+        extraSecret = Get-YcMsFirst @($Vars.ExtraWebhookSecret, $Env.EXTRA_WEBHOOK_SECRET, $jv.extraSecret)
+    }
+    # ntfy: an explicit topic wins, then yc-event's configured url, then the estate default.
+    $topic  = Get-YcMsFirst @($Vars.NtfyTopic, $Env.NTFY_TOPIC)
+    $server = (Get-YcMsFirst @($Vars.NtfyServer, $Env.NTFY_SERVER, 'https://ntfy.sh')).TrimEnd('/')
+    if($topic -eq 'off'){ $c.ntfyUrl = '' }
+    elseif($topic){ $c.ntfyUrl = $(if($topic -match '^[A-Za-z0-9_-]{1,64}$'){ $server + '/' + $topic } else { '' }) }
+    else{ $c.ntfyUrl = Get-YcMsFirst @($jv.ntfy, $script:YcNtfyDefault) }
+    foreach($k in 'erpUrl','extraUrl','ntfyUrl'){ if($c[$k] -and $c[$k] -notmatch '^https://[^\s"'']+$'){ $c[$k] = '' } }
+    return $c
+}
+
+function Get-YcMsConfig{
+    $vars = @{}
+    foreach($n in 'ErpWebhookUrl','ErpWebhookSecret','ExtraWebhookUrl','ExtraWebhookSecret','NtfyServer','NtfyTopic'){
+        $x = Get-Variable -Name $n -ValueOnly -ErrorAction SilentlyContinue
+        if($x){ $vars[$n] = [string]$x }
+    }
+    $envs = @{ ERP_WEBHOOK_URL = $env:ERP_WEBHOOK_URL; ERP_WEBHOOK_SECRET = $env:ERP_WEBHOOK_SECRET
+               EXTRA_WEBHOOK_URL = $env:EXTRA_WEBHOOK_URL; EXTRA_WEBHOOK_SECRET = $env:EXTRA_WEBHOOK_SECRET
+               NTFY_SERVER = $env:NTFY_SERVER; NTFY_TOPIC = $env:NTFY_TOPIC }
+    $j = $null
+    try{ if(Test-Path -LiteralPath $script:YcMsCfgFile){ $j = (Get-Content -LiteralPath $script:YcMsCfgFile -Raw) | ConvertFrom-Json } }catch{ $j = $null }
+    return (Resolve-YcMsConfig -Vars $vars -Env $envs -Json $j)
+}
+
+# Pure: one line, at most 300 characters, every known secret and every secret-shaped value gone.
+function ConvertTo-YcMsError{
+    param([string]$Text,[string[]]$Secrets)
+    if(-not $Text){ return '' }
+    $t = ($Text -replace '\s+',' ').Trim()
+    foreach($s in @($Secrets)){ if($s -and $s.Length -ge 4){ $t = $t.Replace($s,'REDACTED') } }
+    $t = [regex]::Replace($t,'(?i)\b(password|passwd|pwd|secret|token|apikey|api[_-]?key|dsn|connectionstring|productkey|key)(\s*[=:]\s*)("[^"]*"|''[^'']*''|\S+)','${1}${2}REDACTED')
+    if($t.Length -gt 300){ $t = $t.Substring(0,297) + '...' }
+    return $t
+}
+
+# Pure: the flat body. Area and state are reduced to [a-z0-9-] and [a-z].
+function New-YcMsBody{
+    param([string]$Area,[string]$State,[string]$Err,[string]$Tag,[hashtable]$Id,[datetime]$UtcNow = [datetime]::UtcNow)
+    $a = ([string]$Area).ToLower() -replace '[^a-z0-9-]',''
+    $s = ([string]$State).ToLower() -replace '[^a-z]',''
+    return [ordered]@{
+        type        = ('vm.' + $a + '.' + $s)
+        vmId        = [string]$Id.vmId
+        hostname    = [string]$Id.hostname
+        ip          = [string]$Id.ip
+        os          = [string]$Id.os
+        error       = [string]$Err
+        lastUpdated = ($UtcNow.AddHours(4).ToString('yyyy-MM-dd HH:mm:ss') + ' +04')
+        extra       = [string]$Tag
+    }
+}
+
+# Pure: which area a command reports as; '' = this command does not report.
+function Get-YcMsArea{
+    param([string]$Tag)
+    $t = ([string]$Tag).ToLower()
+    if(-not $t -or $script:YcMsSkipTags -contains $t){ return '' }
+    switch($t){
+        'acronis-register' { return 'acronis' }
+        'set-local-wsus'   { return 'wsus' }
+        'activate-windows' { return 'license' }
+        'activate-sql'     { return 'sqllicense' }
+        'install-sql'      { return 'sql' }
+        'fix-deploy'       { return 'fixdeploy' }
+    }
+    $a = ($t -replace '[^a-z0-9-]','')
+    if($a -eq 'deploy'){ return '' }     # vm.deploy.* is the ERP's build lifecycle; only a build sends it
+    return $a
+}
+
+# Pure: the state for an exit code. 3010 / 1641 are Windows' "done, reboot to finish".
+function Get-YcMsState{
+    param([string]$Area,[int]$Code)
+    if($Area -eq 'acronis'){
+        if($Code -eq 0){ return 'registered' }
+        if($Code -eq 3){ return 'waitforhuman' }      # installed and running, the installer wants a reboot
+        return 'failed'
+    }
+    if(@(0,3010,1641) -contains $Code){ return 'ok' }
+    return 'failed'
+}
+
+function Test-YcMsReadOnly{
+    param([string[]]$Names)
+    foreach($n in @($Names)){ if($script:YcMsReadOnly -contains $n){ return $true } }
+    return $false
+}
+
+function Get-YcMsIdentity{
+    if($script:YcMsId){ return $script:YcMsId }
+    $id = @{ vmId = ''; hostname = (Get-YcMsFirst @($env:COMPUTERNAME, [Environment]::MachineName)); ip = ''; os = '' }
+    # yc-event's resolved identity first: it is what the ERP already knows this VM as.
+    try{
+        $f = 'C:\ProgramData\YallaCloud\vm-facts.json'
+        if(Test-Path -LiteralPath $f){ $v = [string](((Get-Content -LiteralPath $f -Raw) | ConvertFrom-Json).vmId); if($v -match '^[0-9a-fA-F-]{36}$'){ $id.vmId = $v.ToLower() } }
+    }catch{}
+    if(-not $id.vmId){
+        try{
+            $u = [string](Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop).UUID
+            if($u -match '^[0-9a-fA-F-]{36}$' -and $u -notmatch '^[0-]+$' -and $u -notmatch '^[fF-]+$'){ $id.vmId = $u.ToLower() }
+        }catch{}
+    }
+    if(-not $id.vmId){ $id.vmId = $id.hostname }
+    try{
+        $id.ip = [string](@(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop |
+                  ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '127.*' -and $_ -notlike '169.254.*' }) | Select-Object -First 1)
+    }catch{}
+    try{ $id.os = [string](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption }catch{}
+    $script:YcMsId = $id
+    return $id
+}
+
+function Get-YcMsTag{
+    $v = ''
+    try{
+        $f = 'C:\Scripts\yc-payload-version.txt'
+        if(Test-Path -LiteralPath $f){ $m = Select-String -LiteralPath $f -Pattern '^payload_version\s*=\s*(\S+)' | Select-Object -First 1; if($m){ $v = $m.Matches[0].Groups[1].Value } }
+    }catch{}
+    return ([string]$script:YcTag + $(if($v){ ' payload ' + $v } else { '' }))
+}
+
+function Send-YcMsPost{
+    param([string]$Url,[hashtable]$Headers,[string]$Json)
+    try{
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $r = Invoke-WebRequest -Uri $Url -Method Post -Body $Json -Headers $Headers -ContentType 'application/json' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+        return [string][int]$r.StatusCode
+    }catch{
+        $c = ''
+        try{ if($_.Exception.Response){ $c = [string][int]$_.Exception.Response.StatusCode } }catch{}
+        if($c){ return $c }
+        return 'no answer'
+    }
+}
+
+# Pure: the keyword for a state. Three, so a search for one finds every command's result.
+function Get-YcMsKeyword{
+    param([string]$State)
+    $s = ([string]$State).ToLower()
+    if($s -eq 'failed'){ return 'YC-FAILED' }
+    if(@('waiting','waitforhuman') -contains $s){ return 'YC-WAITING' }
+    return 'YC-OK'
+}
+
+# Pure: the journal line. Values are quoted where they can contain spaces; quotes inside are dropped.
+function Format-YcMsLine{
+    param($Body,[string]$Sent)
+    $st = ([string]$Body.type -split '\.')[-1]
+    $area = (([string]$Body.type -split '\.') | Select-Object -Skip 1 -First 1)
+    $q = { param($v) '"' + ([string]$v -replace '"','') + '"' }
+    return ($Body.lastUpdated + ' [YALLACLOUD][YC-MILESTONE][' + (Get-YcMsKeyword $st) + '] type=' + $Body.type +
+            ' area=' + $area + ' state=' + $st + ' host=' + $Body.hostname + ' vmId=' + $Body.vmId + ' ip=' + $Body.ip +
+            ' by=' + (& $q $Body.extra) + ' error=' + (& $q $Body.error) + ' sent=' + $(if($Sent){ $Sent } else { 'none' }))
+}
+
+function Write-YcMsJournal{
+    # $script:YcJournalFile '' = no file (the pre-migration check writes nothing outside its
+    # report). $script:YcMsSink = a scriptblock { param($line,$keyword) } for a script that has
+    # its own logger; otherwise the house Write-YcLog.
+    param($Body,[string]$Sent)
+    $line = Format-YcMsLine -Body $Body -Sent $Sent
+    $kw = Get-YcMsKeyword (([string]$Body.type -split '\.')[-1])
+    if($script:YcJournalFile){
+        try{
+            $d = Split-Path -Parent $script:YcJournalFile
+            if(-not (Test-Path -LiteralPath $d)){ New-Item -ItemType Directory -Path $d -Force | Out-Null }
+            if((Test-Path -LiteralPath $script:YcJournalFile) -and (Get-Item -LiteralPath $script:YcJournalFile).Length -gt 5MB){
+                Move-Item -LiteralPath $script:YcJournalFile -Destination ($script:YcJournalFile + '.1') -Force -ErrorAction SilentlyContinue
+            }
+            Add-Content -LiteralPath $script:YcJournalFile -Value $line -Encoding ascii -ErrorAction Stop
+        }catch{}
+    }
+    $lv = switch($kw){ 'YC-FAILED' {'ERROR'} 'YC-WAITING' {'WARN'} default {'OK'} }
+    if($script:YcMsSink){ try{ & $script:YcMsSink $line $kw }catch{} }
+    else{ try{ Write-YcLog $line $lv }catch{} }
+    try{
+        $id = switch($kw){ 'YC-FAILED' {1701} 'YC-WAITING' {1702} default {1700} }
+        Write-YcEvent $line $(if($lv -eq 'OK'){ 'INFO' } else { $lv }) $id
+    }catch{}
+}
+
+# Pure: should this state reach a phone? auto = only what a human must act on.
+function Test-YcMsNtfy{
+    param([string]$State,[string]$Mode = 'auto')
+    if($Mode -eq 'always'){ return $true }
+    if($Mode -eq 'never'){ return $false }
+    return (@('failed','waiting','waitforhuman') -contains ([string]$State).ToLower())
+}
+
+# Pure: words a non-technical reader understands, for an area and for a state.
+function Get-YcMsLabel{
+    param([string]$Area)
+    $a = ([string]$Area).ToLower()
+    $known = @{
+        'salt'='Salt management agent'; 'salt-register'='Salt agent install'; 'acronis'='Acronis backup agent'
+        'wsus'='Windows Update (local WSUS)'; 'winupdate'='Windows Update'; 'license'='Windows licence'
+        'sqllicense'='SQL Server licence'; 'sql'='SQL Server install'; 'fixdeploy'='Deployment fixes'
+        'backup-sql'='SQL backup'; 'restore-sql'='SQL restore'; 'premig'='Pre-migration check'; 'adopt'='Adoption of a migrated VM'
+        'deploy'='VM deployment'; 'grow-disk'='Disk extension'; 'set-firewall'='Firewall rules'; 'set-time'='Time sync'
+        'rotate-password'='Password rotation'; 'vmware-tools'='VMware Tools'; 'install-dotnet'='.NET install'
+    }
+    if($known.ContainsKey($a)){ return $known[$a] }
+    if($a -like 'adopt-*'){ return ('Adopt step: ' + $a.Substring(6)) }
+    if($a -like 'premig-*'){ return ('Pre-migration: ' + $a.Substring(7)) }
+    if($a -like 'fixdeploy-*'){ return ('Deployment fix: ' + $a.Substring(10)) }
+    return $a
+}
+function Get-YcMsStateWords{
+    param([string]$State)
+    switch(([string]$State).ToLower()){
+        'failed'       { return 'FAILED - action needed' }
+        'waiting'      { return 'WAITING - will retry by itself' }
+        'waitforhuman' { return 'NEEDS A HUMAN - read the reason' }
+        'joined'       { return 'OK - joined' }
+        'registered'   { return 'OK - registered' }
+        'completed'    { return 'COMPLETED' }
+        'backtogreen'  { return 'BACK TO GREEN' }
+    }
+    return 'OK'
+}
+
+# Pure: title / priority / tags / text for the ntfy push. Built for two readers: the first line
+# and the title tell anyone what happened; the labelled block below tells an engineer where.
+function New-YcMsNtfy{
+    param($Body,[string]$Log = '')
+    $st   = ([string]$Body.type -split '\.')[-1]
+    $area = (([string]$Body.type -split '\.') | Select-Object -Skip 1 -First 1)
+    $what = Get-YcMsLabel $area
+    $p = '3'; $tg = 'white_check_mark'
+    if($st -eq 'failed'){ $p = '5'; $tg = 'rotating_light' }
+    elseif(@('waiting','waitforhuman') -contains $st){ $p = '4'; $tg = 'warning' }
+    $lines = @(
+        ('RESULT   ' + (Get-YcMsStateWords $st)),
+        ('WHAT     ' + $what),
+        ('MACHINE  ' + $Body.hostname + '  ' + $Body.ip),
+        ('OS       ' + $Body.os)
+    )
+    if($Body.error){ $lines += ('WHY      ' + $Body.error) }
+    $lines += ('WHEN     ' + ($Body.lastUpdated -replace ' \+04$',' Dubai'))
+    $lines += ('VM ID    ' + $Body.vmId)
+    $lines += ('BY       ' + $Body.extra)
+    $lines += ('EVENT    ' + $Body.type)
+    if($Log){ $lines += ('LOG      ' + $Log) }
+    if($st -eq 'failed'){ $lines += 'NEXT     read the LOG line above on the VM; every result is also in C:\ProgramData\YallaCloud\logs\yc-milestones.log' }
+    return @{ title = ((Get-YcMsStateWords $st).Split(' ')[0] + ': ' + $what + ' - ' + $Body.hostname); priority = $p; tags = $tg; text = ($lines -join "`n") }
+}
+
+function Send-YcMsNtfy{
+    param([string]$Url,$Body,[string]$Log = '')
+    try{
+        $n = New-YcMsNtfy -Body $Body -Log $Log
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $r = Invoke-WebRequest -Uri $Url -Method Post -Body $n.text -ContentType 'text/plain' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop `
+               -Headers @{ Title = $n.title; Priority = $n.priority; Tags = $n.tags }
+        return [string][int]$r.StatusCode
+    }catch{
+        $c = ''
+        try{ if($_.Exception.Response){ $c = [string][int]$_.Exception.Response.StatusCode } }catch{}
+        if($c){ return $c }
+        return 'no answer'
+    }
+}
+
+# Send-YcMilestone -Area salt -State joined [-Err 'text'] [-Tag 'script version']
+#   The one sender. Safe to call from anywhere: no settings = no-op, never throws.
+function Send-YcMilestone{
+    param([string]$Area,[string]$State,[string]$Err = '',[string]$Tag = '',[ValidateSet('auto','always','never')][string]$Ntfy = 'auto',[string]$LogPath = '')
+    try{
+        if(-not $Area -or -not $State){ return }
+        $c = Get-YcMsConfig
+        $toExtra = [bool]($c.extraUrl -and $c.extraSecret)
+        $toErp   = [bool]($c.erpUrl -and ($c.erpSecret -or $c.erpToken))
+        $toNtfy  = [bool]($c.ntfyUrl -and (Test-YcMsNtfy -State $State -Mode $Ntfy))
+        if(-not $Tag){ $Tag = Get-YcMsTag }
+        if(-not $LogPath -and $script:YcLogFile){ $LogPath = [string]$script:YcLogFile }
+        $e = ConvertTo-YcMsError -Text $Err -Secrets @($c.erpSecret,$c.erpToken,$c.extraSecret)
+        $b = New-YcMsBody -Area $Area -State $State -Err $e -Tag $Tag -Id (Get-YcMsIdentity)
+        $json = ([pscustomobject]$b) | ConvertTo-Json -Compress
+        $res = @()
+        if($toExtra){ $res += ('extra ' + (Send-YcMsPost -Url $c.extraUrl -Headers @{ 'X-Webhook-Secret' = $c.extraSecret } -Json $json)) }
+        if($toErp){
+            $h = @{}
+            if($c.erpSecret){ $h['X-Webhook-Secret'] = $c.erpSecret }
+            if($c.erpToken){ $h['Authorization'] = 'Bearer ' + $c.erpToken }
+            $res += ('erp ' + (Send-YcMsPost -Url $c.erpUrl -Headers $h -Json $json))
+        }
+        if($toNtfy){ $res += ('ntfy ' + (Send-YcMsNtfy -Url $c.ntfyUrl -Body $b -Log $LogPath)) }
+        Write-YcMsJournal -Body $b -Sent ((@($res) | ForEach-Object { ($_ -replace 'no answer','noanswer') -replace ' ',':' }) -join ',')
+    }catch{}
+}
+
+# Called from Stop-YcLog: one event for the run, unless it was read-only or reports for itself.
+function Send-YcRunMilestone{
+    param([int]$Code)
+    if($script:YcMsSent){ return }
+    $script:YcMsSent = $true
+    if(Test-YcMsReadOnly $script:YcBoundNames){ return }
+    $a = Get-YcMsArea $script:YcTag
+    if(-not $a){ return }
+    $st = Get-YcMsState -Area $a -Code $Code
+    $e = ''
+    if(@('ok','registered') -notcontains $st){ $e = ('exit ' + $Code + $(if($script:YcLastMessage){ ': ' + $script:YcLastMessage } else { '' })) }
+    Send-YcMilestone -Area $a -State $st -Err $e
+}
+
+# Save-YcMsConfig: copies the webhook settings given to THIS run (variables / environment) into
+# yc-event.json, so yc-event and every later day-2 run on this VM report too. Only the keys that
+# were given are written; the rest of the file is kept. SYSTEM + Administrators only.
+function Save-YcMsConfig{
+    try{
+        $given = @{}
+        $map = @{ url = @('ErpWebhookUrl','ERP_WEBHOOK_URL'); secret = @('ErpWebhookSecret','ERP_WEBHOOK_SECRET')
+                  extraUrl = @('ExtraWebhookUrl','EXTRA_WEBHOOK_URL'); extraSecret = @('ExtraWebhookSecret','EXTRA_WEBHOOK_SECRET') }
+        foreach($k in $map.Keys){
+            $x = Get-Variable -Name $map[$k][0] -ValueOnly -ErrorAction SilentlyContinue
+            $v = Get-YcMsFirst @($x, [Environment]::GetEnvironmentVariable($map[$k][1]))
+            if($v){ $given[$k] = $v }
+        }
+        if($given.secret -and -not $given.url){ $given.url = $script:YcErpDefaultUrl }
+        $tp = Get-YcMsFirst @((Get-Variable -Name NtfyTopic -ValueOnly -ErrorAction SilentlyContinue), $env:NTFY_TOPIC)
+        if($tp -and $tp -ne 'off' -and $tp -match '^[A-Za-z0-9_-]{1,64}$'){
+            $sv = (Get-YcMsFirst @((Get-Variable -Name NtfyServer -ValueOnly -ErrorAction SilentlyContinue), $env:NTFY_SERVER, 'https://ntfy.sh')).TrimEnd('/')
+            $given.ntfy = $sv + '/' + $tp
+        }
+        if(-not ($given.secret -or $given.extraSecret)){ return 'no webhook secret given to this run - nothing saved' }
+        $d = Split-Path -Parent $script:YcMsCfgFile
+        if(-not (Test-Path -LiteralPath $d)){ New-Item -ItemType Directory -Path $d -Force | Out-Null }
+        $o = [ordered]@{}
+        if(Test-Path -LiteralPath $script:YcMsCfgFile){
+            try{ $j = (Get-Content -LiteralPath $script:YcMsCfgFile -Raw) | ConvertFrom-Json; foreach($p in $j.PSObject.Properties){ $o[$p.Name] = $p.Value } }catch{}
+        }
+        foreach($k in $given.Keys){ $o[$k] = $given[$k] }
+        ([pscustomobject]$o) | ConvertTo-Json | Set-Content -LiteralPath $script:YcMsCfgFile -Encoding ascii
+        & icacls.exe $script:YcMsCfgFile '/inheritance:r' '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' *>$null
+        return ('saved to ' + $script:YcMsCfgFile + ': ' + ((@($given.Keys) | Sort-Object) -join ', '))
+    }catch{ return ('not saved: ' + $_.Exception.Message) }
+}
+# --- end of the copied block ---------------------------------------------------------------------
+
+$script:YcJournalFile   = ''
+$script:PremigHookTag   = 'Test-MigrationReadiness.ps1 1.5.0'
+$script:PremigLastHook  = ''
+$script:YcMsSink      = { param($line, $kw) $script:Log.Add(((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + '  [REPORT] ' + $line)) | Out-Null; $script:PremigLastHook = $line }
+$script:PremigSection   = $null
+
+# Pure: a section heading -> the area it reports as (vm.premig-<slug>.<state>).
+function Get-PremigSlug {
+  param([string]$Heading)
+  $h = $Heading.ToUpper()
+  if ($h -like 'THE MACHINE*')          { return 'machine' }
+  if ($h -like 'EVERY ATTACHED DRIVE*') { return 'drives' }
+  if ($h -like 'IO ERRORS*')            { return 'ioerrors' }
+  if ($h -like 'SQL SERVER - SKIPPED*') { return '' }
+  if ($h -like 'SQL SERVER*')           { return 'sql' }
+  if ($h -like 'THE RECORD*')           { return 'record' }
+  if ($h -like 'OFFICE*')               { return 'office' }
+  if ($h -like 'THE FALLBACK*')         { return 'backups' }
+  if ($h -like 'THE BACKUP PATH*')      { return 'vss' }
+  return (($h.ToLower() -replace '[^a-z0-9 ]','').Trim() -split ' ' | Select-Object -First 2) -join '-'
+}
+# Pure: a section's state from what it added. A blocker is red, a risk needs a human.
+function Get-PremigSectionState {
+  param([int]$NewBlockers, [int]$NewRisks)
+  if ($NewBlockers -gt 0) { return 'failed' }
+  if ($NewRisks -gt 0)    { return 'waitforhuman' }
+  return 'ok'
+}
+function Open-PremigSection {
+  param([string]$Heading)
+  $sl = Get-PremigSlug $Heading
+  if (-not $sl) { $script:PremigSection = $null; return }
+  $script:PremigSection = @{ slug = $sl; b = $script:Blockers.Count; r = $script:Risks.Count }
+}
+function Close-PremigSection {
+  $sec = $script:PremigSection
+  $script:PremigSection = $null
+  if (-not $sec) { return }
+  try {
+    $nb = $script:Blockers.Count - $sec.b; $nr = $script:Risks.Count - $sec.r
+    $st = Get-PremigSectionState -NewBlockers $nb -NewRisks $nr
+    $why = ''
+    if ($nb -gt 0) { $why = [string]$nb + ' blocker(s): ' + (Short $script:Blockers[$sec.b]) }
+    elseif ($nr -gt 0) { $why = [string]$nr + ' risk(s): ' + (Short $script:Risks[$sec.r]) }
+    Send-YcMilestone -Area ('premig-' + $sec.slug) -State $st -Err $why -Tag $script:PremigHookTag
+  } catch {}
+}
 
 if ($Help) {
 @'
@@ -479,6 +942,7 @@ if (-not $elevated) {
   Write-Host '  Right-click PowerShell, Run as administrator, and run it again.' -ForegroundColor Red
   Write-Host '  NOTHING WAS CHECKED. Do not read this as a pass.' -ForegroundColor Red
   Write-Host ''
+  Send-YcMilestone -Area 'premig' -State 'failed' -Err 'not run as administrator - nothing was checked' -Tag $script:PremigHookTag -Ntfy always
   Finish 5
   return
 }
@@ -1687,6 +2151,7 @@ if ($anyDamaged -and $vss.verdict -eq 'BROKEN') {
 # ================================================================================================
 # 6. THE VERDICT
 # ================================================================================================
+Close-PremigSection
 $verdict = 'GO'; $code = 0
 if ($script:Blockers.Count) { $verdict = 'DO NOT MIGRATE'; $code = 2 }
 elseif ($script:Risks.Count) { $verdict = 'GO WITH RISK'; $code = 1 }
@@ -1724,6 +2189,16 @@ if (-not $script:Blockers.Count -and -not $script:Risks.Count) {
 # --- write the evidence file -------------------------------------------------------------------
 $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
 $base  = Join-Path $OutDir ('migration-check-' + $env:COMPUTERNAME + '-' + $stamp)
+# --- the verdict leaves the machine: ERP webhook, second webhook, phone. Sent BEFORE the report is
+# written, so the report's log carries the delivery result too.
+$fin = $(if ($script:Blockers.Count) { 'failed' } elseif ($script:Risks.Count) { 'waitforhuman' } else { 'completed' })
+$finWhy = $verdict + $(if ($script:Blockers.Count) { ' - ' + [string]$script:Blockers.Count + ' blocker(s), first: ' + (Short $script:Blockers[0]) } elseif ($script:Risks.Count) { ' - ' + [string]$script:Risks.Count + ' risk(s), first: ' + (Short $script:Risks[0]) } else { '' })
+$script:PremigLastHook = ''
+Send-YcMilestone -Area 'premig' -State $fin -Err $finWhy -Tag $script:PremigHookTag -Ntfy always -LogPath ($base + '.txt')
+if ($script:PremigLastHook -match ' sent=(\S+)$') {
+  $sent = $Matches[1]
+  Write-Host ('  REPORTED : vm.premig.' + $fin + '   to ' + $(if ($sent -eq 'none') { 'nobody - no webhook secret given and ntfy is off' } else { ($sent -replace ':',' ' -replace ',',', ') }))
+}
 try {
   if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
   $txt = New-Object System.Collections.Generic.List[string]

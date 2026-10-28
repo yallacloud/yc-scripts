@@ -212,6 +212,22 @@ Write-YcLog ('Fixes selected: ' + ($run -join ', ') + $(if($Report){'  (REPORT O
 
 $script:Failed  = 0
 $script:Changed = 0
+
+# Each fix reports on its own (vm.fixdeploy-<fix>.ok|failed) to the webhooks, ntfy and the
+# milestone journal - see the WEBHOOK MILESTONES block in _yc-lib.ps1. The run as a whole reports
+# vm.fixdeploy.ok|failed from Stop-YcLog. A fix is failed when it added to $script:Failed.
+$script:FixOpen = ''; $script:FixFailedAt = 0
+function Step-YcFix{
+  param([string]$Name)
+  if($Report -or $SelfCheck){ return }
+  if($script:FixOpen){
+    $bad = [int]$script:Failed - [int]$script:FixFailedAt
+    Send-YcMilestone -Area ('fixdeploy-' + $script:FixOpen) -State $(if($bad -gt 0){'failed'}else{'ok'}) `
+      -Err $(if($bad -gt 0){ [string]$bad + ' step(s) failed in fix ' + $script:FixOpen + ': ' + [string]$script:YcLastMessage }else{''})
+    $script:FixOpen = ''
+  }
+  if($Name -and ($run -contains $Name)){ $script:FixOpen = $Name; $script:FixFailedAt = [int]$script:Failed }
+}
 $script:Would   = 0
 function Set-YcRegDword{
   param([string]$Path,[string]$Name,[int]$Value)
@@ -272,6 +288,7 @@ function Get-YcRouterCandidate{
 # ===========================================================================
 # FIX 1 - account lockout threshold
 # ===========================================================================
+Step-YcFix 'lockout'
 if($run -contains 'lockout'){
   Write-YcLog '--- lockout: disabling the account lockout threshold inherited from the template ---'
   $before = (& net accounts 2>&1 | Out-String)
@@ -327,6 +344,7 @@ if($run -contains 'lockout'){
 # ===========================================================================
 # FIX 2 - default gateway on an isolated network
 # ===========================================================================
+Step-YcFix 'gateway'
 if($run -contains 'gateway'){
   Write-YcLog '--- gateway: checking for the isolated-network .254 / .1 mismatch ---'
   $acted = $false
@@ -395,6 +413,7 @@ if($run -contains 'gateway'){
 # ===========================================================================
 # FIX 3 - TLS 1.2 for .NET, Windows Server 2016 and older
 # ===========================================================================
+Step-YcFix 'tls'
 if($run -contains 'tls'){
   $build = 0
   try{ $build = [int](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).BuildNumber }catch{ $build = [int][Environment]::OSVersion.Version.Build }
@@ -418,6 +437,7 @@ if($run -contains 'tls'){
 # ===========================================================================
 # FIX 4 - console logon focused on Administrator
 # ===========================================================================
+Step-YcFix 'console'
 if($run -contains 'console'){
   Write-YcLog '--- console: pointing the logon screen at .\Administrator ---'
   $lu = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI'
@@ -442,6 +462,7 @@ if($run -contains 'console'){
 # config drive, saw the network details and applied NONE of them. Proven on 5 of 5
 # registered Windows templates on 2026-08-30.
 # ===========================================================================
+Step-YcFix 'cbinit'
 if($run -contains 'cbinit'){
   Write-YcLog '--- cbinit: checking the cloudbase-init plugin list ---'
   $ncp  = 'cloudbaseinit.plugins.common.networkconfig.NetworkConfigPlugin'
@@ -584,6 +605,7 @@ function Invoke-YcSqlExec{
   }
 }
 
+Step-YcFix 'sqlrename'
 if($run -contains 'sqlrename'){
   Write-YcLog '--- sqlrename: SQL Server after a Windows computer rename ---'
 
@@ -811,6 +833,7 @@ if($run -contains 'sqlrename'){
 # without egress yet must not turn a good deployment into exit 2, so this fix never counts
 # as a failure - the task retries every 15 minutes until it joins.
 # ===========================================================================
+Step-YcFix 'salt'
 if($run -contains 'salt'){
   Write-YcLog '--- salt: joining the YallaCloud Salt master (zero input) ---'
   $sj = 'C:\Scripts\Salt-Join.ps1'
@@ -829,6 +852,7 @@ if($run -contains 'salt'){
   }
 }
 
+Step-YcFix ''
 # Report mode changed nothing, so it must not claim anything is "in place" - that is the
 # difference between a dry run and a lie.
 if($Report){

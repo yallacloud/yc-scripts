@@ -61,7 +61,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.10
+VER=1.0.11
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -543,6 +543,9 @@ yc_summary(){   # $1=yes: add the delivery lines. Plain first, technical after. 
   else IFS='|' read -r plain todo <<< "$(yc_step_help "$STEP")"; plain="STOPPED - $plain"; fi
   for m in network os db backup salt acronis; do
     case "${YC_MS[$m]:-}" in ok|joined|registered|backtogreen) ck="$ck [OK] $m";; failed) ck="$ck [FAIL] $m";; waiting|waitforhuman) ck="$ck [WAIT] $m";; *) ck="$ck [--] $m";; esac; done
+  if [ "$RESULT" != SUCCESS ]; then local fa   # the area the failed step belongs to
+    case "$STEP" in 0\ *|1\ *) fa=network;; 2\ *|3\ *|4\ *|5\ *) fa=os;; 10\ *) fa=backup;; *acronis*) fa=acronis;; 13\ *) fa=salt;; *) fa=db;; esac
+    ck=${ck/" [--] $fa"/" [FAIL] $fa"}; fi
   echo "==================== YALLACLOUD DEPLOY SUMMARY ===================="
   printf ' %-15s: %s\n' "RESULT" "$RESULT - $plain" "SERVER" "$VM_NAME  ${HOST_PUB:-${HOST_PRIV:--}}  tenant ${TENANT:--}" \
     "DATABASE" "PostgreSQL ${DB_REAL_VERSION:-$DB_VERSION}, port $DB_PORT, open to ${DB_ALLOW:--}" \

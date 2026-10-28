@@ -61,7 +61,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.9
+VER=1.0.10
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -91,6 +91,13 @@ aptpre(){ local u f s h n ok=0 bad=0 C=/var/cache/apt/archives
     [ -s "$C/$f" ] && ok=$((ok+1)) || bad=$((bad+1))
   done < <(apt-get -qq --print-uris -y "$@" 2>/dev/null | grep "^'https://apt.postgresql.org/")   # 1.0.6: PGDG only - the Ubuntu mirror is fast for apt's one pipelined connection but ~3 s per new curl connection
   [ $((ok+bad)) -gt 0 ] && say "apt prefetch (curl): $ok file(s) ok, $bad failed - apt checks the hashes"; return 0; }
+aptupd(){ local n m=${MIRROR:-}   # 1.0.10: a crawling mirror made apt-get update run 10+ min (ycpg-kvm06)
+  for n in 1 2 3; do timeout 300 apt-get update -q && return 0
+    m=$(printf '%s\n' ${APT_MIRRORS:-} | grep -vxF "${m:-none}" | head -1)
+    if [ -n "$m" ] && [ "$m" != "${MIRROR:-}" ]; then say "apt update slow or stalled (try $n/3, 300 s) - switching mirror ${MIRROR:-?} -> $m"
+      for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do [ -f "$F" ] && sed -i "s#http://${MIRROR}/ubuntu#http://${m}/ubuntu#g" "$F"; done; MIRROR=$m
+    else say "apt update slow or stalled (try $n/3, 300 s) - retrying"; fi
+  done; apt-get update -q; }
 aptdl(){ local n; aptpre "$@"; for n in 1 2 3 4; do timeout 300 apt-get -y -q -d "$@" && return 0; say "apt download slow or stalled (try $n/4, 300 s) - retrying on a new connection"; done; return 1; }
 die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; declare -F yc_log >/dev/null && yc_log ERROR deploy fatal "step $STEP: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; [ "$STEP" = "0 inputs" ] && exit 2; exit 1; }   # 2 = bad input, no automatic retry
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
@@ -727,7 +734,7 @@ if [ "$OSF" = ubuntu ]; then
   printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::ForceIPv4 "true";\nDPkg::Lock::Timeout "900";\n' > /etc/apt/apt.conf.d/99yallacloud
   mkdir -p /etc/needrestart/conf.d; echo "\$nrconf{restart} = 'a';" > /etc/needrestart/conf.d/99-yallacloud.conf
   say "apt mirror = $MIRROR"
-  apt-get update -q || die "apt update failed"
+  aptupd || die "apt update failed"
   aptdl upgrade; apt-get -y -q -o Dpkg::Options::=--force-confold upgrade || warn "apt upgrade had errors"
   BASE_PKGS="curl ca-certificates gnupg ufw chrony locales xfsprogs cron gzip fail2ban openssh-server"
   aptdl install $BASE_PKGS; apt-get -y -q install $BASE_PKGS || die "base packages failed"
@@ -911,7 +918,7 @@ if [ "$OSF" = ubuntu ]; then
     gpg --dearmor --yes -o /usr/share/keyrings/pgdg.gpg $key
     echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list
   else warn "PGDG signing key download failed (postgresql.org and $REPO_URL)"; FALLBACK=1; fi
-  [ -z "$FALLBACK" ] && { apt-get update -q && aptdl install "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR" && apt-get -y -q install "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR"; } || {
+  [ -z "$FALLBACK" ] && { aptupd && aptdl install "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR" && apt-get -y -q install "postgresql-$PG_MAJOR" "postgresql-client-$PG_MAJOR"; } || {
     warn "PostgreSQL $PG_MAJOR (PGDG) install failed - using Ubuntu's PostgreSQL 16"; rm -f /etc/apt/sources.list.d/pgdg.list; apt-get update -q
     aptdl install postgresql-16 postgresql-client-16; apt-get -y -q install postgresql-16 postgresql-client-16 || die "PostgreSQL install failed"; FALLBACK=1; PG_MAJOR=16; }
   PGBIN=/usr/lib/postgresql/$PG_MAJOR/bin; CONF_DIR=/etc/postgresql/$PG_MAJOR/main; PGDATA=$PGROOT/$PG_MAJOR/main

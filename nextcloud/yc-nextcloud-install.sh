@@ -188,8 +188,8 @@ yc_extra(){  # yc_extra <area> <state> [error] - flat milestone event to the ext
 yc_day2(){  # first line of every day2 tool: yc_day2 <tool> <area> "$@"
   [ -r /etc/yallacloud/nextcloud.conf ] && . /etc/yallacloud/nextcloud.conf
   [ -r /etc/yallacloud/nextcloud.facts ] && . /etc/yallacloud/nextcloud.facts
-  YC_PHASE=day2; YC_STEP=$1; YC_AREA=$2; shift 2
-  YC_RUN="$(hostname -s)-$(date +%Y%m%dT%H%M%S)"; YC_VER="$YC_STEP (yc-nextcloud ${NC_IVER:-})"
+  YC_STEP=$1; YC_AREA=$2; shift 2; YC_VER="$YC_STEP (yc-nextcloud ${NC_IVER:-})"
+  if [ "${YC_PHASE:-}" != deploy ]; then YC_PHASE=day2; YC_RUN="${VM_NAME:-$(hostname -s)}-$(date +%Y%m%dT%H%M%S)"; fi
   yc_log INFO "start: $YC_STEP $*"
   trap 'yc_day2_end $?' EXIT
 }
@@ -209,6 +209,7 @@ TODO     1. on the VM: sudo yallacloud logs errors
 YCLIB
 chmod 644 /usr/local/lib/yallacloud/yc-nextcloud-lib.sh
 YC_PHASE=deploy; YC_STEP=00-init; YC_RUN="$(hostname -s)-$(date +%Y%m%dT%H%M%S)"; WARNS=0; WARN_LIST=""
+export YC_PHASE YC_RUN   # a yc-nc-* tool called by the installer logs under this deploy run
 . /usr/local/lib/yallacloud/yc-nextcloud-lib.sh
 
 say()  { echo "[$(date +%H:%M:%S)] [$YC_STEP] $*"; yc_log INFO "$*"; }
@@ -271,7 +272,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.3.0"
+NC_IVER="1.3.1"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -393,6 +394,7 @@ PY
   if [ "$erp" = yes ]; then
     curl -fsS --max-time 20 -H "Content-Type: application/json" ${WEBHOOK_SECRET:+-H @<(printf 'X-Webhook-Secret: %s\n' "$WEBHOOK_SECRET")} --data-binary @"$j" "${WEBHOOK_URL}" >/root/yc-webhook-$1.resp 2>&1 || true
     install -m 600 "$j" "/root/yc-webhook-$1.json"  # root-only copy of what was sent (same secrets as yc-handover.json)
+    yc_log EVENT "ERP webhook $1 -> $(head -c 200 /root/yc-webhook-$1.resp 2>/dev/null | tr -d '\n' || echo 'no reply')"
   fi
   rm -f "$j"
 }
@@ -1593,7 +1595,8 @@ cat > "$OUT" <<EOF
 EOF
 chmod 600 "$OUT"
 # non-secret facts the day2 tools need for their log lines and alerts
-for _v in VM_ID VM_NAME VM_UUID NET_IP PUBLIC_IP ZONE TENANT TENANT_SRC CLOUDSTACK_URL TZ_SET FQDN NC_IVER; do printf '%s=%q\n' "$_v" "${!_v:-}"; done > /etc/yallacloud/nextcloud.facts
+yc_write_facts(){ for _v in VM_ID VM_NAME VM_UUID NET_IP PUBLIC_IP ZONE TENANT TENANT_SRC CLOUDSTACK_URL TZ_SET FQDN NC_IVER; do printf '%s=%q\n' "$_v" "${!_v:-}"; done > /etc/yallacloud/nextcloud.facts; }
+yc_write_facts
 chmod 644 /etc/yallacloud/nextcloud.facts
 printf '/var/log/yallacloud/*.log /var/log/yc-nextcloud-install.log {\n  weekly\n  rotate 12\n  compress\n  delaycompress\n  missingok\n  notifempty\n  create 0600 root root\n}\n' > /etc/logrotate.d/yallacloud-nextcloud
 say "DONE - handover written to $OUT"
@@ -1629,14 +1632,18 @@ fi
 say "all services healthy, all ports listening"
 rm -f /root/yc-INSTALL-FAILED; touch /root/yc-INSTALL-OK
 NC_VERSION=$(sudo -u www-data php /var/www/nextcloud/occ status 2>/dev/null | awk -F': ' '/versionstring/{print $2}')
-_todo=""
-case "$SSL_STATUS" in self-signed*) _todo="${_todo}
-         - HTTPS is TEMPORARY (browsers show a warning): point the domain's DNS to ${PUBLIC_IP:-$NET_IP}, then run: sudo yc-nc-ssl le";; esac
-case "$SALT_STATE" in FAILED*|BLOCKED*) _todo="${_todo}
-         - Monitoring (Salt) is not connected yet: it retries every 15 min by itself; if still not joined tomorrow, tell the tech team";; esac
-[ -z "$ACRONIS_TOKEN" ] && _todo="${_todo}
-         - Off-server backup (Acronis) is OFF: only the nightly local database backup runs (add an ACRONIS_TOKEN to enable)"
-if [ -z "$_todo" ] || [ "$WARNS" = 0 ]; then _st="READY - Nextcloud is installed and working"; else _st="READY WITH WARNINGS - working, but see TODO"; fi
+# tenant: the Salt who-file is published after the join - resolve again, then refresh the facts
+if [ -z "$TENANT" ] && TENANT=$(yc_tenant); then TENANT_SRC="salt-who"; fi
+yc_write_facts
+_todo=""; _note=""
+case "$SSL_STATUS" in self-signed*) _todo="${_todo:+$_todo
+         }- HTTPS is TEMPORARY (browsers show a warning): point the domain's DNS to ${PUBLIC_IP:-$NET_IP}, then run: sudo yc-nc-ssl le";; esac
+case "$SALT_STATE" in FAILED*|BLOCKED*) _todo="${_todo:+$_todo
+         }- Monitoring (Salt) is not connected yet: it retries every 15 min by itself; if still not joined tomorrow, tell the tech team";; esac
+[ "$WARNS" = 0 ] || _todo="${_todo:+$_todo
+         }- ${WARNS} warning(s) during the install: on the VM run  sudo yallacloud logs errors"
+[ -z "$ACRONIS_TOKEN" ] && _note="off-server backup (Acronis) is off - only the nightly local database backup runs (set ACRONIS_TOKEN to enable)"
+if [ -z "$_todo" ]; then _st="READY - Nextcloud is installed and working"; else _st="READY WITH WARNINGS - working, but see TODO"; fi
 case "$SSL_STATUS" in self-signed*) _https="TEMPORARY self-signed certificate (browsers warn) - see TODO";; *) _https="secure - ${SSL_STATUS}";; esac
 _plain="STATUS   ${_st}
 OPEN     https://${FQDN}${PORTSFX}/
@@ -1645,7 +1652,8 @@ HEALTH   website OK | database OK | cache OK | php OK | ports ${HTTPS_PORT} 80 $
 HTTPS    ${_https}
 BACKUP   database: every night 02:30, kept 15 days | off-server (Acronis): ${ACRONIS_TOKEN:+on}${ACRONIS_TOKEN:-off}
 ADDONS   monitoring (Salt): ${SALT_STATE}
-TODO     ${_todo:-nothing - ready to hand over to the customer}"
+TODO     ${_todo:-nothing - ready to hand over to the customer}${_note:+
+NOTE     $_note}"
 _tech="app      nextcloud ${NC_VERSION}  php ${PHPV}  data ${DATA_PATH}  ssh ${SSH_PORT}  hv ${HV:-?} (${GA_STATE:-?})
 result   SUCCESS$([ "$WARNS" = 0 ] || echo " with warnings (${WARNS})")  steps $(wc -l < /var/lib/yallacloud/nextcloud.steps 2>/dev/null || echo ?) done"
 step "17-done"; yc_status SUCCESS "$_st"

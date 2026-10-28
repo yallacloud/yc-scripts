@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.15  (2026-10-28 13:50 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.16  (2026-10-28 14:10 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -59,7 +59,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.15
+VER=1.0.16
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -1010,6 +1010,7 @@ if /usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1; then say "fir
 
 # ================= 11. handover + yallacloud command
 step "11 handover"
+PRETTY_NAME=$(. /etc/os-release; echo "$PRETTY_NAME"); VERSION_ID=$(. /etc/os-release; echo "$VERSION_ID")   # after the OS upgrade in step 2
 HOST_C=${HOST_PRIV:-$HOST_PUB}
 URI_ADMIN="mysql://$DB_ADMIN_USER:$(urlpw "$DB_ADMIN_PASS")@${HOST_PUB:-$HOST_C}:$DB_PORT/"
 URI_USER=""; [ -n "$DB_USER" ] && URI_USER="mysql://$DB_USER:$(urlpw "$DB_USER_PASS")@${HOST_PUB:-$HOST_C}:$DB_PORT/$DB_NAME"

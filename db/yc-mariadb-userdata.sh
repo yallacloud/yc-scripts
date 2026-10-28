@@ -15,7 +15,7 @@ bootcmd:
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
-# yc-mariadb-userdata.sh  v1.0.9  (2026-10-28 13:30 IST)  YallaCloud / OasisStack
+# yc-mariadb-userdata.sh  v1.0.10  (2026-10-28 14:00 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: MariaDB database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Hypervisor: CloudStack KVM or VMware, same file. VMware: use a 'VC Standard' offering (gp.* fails with 533);
@@ -66,6 +66,7 @@ INSTALLER_REF="main"       # advanced: git branch/tag of yallacloud/yc-scripts
 # ======================================================
 
 LOG=/var/log/yc-db-deploy.log; touch "$LOG"; chmod 600 "$LOG"; exec 3>&1 4>&2; exec > >(tee -a "$LOG") 2>&1
+[ -f "/usr/share/zoneinfo/$TZ_SET" ] && export TZ=$TZ_SET   # log times in local time from the first line
 RUN="deploy-$(date +%Y%m%d-%H%M%S)"; mkdir -p /var/log/yallacloud; chmod 750 /var/log/yallacloud
 say(){   # same tagged line as the installer: time | LEVEL | area | run | message  -> raw log, central log, journald (yc-db)
   local lv=INFO; case "${1:-}" in ERROR|WARN) lv=$1; shift;; esac

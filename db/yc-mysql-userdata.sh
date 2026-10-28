@@ -15,7 +15,7 @@ bootcmd:
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
-# yc-mysql-userdata.sh  v1.0.8  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
+# yc-mysql-userdata.sh  v1.0.9  (2026-10-28 13:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Oracle MySQL Community database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Hypervisor: CloudStack KVM or VMware, same file. VMware: use a 'VC Standard' offering (gp.* fails with 533);
@@ -55,7 +55,8 @@ LOCALE_SET="en_US.UTF-8"
 SALT_JOIN="yes"            # yes | no   join salt.oasisstack.io
 ACRONIS_TOKEN=""           # blank = no Acronis
 ACRONIS_REGION="AE"        # AE | SG
-NTFY_URL="https://ntfy.sh/9890122212"                          # status only, never secrets
+NTFY_URL="https://ntfy.sh"   # ntfy server (blank = ntfy off) - status only, never secrets
+NTFY_TOPIC="9890122212"      # ntfy topic (blank = 9890122212)
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""      # ERP webhook X-Webhook-Secret (blank = webhook off)
 EXTRA_WEBHOOK_URL=""       # optional second webhook (Tech Dept): milestone events, never passwords; blank = off
@@ -65,13 +66,36 @@ INSTALLER_REF="main"       # advanced: git branch/tag of yallacloud/yc-scripts
 # ======================================================
 
 LOG=/var/log/yc-db-deploy.log; touch "$LOG"; chmod 600 "$LOG"; exec 3>&1 4>&2; exec > >(tee -a "$LOG") 2>&1
-say(){ echo "[$(date '+%F %T %z')] userdata: $*"; }
-fail(){ say "FATAL: $*"; mkdir -p /root/yc-db; echo "$*" > /root/yc-db/INSTALL-FAILED; printf 'RESULT=FAILED\nTIME=%s\nSTEP=userdata\nREASON=%s\n' "$(date '+%F %T %Z')" "$*" > /var/log/yc-db-deploy.status
-  [ -n "$NTFY_URL" ] && timeout 20 curl -fsS -o /dev/null -H "Title: FAILED $ENGINE $(hostname -s)" -H "Priority: 4" -H "Tags: x,db" --data-binary "userdata: $*" "$NTFY_URL"; exit 1; }
+RUN="deploy-$(date +%Y%m%d-%H%M%S)"; mkdir -p /var/log/yallacloud; chmod 750 /var/log/yallacloud
+say(){   # same tagged line as the installer: time | LEVEL | area | run | message  -> raw log, central log, journald (yc-db)
+  local lv=INFO; case "${1:-}" in ERROR|WARN) lv=$1; shift;; esac
+  local l; l=$(printf '%s | %-5s | %-8s | %-24s | %s' "$(date '+%F %T %z')" "$lv" userdata "$RUN" "$*")
+  echo "$l"; echo "$l" >> /var/log/yallacloud/yc-db.log; [ "$lv" != INFO ] && echo "$l" >> /var/log/yallacloud/yc-db-errors.log
+  logger -t yc-db -p "user.$(case $lv in ERROR) echo err;; WARN) echo warning;; *) echo info;; esac)" -- "[$lv] [userdata] [$RUN] $*" 2>/dev/null; }
+fail(){   # early failure (before the installer runs): status file + the three outputs (extra webhook, ntfy, ERP) - no secrets
+  say ERROR "FATAL: $*"; mkdir -p /root/yc-db; echo "$*" > /root/yc-db/INSTALL-FAILED
+  printf 'RESULT=FAILED\nTIME=%s\nSTEP=userdata\nREASON=%s\n' "$(date '+%F %T %Z')" "$*" > /var/log/yc-db-deploy.status
+  local id ip os why h b; id=$(tr 'A-Z' 'a-z' 2>/dev/null < /sys/class/dmi/id/product_uuid); id=${id:-$(hostname)}
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}'); os=$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME"); why=$(printf '%s' "$*" | tr -d '"\\' | head -c 300)
+  h=$(mktemp); b=$(printf '{"type":"vm.deploy.failed","vmId":"%s","hostname":"%s","ip":"%s","os":"%s","error":"%s","lastUpdated":"%s","extra":"yc-%s-userdata"}' "$id" "$(hostname)" "$ip" "$os" "$why" "$(date '+%F %T %z')" "$ENGINE")
+  if [ -n "$EXTRA_WEBHOOK_URL" ]; then printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$EXTRA_WEBHOOK_SECRET" > "$h"; curl -fsS -m 15 -o /dev/null -H @"$h" -d "$b" "$EXTRA_WEBHOOK_URL"; fi
+  if [ -n "$ERP_WEBHOOK_SECRET" ]; then printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$ERP_WEBHOOK_SECRET" > "$h"
+    curl -fsS -m 30 -o /dev/null -H @"$h" -d "${b%\}},\"area\":\"db\",\"status\":\"FAILED\",\"steps\":\"userdata\",\"installer\":\"yc-$ENGINE-userdata\"}" "$ERP_WEBHOOK_URL"; fi
+  rm -f "$h"
+  [ -n "$NTFY_URL" ] && timeout 20 curl -fsS -o /dev/null -H "Title: FAILED BUILD $ENGINE - $(hostname -s)" -H "Priority: 5" -H "Tags: x,db" --data-binary "NOT READY - the build stopped before the installer could start: $*
+next     : check DNS / outbound 443 / GATEWAY, then redeploy (or run the userdata again as root)
+
+[ server ]
+vm       : $(hostname -s)  ($os)  ip ${ip:--}
+
+[ trace ]
+run      : $RUN   stage userdata (yc-$ENGINE-userdata)
+logs     : /var/log/yallacloud/yc-db.log  errors /var/log/yallacloud/yc-db-errors.log  (journalctl -t yc-db)" "${NTFY_URL%/}/${NTFY_TOPIC:-9890122212}"
+  exit 1; }
 case "$ENGINE" in mariadb|mysql) ;; *) fail "ENGINE='$ENGINE' - must be mariadb or mysql";; esac
 
 # gateway fix BEFORE the download: CloudStack SDN without a gateway declares .254 (dead), firewall is .1
-[ -z "$GATEWAY" ] || [[ "$GATEWAY" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { say "WARN: GATEWAY '$GATEWAY' invalid - auto"; GATEWAY=""; }
+[ -z "$GATEWAY" ] || [[ "$GATEWAY" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { say WARN "GATEWAY '$GATEWAY' invalid - auto"; GATEWAY=""; }
 priv(){ [[ "$1" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; }
 gw_ok(){ ping -c 2 -W 2 -I "$2" "$1" >/dev/null 2>&1 || ip neigh show "$1" dev "$2" 2>/dev/null | grep -qE 'REACHABLE|STALE|DELAY|PERMANENT'; }
 for _ in $(seq 1 30); do ip -o -4 addr show scope global | grep -q . && break; sleep 2; done
@@ -86,7 +110,7 @@ fi
 
 # answers for the installer (it validates everything again; re-run: yc-db-install)
 umask 077; mkdir -p /etc/yallacloud
-for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL; do
+for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL; do
   printf '%s=%q\n' "$v" "${!v}"
 done > /etc/yallacloud/db.conf.env
 umask 022
@@ -100,11 +124,11 @@ for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
   if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 -o "$OUT" "$u" \
      && curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 -o "$OUT.sha256" "$u.sha256" \
      && [ "$(sha256sum "$OUT" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$OUT.sha256")" ]; then ok=$u; break; fi
-  say "mirror failed or sha256 mismatch: $u"
+  say WARN "mirror failed or sha256 mismatch: $u"
 done
 [ -n "$ok" ] || fail "installer download failed from GitHub and repo.oasisstack.io (check DNS / outbound 443 / GATEWAY)"
 say "installer ok from $ok"
 chmod 700 "$OUT"
-exec bash "$OUT" 1>&3 2>&4   # installer logs to the same file itself
+export YC_RUN=$RUN; exec bash "$OUT" 1>&3 2>&4   # installer logs to the same file itself
 
 --YCDB-PART--

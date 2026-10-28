@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.13  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.14  (2026-10-28 13:30 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -10,7 +10,9 @@
 # Re-run any time (same answers, passwords kept): yc-db-install
 #
 # Result : /root/yc-db/handover.txt (credentials + connection strings, chmod 600) | yallacloud
-# Log    : /var/log/yc-db-deploy.log (this run + cloud-init log merged)  Status: /var/log/yc-db-deploy.status
+# Logs   : /var/log/yallacloud/yc-db.log (ONE tagged log: deploy + day-2, journalctl -t yc-db)
+#          /var/log/yallacloud/yc-db-errors.log (WARN + ERROR only)  /var/log/yc-db-deploy.log (raw deploy + cloud-init)
+# Status : /var/log/yc-db-deploy.status   Output: ntfy (status) + ERP webhook (full) + extra webhook (milestones)
 ####################
 set -uo pipefail
 umask 022
@@ -43,7 +45,8 @@ LOCALE_SET="en_US.UTF-8"
 SALT_JOIN="yes"             # join salt.oasisstack.io (zero-input join.sh)
 ACRONIS_TOKEN=""            # blank = Acronis skipped
 ACRONIS_REGION="AE"         # AE | SG
-NTFY_URL="https://ntfy.sh/9890122212"   # no secrets are ever sent here
+NTFY_URL="https://ntfy.sh"   # ntfy server (blank = ntfy off). No secrets are ever sent to ntfy
+NTFY_TOPIC=""                # blank = 9890122212
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""       # blank = ERP webhook skipped (carries the credentials)
 EXTRA_WEBHOOK_URL=""        # optional second webhook: gets a copy of every ERP event, credentials stripped (blank = off)
@@ -56,8 +59,8 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.13
-KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
+VER=1.0.14
+KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
 INFO=/root/yc-db
@@ -66,30 +69,27 @@ STATUS=/var/log/yc-db-deploy.status
 mkdir -p /etc/yallacloud "$INFO" /var/lib/yallacloud; chmod 700 /etc/yallacloud "$INFO"
 touch "$LOG"; chmod 600 "$LOG"
 exec > >(tee -a "$LOG") 2>&1
-say(){ echo "[$(date '+%F %T %z')] $*"; }
-WARNS=0; WARN_TXT=""; WARN_NL=""
-warn(){ say "WARN: $*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; WARN_NL="${WARN_NL:+$WARN_NL
-}$*"; }
-STEP=init; FAIL_REASON=""
-step(){ STEP=$1; say "== $1"; }
-die(){ FAIL_REASON="$*"; say "YC-FATAL [$STEP]: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; exit 1; }
-[ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
-say "yc-db-install v$VER start (pid $$)"
-
-# answers: defaults < cfg file < arguments (KEY=value)
-[ -f "$CFG" ] && . "$CFG"
-[ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"     # passwords of an earlier run are kept
-for a in "$@"; do
-  k=${a%%=*}
-  [[ "$a" == *=* && " $KEYS " == *" $k "* ]] || die "unknown argument '$a' (use KEY=value, keys: $KEYS)"
-  printf -v "$k" '%s' "${a#*=}"
-done
-SELF=$(readlink -f "$0" 2>/dev/null || true)
-[ -f "$SELF" ] && [ "$SELF" != /usr/local/sbin/yc-db-install ] && install -m 700 "$SELF" /usr/local/sbin/yc-db-install
-
 # ================= shared library (also used by yallacloud, yc-db-backup) =================
 cat > "$LIB" <<'LIBEOF'
 # yc-db-common.sh - YallaCloud DB helpers (STACK4-62). Sourced, never run.
+# ---- central, tagged log (deploy + day 2). One line per event:
+# 2026-10-28 13:05:01 +0400 | LEVEL | area     | run-id                 | message      LEVEL = INFO OK WARN ERROR
+YC_LOG_DIR=/var/log/yallacloud; YC_LOG=$YC_LOG_DIR/yc-db.log; YC_ERR=$YC_LOG_DIR/yc-db-errors.log
+ylog(){   # ylog LEVEL AREA message...   -> central log, error log (WARN/ERROR), journald (tag yc-db), stdout
+  local lv=$1 ar=$2 line p=info; shift 2
+  line=$(printf '%s | %-5s | %-8s | %-24s | %s' "$(date '+%F %T %z')" "$lv" "$ar" "${YC_RUN:-day2-$(date +%Y%m%d)}" "$*")
+  [ -d "$YC_LOG_DIR" ] || { mkdir -p "$YC_LOG_DIR"; chmod 750 "$YC_LOG_DIR"; }
+  printf '%s\n' "$line" >> "$YC_LOG"
+  case $lv in ERROR) p=err; printf '%s\n' "$line" >> "$YC_ERR";; WARN) p=warning; printf '%s\n' "$line" >> "$YC_ERR";; esac
+  logger -t yc-db -p "user.$p" -- "[$lv] [$ar] [${YC_RUN:-day2}] $*" 2>/dev/null
+  printf '%s\n' "$line"
+}
+yc_mark(){   # yc_mark AREA STATE [detail] - milestone: central log + extra webhook + the summary in ntfy/handover
+  local lv=OK; case $2 in failed) lv=ERROR;; waiting|waitforhuman) lv=WARN;; esac
+  ylog "$lv" "$1" "milestone vm.$1.$2${3:+ - $3}"
+  MARKS="${MARKS:+$MARKS | }$1 $2"
+  yc_extra "$1" "$2" "${3:-}" | sed 's/^/  /'
+}
 is_priv(){ [[ "$1" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.|127\.) ]]; }
 ip4(){ [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1; local n; for n in "${BASH_REMATCH[@]:1}"; do [ "$n" -le 255 ] || return 1; done; }
 cidr_ok(){ local m=${1##*/}; [[ "$1" == */* ]] && ip4 "${1%/*}" && [[ "$m" =~ ^[0-9]{1,2}$ ]] && [ "$m" -le 32 ]; }
@@ -250,11 +250,16 @@ fw_db(){   # add|del CIDR
   fi
 }
 # notifications: separate, best effort, never block or fail the work
-yc_ntfy(){   # title priority tags message - NO secrets here
+ntfy_target(){ local u=${NTFY_URL%/}; [[ "$u" =~ ^https?://[^/]+/.+ ]] && echo "$u" || echo "$u/${NTFY_TOPIC:-9890122212}"; }   # old full-URL form still works
+yc_ntfy(){   # yc_ntfy TITLE PRIORITY TAGS MESSAGE [CLICK-URL] - status only, NEVER secrets. Best effort.
   [ -n "${NTFY_URL:-}" ] || return 0
-  timeout 20 curl -fsS -o /dev/null -H "Title: $1" -H "Priority: $2" -H "Tags: $3" --data-binary "$4
-time    : $(date '+%F %T %z')  ($(date -u +%FT%TZ))
-by      : $([ -n "${VER:-}" ] && echo "yc-db-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)" "$NTFY_URL" 2>/dev/null || echo "ntfy: post failed (ignored)"
+  local c=() t; t=$(ntfy_target)
+  [ -n "${5:-}" ] && c=(-H "Click: $5" -H "Actions: view, Open in CloudStack, $5")
+  timeout 20 curl -fsS -o /dev/null -H "Title: $1" -H "Priority: $2" -H "Tags: $3" "${c[@]}" --data-binary "$4
+
+time     : $(date '+%F %T %z')  ($(date -u +%FT%TZ))
+by       : $([ -n "${VER:-}" ] && echo "yc-db-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)" "$t" 2>/dev/null \
+    && ylog INFO ntfy "sent: $1" >/dev/null || ylog WARN ntfy "post failed (ignored): $1" >/dev/null
 }
 yc_extra(){   # yc_extra <area> <state> [error] - second webhook (Tech Dept): flat milestone event, NO secrets.
   # One try, 15 s, never blocks or fails the build; sent before the ERP webhook. state: failed|ok|joined|registered|waiting|waitforhuman|completed
@@ -277,6 +282,30 @@ yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header 
 LIBEOF
 chmod 644 "$LIB"
 . "$LIB"
+YC_RUN=${YC_RUN:-deploy-$(date +%Y%m%d-%H%M%S)}; YC_AREA=init; MARKS=""
+say(){ ylog INFO "${YC_AREA:-deploy}" "$*"; }
+WARNS=0; WARN_TXT=""; WARN_NL=""
+warn(){ ylog WARN "${YC_AREA:-deploy}" "$*"; WARNS=$((WARNS+1)); WARN_TXT="${WARN_TXT:+$WARN_TXT; }$*"; WARN_NL="${WARN_NL:+$WARN_NL
+}$*"; }
+STEP=init; FAIL_REASON=""
+step(){ STEP=$1; YC_AREA=${1#* }; YC_AREA=${YC_AREA%% *}; ylog INFO "$YC_AREA" "== step $1"; }
+die(){ FAIL_REASON="$*"; ylog ERROR "${YC_AREA:-deploy}" "FATAL in step $STEP: $*"; echo "$*" > "$INFO/INSTALL-FAILED"; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
+ln -sfn "$LOG" "$YC_LOG_DIR/yc-db-deploy-raw.log" 2>/dev/null
+say "yc-db-install v$VER start (pid $$, run $YC_RUN) - tagged log $YC_LOG, raw $LOG"
+
+# answers: defaults < cfg file < arguments (KEY=value)
+[ -f "$CFG" ] && . "$CFG"
+[ -f "$INFO/secrets.env" ] && . "$INFO/secrets.env"     # passwords of an earlier run are kept
+for a in "$@"; do
+  k=${a%%=*}
+  [[ "$a" == *=* && " $KEYS " == *" $k "* ]] || die "unknown argument '$a' (use KEY=value, keys: $KEYS)"
+  printf -v "$k" '%s' "${a#*=}"
+done
+[ -f "/usr/share/zoneinfo/${TZ_SET:-}" ] && export TZ=$TZ_SET   # log times in local time from here on
+SELF=$(readlink -f "$0" 2>/dev/null || true)
+[ -f "$SELF" ] && [ "$SELF" != /usr/local/sbin/yc-db-install ] && install -m 700 "$SELF" /usr/local/sbin/yc-db-install
+
 
 TENANT=""; TENANT_SRC=""; HOST_PRIV=""; HOST_PUB=""; PUB_NIC=""
 # facts for notifications
@@ -355,7 +384,7 @@ d["service"] = {"area": "db", "catalogue": d["catalogue"], "status": st,
                             "host": e("HOST_PUB") or e("HOST_PRIV") or None, "hostPrivate": e("HOST_PRIV") or None,
                             "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP)", "hypervisor": e("HYPERVISOR") or None, "guestAgent": e("GA_STATE") or None,
                             "sshPort": num(e("SSH_PORT")), "dataDir": e("DATADIR") or None, "backupDir": e("BACKUP_DIR") or None,
-                            "backupRetention": e("RETENTION") or None, "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
+                            "backupRetention": e("RETENTION") or None, "runId": e("YC_RUN") or None, "log": e("YC_LOG") or None, "errorLog": e("YC_ERR") or None, "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
 if e("W") == "yes":   # every secret in ONE place; empty logins left out
     up = lambda u, p, **x: dict({"user": u, "password": p}, **x) if p else None
     db = {"root": up("root", e("DB_ROOT_PASS")), "admin": up(e("DB_ADMIN_USER"), e("DB_ADMIN_PASS")),
@@ -369,7 +398,7 @@ PY
 }
 HYPERVISOR=$(systemd-detect-virt 2>/dev/null || echo unknown)   # kvm | vmware | none
 SCRIPT_TAG="yc-db-install $VER"
-export HYPERVISOR VM_ID ID_SRC SCRIPT_TAG ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT
+export YC_RUN YC_LOG YC_ERR HYPERVISOR VM_ID ID_SRC SCRIPT_TAG ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER TZ_SET VM_NAME VM_UUID INSTANCE_ID OFFERING TENANT TENANT_SRC CLOUD_ID CLOUDSTACK_URL SMBIOS ZONE PRETTY_NAME VERSION_ID VER STEP WARNS RESULT
 RESULT=RUNNING
 finish(){
   local rc=$? title prio tags msg typ j
@@ -389,35 +418,65 @@ finish(){
     for f in /var/log/cloud-init.log /var/log/cloud-init-output.log; do
       [ -f "$f" ] && { echo "========== merged: $f (last 400 lines) =========="; tail -n 400 "$f"; }; done
   } >> "$LOG" 2>/dev/null
-  msg="vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
-ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
-engine  : $ENGINE ${DB_REAL_VERSION:-$DB_VERSION} port $DB_PORT
-allow   : ${DB_ALLOW:-?}
-step    : $STEP   warnings: $WARNS
-detail  : ${FAIL_REASON:-${WARN_TXT:-none}}
-salt    : ${SALT_STATE:-not run}   acronis: ${ACRONIS_STATE:-not run}
-log     : $LOG"
+  # ---- one message for people (top 2 lines) and for engineers (the blocks below). Never a secret.
+  local eng ver portal dur head next wl i=0 w
+  eng=$([ "$ENGINE" = mysql ] && echo MySQL || echo MariaDB); ver=${DB_REAL_VERSION:-$DB_VERSION}
+  portal=""; [ -n "${CLOUDSTACK_URL:-}" ] && [ -n "${VM_UUID:-}" ] && portal="$CLOUDSTACK_URL/#/vm/$VM_UUID"
+  dur="$((SECONDS/60)) min $((SECONDS%60)) s"
+  wl=""; while IFS= read -r w; do [ -n "$w" ] && { i=$((i+1)); wl="$wl
+$i. $w"; }; done <<< "${WARN_NL:-}"
   case "$RESULT" in
     SUCCESS)
       typ=vm.deploy.completed
       if [ "$PREV_RESULT" = FAILED ]; then title="BACK TO GREEN $ENGINE - $VM_NAME"; prio=3; tags="green_circle,db"
-      elif [ "${WAIT_HUMAN:-}" ]; then title="WAIT FOR HUMAN $ENGINE - $VM_NAME"; prio=4; tags="raising_hand,db"; msg="$msg
-human   : $WAIT_HUMAN"
+        head="READY again - the $eng $ver database server works after the earlier failure."
+      elif [ -n "${WAIT_HUMAN:-}" ]; then title="WAIT FOR HUMAN $ENGINE - $VM_NAME"; prio=4; tags="raising_hand,db"
+        head="READY to use - the $eng $ver database server works, but one thing needs a person."
       elif [ "$WARNS" -gt 0 ]; then title="OK BUILD WITH WARNINGS $ENGINE - $VM_NAME"; prio=3; tags="warning,db"
-      else title="OK BUILD $ENGINE - $VM_NAME"; prio=3; tags="white_check_mark,db"; fi ;;
-    CANCELLED) typ=vm.deploy.failed; title="CANCELLED BUILD $ENGINE - $VM_NAME"; prio=4; tags="stop_sign,db" ;;
-    *) typ=vm.deploy.failed; title="FAILED BUILD $ENGINE - $VM_NAME"; prio=4; tags="x,db" ;;
+        head="READY - the $eng $ver database server works ($WARNS warning(s), nothing blocks use)."
+      else title="OK BUILD $ENGINE - $VM_NAME"; prio=3; tags="white_check_mark,db"
+        head="READY - the $eng $ver database server is installed, tuned, backed up and verified."; fi
+      next=${WAIT_HUMAN:-"nothing - logins and connection details are in the ERP and on the server (yallacloud secrets)"} ;;
+    CANCELLED) typ=vm.deploy.failed; title="CANCELLED BUILD $ENGINE - $VM_NAME"; prio=4; tags="stop_sign,db"
+      head="STOPPED - the build was cancelled at step $STEP. The server is NOT ready."
+      next="start it again: yc-db-install (answers are kept)" ;;
+    *) typ=vm.deploy.failed; title="FAILED BUILD $ENGINE - $VM_NAME"; prio=5; tags="x,db"
+      head="NOT READY - the build failed at step $STEP: ${FAIL_REASON:-exit $rc}"
+      next="read the errors (yallacloud errors / $YC_ERR), fix the cause, re-run: yc-db-install" ;;
   esac
+  msg="$head
+next     : $next
+
+[ server ]
+vm       : $VM_NAME  ($HYPERVISOR, $(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME"))  tenant ${TENANT:-not published yet}
+address  : public ${HOST_PUB:--}   private ${HOST_PRIV:--}
+database : $ENGINE $ver  port $DB_PORT  open to ${DB_ALLOW:-?}${DB_NAME:+  db $DB_NAME}
+ssh      : ssh -p ${SSH_PORT:-22} root@${HOST_PUB:-${HOST_PRIV:-<ip>}}   (passwords: yallacloud secrets / ERP)${portal:+
+portal   : $portal}
+
+[ checks ]
+${MARKS:-none recorded}
+salt     : ${SALT_STATE:-not run}
+acronis  : ${ACRONIS_STATE:-not run}${wl:+
+
+[ warnings ]$wl}
+
+[ trace ]
+result   : $RESULT  step $STEP  in $dur
+run      : $YC_RUN   installer yc-db-install $VER
+logs     : $YC_LOG  errors $YC_ERR  (journalctl -t yc-db)"
+  # milestones first (extra webhook), then ntfy, then the ERP body
   if [ "$RESULT" = SUCCESS ]; then
-    [ -n "${WAIT_HUMAN:-}" ] && yc_extra deploy waitforhuman "$WAIT_HUMAN"
-    yc_extra deploy completed
+    [ -n "${WAIT_HUMAN:-}" ] && yc_mark deploy waitforhuman "$WAIT_HUMAN"
+    yc_mark deploy completed
   else
     ar=${STEP#* }; ar=${ar%% *}
     case "$ar" in install|configure|users|verify) ar=db;; inputs|secrets|handover|agents|done|init|"") ar=deploy;; esac
-    [ "$ar" = deploy ] || yc_extra "$ar" failed "${FAIL_REASON:-exit $rc in step $STEP}"
-    yc_extra deploy failed "${FAIL_REASON:-exit $rc in step $STEP}"
+    [ "$ar" = deploy ] || yc_mark "$ar" failed "${FAIL_REASON:-exit $rc in step $STEP}"
+    yc_mark deploy failed "${FAIL_REASON:-exit $rc in step $STEP}"
   fi
-  yc_ntfy "$title" "$prio" "$tags" "$msg"
+  yc_ntfy "$title" "$prio" "$tags" "$msg" "$portal"
+  ylog "$([ "$RESULT" = SUCCESS ] && echo OK || echo ERROR)" deploy "RESULT $RESULT - $title - step $STEP, warnings $WARNS, $dur${FAIL_REASON:+ - $FAIL_REASON}" >/dev/null
   j=$(mktemp); chmod 600 "$j"
   facts_json "$typ" "$title | step $STEP | warnings $WARNS${FAIL_REASON:+ | $FAIL_REASON}" "$([ "$RESULT" = SUCCESS ] && echo yes || echo no)" > "$j" && yc_erp "$j" || say "erp webhook: payload build failed - nothing sent"
   [ "$RESULT" = SUCCESS ] && install -m 600 "$j" "$INFO/handover.json"   # = the exact body the ERP received
@@ -479,6 +538,7 @@ SALT_JOIN=$(low "$SALT_JOIN"); case "$SALT_JOIN" in yes|no) ;; *) warn "SALT_JOI
 ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
 ACRONIS_REGION=$(printf '%s' "$ACRONIS_REGION" | tr 'a-z' 'A-Z' | tr -d '[:space:]'); case "$ACRONIS_REGION" in AE|SG) ;; *) warn "ACRONIS_REGION '$ACRONIS_REGION' invalid - AE"; ACRONIS_REGION=AE;; esac
 CLOUDSTACK_URL=${CLOUDSTACK_URL%/}
+[ -z "$NTFY_TOPIC" ] || [[ "$NTFY_TOPIC" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { warn "NTFY_TOPIC '$NTFY_TOPIC' invalid - 9890122212"; NTFY_TOPIC=""; }
 for v in NTFY_URL ERP_WEBHOOK_URL EXTRA_WEBHOOK_URL CLOUDSTACK_URL; do [ -z "${!v}" ] || [[ "${!v}" =~ ^https?://[^[:space:]]+$ ]] || { warn "$v invalid - disabled"; printf -v "$v" '%s' ""; }; done
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 [[ "$REPO_URL" =~ ^https?:// ]] || REPO_URL="https://repo.oasisstack.io/db"
@@ -512,11 +572,17 @@ TENANT=$(yc_tenant) && TENANT_SRC="salt-inventory (CloudStack domain)" || { TENA
 mkdir -p /var/lib/yallacloud; printf '%s\n' "${VM_ID:-}" > /var/lib/yallacloud/vm-id   # backups report with the same vmId
 say "vm: $VM_NAME ($HYPERVISOR) uuid ${VM_UUID:-?} smbios ${SMBIOS:-?} vmId ${VM_ID:-?} (${ID_SRC}) tenant ${TENANT:-?} offering ${OFFERING:-?}"
 say "ips: private=${HOST_PRIV:-none} public=${HOST_PUB:-none} (nic ${PUB_NIC:-none}, static-nat ${MD_PUB:-none}) subnet=${PRIV_CIDR:-none} allow=$DB_ALLOW ssh=$SSH_PORT"
-yc_ntfy "START BUILD $ENGINE - $VM_NAME" 2 "hourglass,db" "vm      : $VM_NAME  tenant ${TENANT:--}  uuid ${VM_UUID:--}
-ip      : ${HOST_PRIV:--} / public ${HOST_PUB:--}
-engine  : $ENGINE $DB_VERSION port $DB_PORT
-os      : $PRETTY_NAME
-installer: yc-db-install $VER"
+yc_ntfy "START BUILD $ENGINE - $VM_NAME" 2 "hourglass,db" "BUILDING - a $([ "$ENGINE" = mysql ] && echo MySQL || echo MariaDB) $DB_VERSION database server. Usually ready in 5-10 minutes.
+next     : nothing - wait for OK BUILD / FAILED BUILD
+
+[ server ]
+vm       : $VM_NAME  ($HYPERVISOR, $PRETTY_NAME)  tenant ${TENANT:-not published yet}
+address  : public ${HOST_PUB:--}   private ${HOST_PRIV:--}
+database : $ENGINE $DB_VERSION  port $DB_PORT  open to $DB_ALLOW
+
+[ trace ]
+run      : $YC_RUN   installer yc-db-install $VER
+logs     : $YC_LOG  (journalctl -t yc-db)" "$([ -n "${CLOUDSTACK_URL:-}" ] && [ -n "${VM_UUID:-}" ] && echo "$CLOUDSTACK_URL/#/vm/$VM_UUID")"
 j=$(mktemp); chmod 600 "$j"; facts_json vm.deploy.started "deploy started $ENGINE $DB_VERSION" no > "$j" && yc_erp "$j"; rm -f "$j"
 
 # ================= 2. base OS: time, locale, repos, updates, kernel
@@ -599,7 +665,7 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload; systemctl enable --now yc-thp-off.service >/dev/null 2>&1
 
-yc_extra os ok   # time, locale, repos, updates, kernel, swap, THP
+yc_mark os ok   # time, locale, repos, updates, kernel, swap, THP
 # ================= 3. SSH: root + password, no "login as ubuntu"
 step "3 ssh"
 SSHD=/etc/ssh/sshd_config.d/00-yallacloud.conf
@@ -748,7 +814,7 @@ else
       dnf -y -q install mysql-server mysql || die "MySQL install failed"; FALLBACK=1; }
   fi
 fi
-[ -n "$FALLBACK" ] && { WAIT_HUMAN="vendor repo failed - OS package installed, check version"; yc_extra db waitforhuman "$WAIT_HUMAN"; }
+[ -n "$FALLBACK" ] && { WAIT_HUMAN="vendor repo failed - OS package installed, check version"; yc_mark db waitforhuman "$WAIT_HUMAN"; }
 SVC=$(db_svc); [ -n "$SVC" ] || die "no mariadb/mysql systemd unit after install"
 CLI=$(db_cli)
 say "installed: $($CLI --version) service=$SVC"
@@ -882,7 +948,8 @@ set -uo pipefail; umask 077; export HOME=/root
 ST=/var/lib/yallacloud/db-backup.status; prev=$(awk -F= '/^RESULT=/{print $2}' $ST 2>/dev/null)
 day=$(date +%F); out="$BACKUP_DIR/daily/$day"; err=""
 sqlr 'SELECT 1' >/dev/null 2>&1 || err="database not answering"
-log(){ echo "[$(date '+%F %T')] $*"; }
+YC_RUN="backup-$(date +%Y%m%d-%H%M)"
+log(){ case "$*" in FAIL*|*FAILED*) ylog ERROR backup "$*";; *) ylog INFO backup "$*";; esac; }
 mkdir -p "$out" "$BACKUP_DIR/weekly" "$BACKUP_DIR/monthly"; chmod 700 "$BACKUP_DIR"
 DUMP=$(command -v mariadb-dump || command -v mysqldump)
 size=$(sqlr "SELECT COALESCE(SUM(data_length+index_length),0) FROM information_schema.tables WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys')")
@@ -908,18 +975,36 @@ res=OK; [ -n "$err" ] && res=FAILED
 printf 'RESULT=%s\nTIME=%s\nDIR=%s\nSIZE=%s\nDETAIL=%s\n' "$res" "$(date '+%F %T')" "$out" "$(du -sh "$out" | cut -f1)" "${err:-none}" > $ST
 log "backup $res -> $out ${err}"
 h=$(hostname -s)
-SCRIPT_TAG="yc-db-backup ($(cut -d' ' -f1-2 /etc/yallacloud/db.version 2>/dev/null))"
-if [ "$res" = OK ]; then yc_extra backup ok; else yc_extra backup failed "$err"; fi
-[ "$res" = FAILED ] && yc_ntfy "BACKUP FAILED $ENGINE $h" 4 "x,db,floppy_disk" "$err"
-[ "$res" = OK ] && [ "$prev" = FAILED ] && yc_ntfy "BACKUP BACK TO GREEN $ENGINE $h" 3 "green_circle,db" "backup ok again -> $out"
+SCRIPT_TAG="yc-db-backup (yc-db-install $(sed -n 's/^VER=//p' /usr/local/sbin/yc-db-install 2>/dev/null | head -1))"
+if [ "$res" = OK ]; then yc_mark backup ok "$(du -sh "$out" | cut -f1) in $out" >/dev/null; else yc_mark backup failed "$err" >/dev/null; fi
+[ "$res" = FAILED ] && yc_ntfy "BACKUP FAILED $ENGINE - $h" 4 "x,db,floppy_disk" "The nightly database backup did NOT complete. Data is safe on the server, but there is no fresh copy.
+next     : check the reason below, fix, then run: yallacloud backup
+
+[ backup ]
+reason   : $err
+folder   : $out
+last ok  : $(ls -1d "$BACKUP_DIR"/daily/*/ 2>/dev/null | tail -2 | head -1)
+
+[ trace ]
+run      : $YC_RUN
+logs     : $YC_LOG   errors: $YC_ERR   (journalctl -t yc-db)"
+[ "$res" = OK ] && [ "$prev" = FAILED ] && yc_ntfy "BACKUP BACK TO GREEN $ENGINE - $h" 3 "green_circle,db,floppy_disk" "The database backup works again.
+
+[ backup ]
+folder   : $out   size $(du -sh "$out" | cut -f1)
+keep     : daily ${BACKUP_KEEP_DAYS}d, weekly ${BACKUP_KEEP_WEEKS}, monthly ${BACKUP_KEEP_MONTHS}
+
+[ trace ]
+run      : $YC_RUN
+logs     : $YC_LOG"
 [ "$res" = OK ]
 EOF
 chmod 700 /usr/local/sbin/yc-db-backup
 echo "${BACKUP_TIME#*:} $((10#${BACKUP_TIME%%:*})) * * * root /usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1" > /etc/cron.d/yc-db-backup
 chmod 644 /etc/cron.d/yc-db-backup
-printf '/var/log/yc-db-backup.log /var/log/yc-db-deploy.log {\n  monthly\n  rotate 6\n  compress\n  missingok\n  notifempty\n}\n' > /etc/logrotate.d/yallacloud-db
+printf '/var/log/yallacloud/yc-db.log /var/log/yallacloud/yc-db-errors.log /var/log/yc-db-backup.log /var/log/yc-db-deploy.log {\n  monthly\n  rotate 12\n  compress\n  delaycompress\n  missingok\n  notifempty\n  copytruncate\n}\n' > /etc/logrotate.d/yallacloud-db
 RETENTION="daily ${BACKUP_KEEP_DAYS}d, weekly ${BACKUP_KEEP_WEEKS}, monthly ${BACKUP_KEEP_MONTHS} at $BACKUP_TIME -> $BACKUP_DIR"
-/usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1 && say "first backup ok ($RETENTION)" || warn "first backup failed - see /var/log/yc-db-backup.log"   # yc-db-backup sends vm.backup.ok|failed itself
+if /usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1; then say "first backup ok ($RETENTION)"; MARKS="${MARKS:+$MARKS | }backup ok"; else warn "first backup failed - see $YC_LOG"; MARKS="${MARKS:+$MARKS | }backup failed"; fi   # yc-db-backup sends vm.backup.ok|failed itself
 
 # ================= 11. handover + yallacloud command
 step "11 handover"
@@ -973,7 +1058,8 @@ datadir     : $DATADIR on $(findmnt -no SOURCE --target $DATADIR)
 backups     : $RETENTION   (yallacloud backup)
 binlog      : $BINLOG $([ "$BINLOG" = yes ] && echo "(${BINLOG_DAYS} days)")
 config      : $CD/80-yallacloud.cnf + 90-yallacloud-tuning.cnf
-full picture: yallacloud      secrets: yallacloud secrets      log: $LOG
+full picture: yallacloud      secrets: yallacloud secrets
+logs        : $YC_LOG (tagged, deploy + day 2; journalctl -t yc-db)   errors: $YC_ERR   raw: $LOG
 ================================================================================
 EOF
 } > "$INFO/handover.txt"
@@ -992,7 +1078,8 @@ cat > /usr/local/sbin/yallacloud <<'YCEOF'
 #   yallacloud allow CIDR | deny CIDR    open/close the DB port for a network (0.0.0.0/0 = any)
 #   yallacloud newdb NAME [USER]         database + user with a generated password
 #   yallacloud retune       re-calculate memory tuning after a resize, restart the DB
-#   yallacloud log          deployment log
+#   yallacloud log          tagged log (deploy + day 2)   yallacloud errors   WARN/ERROR only
+#   yallacloud deploylog    raw deploy log incl. cloud-init
 . /etc/yallacloud/db.conf.env 2>/dev/null; . /usr/local/lib/yc-db-common.sh
 export HOME=/root
 kv(){ printf '  %-22s %s\n' "$1" "$2"; }
@@ -1001,6 +1088,8 @@ hum(){ [[ "$1" =~ ^[0-9]{7,}$ ]] && echo "$(( $1 / 1048576 ))M" || echo "$1"; }
 hd(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 need_root(){ [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }; }
 svc=$(db_svc); cd_=$(cnf_dir)
+YC_RUN="day2-${1:-info}-$(date +%Y%m%d-%H%M%S)"
+case "${1:-info}" in backup|restore|allow|deny|newdb|retune) ylog INFO day2 "yallacloud $* (by ${SUDO_USER:-$(logname 2>/dev/null || echo root)})" >/dev/null;; esac
 case "${1:-info}" in
 info)
   need_root; detect_ips
@@ -1046,7 +1135,7 @@ info)
   kv "yallacloud allow|deny" "CIDR on port $DB_PORT"
   kv "yallacloud newdb" "NAME [USER] - database + user"
   kv "yallacloud retune" "after a CPU/RAM change"
-  kv logs "/var/log/yc-db-deploy.log  /var/log/yc-db-backup.log  $(sqlr 'SELECT @@log_error')"
+  kv logs "$YC_LOG (tagged, journalctl -t yc-db)  errors: $YC_ERR  raw: /var/log/yc-db-deploy.log  db: $(sqlr 'SELECT @@log_error')"
   kv re-install "yc-db-install (answers: /etc/yallacloud/db.conf.env)"
   echo ;;
 secrets) need_root; cat /root/yc-db/handover.txt ;;
@@ -1055,13 +1144,13 @@ backups) need_root; for k in daily weekly monthly; do echo "== $k"; ls -1 "$BACK
 restore)
   need_root; f=${2:-}; [ -f "$f" ] || { echo "usage: yallacloud restore $BACKUP_DIR/daily/<date>/<db>.sql.gz"; exit 1; }
   read -r -p "restore $f into the running server (overwrites that database)? type YES: " a; [ "$a" = YES ] || exit 1
-  gunzip -c "$f" | "$(db_cli)" --defaults-file=/root/.my.cnf && echo "restored $f" ;;
+  gunzip -c "$f" | "$(db_cli)" --defaults-file=/root/.my.cnf && ylog OK day2 "restored $f" || ylog ERROR day2 "restore of $f failed" ;;
 allow|deny)
   need_root; c=${2:-}; ip4 "$c" && c="$c/32"; cidr_ok "$c" || { echo "usage: yallacloud $1 <ip|cidr>  (0.0.0.0/0 = any)"; exit 1; }
   if [ "$1" = allow ]; then fw_db add "$c"; n=$(echo "$DB_ALLOW $c" | tr ' ' '\n' | sort -u | tr '\n' ' ')
   else fw_db del "$c"; n=$(echo "$DB_ALLOW" | tr ' ' '\n' | grep -vxF "$c" | tr '\n' ' '); fi
   n=$(echo $n); sed -i "s#^DB_ALLOW=.*#DB_ALLOW='$n'#" /etc/yallacloud/db.conf.env
-  echo "port $DB_PORT now allowed from: ${n:-nobody}" ;;
+  ylog OK day2 "$1 $c: port $DB_PORT now allowed from: ${n:-nobody}" ;;
 newdb)
   need_root; n=${2:-}; u=${3:-$2}
   [[ "$n" =~ ^[a-z0-9_]{1,64}$ && "$u" =~ ^[a-z_][a-z0-9_]{0,31}$ ]] || { echo "usage: yallacloud newdb NAME [USER]  (a-z 0-9 _)"; exit 1; }
@@ -1070,9 +1159,11 @@ newdb)
   detect_ips; h=${HOST_PUB:-$HOST_PRIV}
   t="database    : $n   user $u / $p   (added $(date '+%F %T'))
 uri         : mysql://$u:$(urlpw "$p")@$h:$DB_PORT/$n"
-  ( umask 077; echo "$t" >> /root/yc-db/extra.txt ); echo "$t" | tee -a /root/yc-db/handover.txt ;;
-retune) need_root; db_tune && systemctl restart "$svc" && echo "restarted $svc" ;;
-log) less +G /var/log/yc-db-deploy.log ;;
+  ( umask 077; echo "$t" >> /root/yc-db/extra.txt ); echo "$t" | tee -a /root/yc-db/handover.txt; ylog OK day2 "newdb: database $n, user $u created (password in yallacloud secrets)" >/dev/null ;;
+retune) need_root; o=$(db_tune) && systemctl restart "$svc" && { ylog OK day2 "retune: $o, $svc restarted"; } || ylog ERROR day2 "retune failed" ;;
+log) less +G "$YC_LOG" ;;
+errors) tail -n 60 "$YC_ERR" 2>/dev/null || echo "no warnings or errors logged" ;;
+deploylog) less +G /var/log/yc-db-deploy.log ;;
 *) sed -n '2,11p' "$0" | sed 's/^# //' ;;
 esac
 YCEOF
@@ -1089,28 +1180,46 @@ for h in ${HOST_PRIV:-} ${PUB_NIC:-} 127.0.0.1; do
   r=$("$CLI" --defaults-file=/root/.yc-verify.cnf --protocol=TCP -h "$h" -P "$DB_PORT" -NBe 'SELECT VERSION()' 2>&1) || { rm -f /root/.yc-verify.cnf; die "TCP login $DB_ADMIN_USER@$h:$DB_PORT failed: $r"; }
   say "verify: $DB_ADMIN_USER@$h:$DB_PORT -> $r"
 done
-yc_extra db ok
+yc_mark db ok "$DB_REAL_VERSION on port $DB_PORT"
 rm -f /root/.yc-verify.cnf
 
 # ================= 13. agents: Salt, Acronis (never fail the DB build)
 step "13 agents"
+cat > /usr/local/sbin/yc-db-salt-retry <<'EOF'
+#!/bin/bash
+# yc-db-salt-retry - cron (every 15 min) until the Salt join succeeds; reports to the tagged log, extra webhook and ntfy (STACK4-62)
+. /etc/yallacloud/db.conf.env; . /usr/local/lib/yc-db-common.sh
+YC_RUN="salt-retry-$(date +%Y%m%d-%H%M)"; SCRIPT_TAG="yc-db-salt-retry ($(cut -d' ' -f1-2 /etc/yallacloud/db.version 2>/dev/null))"
+if ! sp=$(salt_ports); then yc_mark salt waiting "$sp"; exit 0; fi
+out=$(timeout 900 sh -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
+case "$out" in
+  *JOINED*) yc_mark salt joined "$out"; rm -f /etc/cron.d/yc-salt-join
+            yc_ntfy "SALT JOINED $ENGINE - $(hostname -s)" 3 "white_check_mark,salt" "Salt management is connected now (was waiting since the install).
+
+salt     : $out
+master   : $SALT_MASTER  (ports 4505/4506 open)
+log      : $YC_LOG" ;;
+  *) yc_mark salt failed "$out" ;;
+esac
+EOF
+chmod 700 /usr/local/sbin/yc-db-salt-retry
 if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
   # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
-  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock timeout 900 sh -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
-  SALT_STATE="BLOCKED - $sp (retry every 15 min)"; warn "salt: $sp - join skipped, retry cron /etc/cron.d/yc-salt-join"; yc_extra salt waiting "$sp"
+  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock timeout 1000 /usr/local/sbin/yc-db-salt-retry >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
+  SALT_STATE="BLOCKED - $sp (retry every 15 min)"; warn "salt: $sp - join skipped, retry cron /etc/cron.d/yc-salt-join"; yc_mark salt waiting "$sp"
   WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }open $SALT_MASTER 4505/4506 for this VM"
 elif [ "$SALT_JOIN" = yes ]; then
   say "salt: $sp"
   SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
   say "salt: $SALT_STATE"; [[ "$SALT_STATE" == *JOINED* ]] || { warn "salt join not confirmed: $SALT_STATE"; SALT_STATE="not joined"; }
-  if [[ "$SALT_STATE" == *JOINED* ]]; then SALT_STATE=JOINED; yc_extra salt joined; else yc_extra salt failed "$SALT_STATE"; fi
-else SALT_STATE="off (SALT_JOIN=no)"; fi
+  if [[ "$SALT_STATE" == *JOINED* ]]; then SALT_STATE=JOINED; yc_mark salt joined; else yc_mark salt failed "$SALT_STATE"; fi
+else SALT_STATE="off (SALT_JOIN=no)"; MARKS="${MARKS:+$MARKS | }salt off"; fi
 if [ -n "$ACRONIS_TOKEN" ]; then
   YC_AT="$ACRONIS_TOKEN" YC_AR="$ACRONIS_REGION" timeout 3600 bash -c 'curl -fsSL --retry 3 --max-time 120 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s "$YC_AT" "$YC_AR"'; arc=$?   # shortcut: token is argv of the inner bash -s (acronis-setup.sh takes no env token yet)
   case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 8|10) ACRONIS_STATE="installed, NOT registered (exit $arc)"; WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }acronis needs a human (exit $arc)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac
   say "acronis: $ACRONIS_STATE"
-  case $arc in 0) yc_extra acronis registered;; 8|10) yc_extra acronis waitforhuman "exit $arc - installed, not registered";; *) yc_extra acronis failed "exit $arc";; esac
-else ACRONIS_STATE="off (ACRONIS_TOKEN blank)"; fi
+  case $arc in 0) yc_mark acronis registered;; 8|10) yc_mark acronis waitforhuman "exit $arc - installed, not registered";; *) yc_mark acronis failed "exit $arc";; esac
+else ACRONIS_STATE="off (ACRONIS_TOKEN blank)"; MARKS="${MARKS:+$MARKS | }acronis off"; fi
 
 # tenant for the final webhook: a VM deployed minutes ago may not be in the Salt inventory yet (5-min sync)
 if [ -z "$TENANT" ]; then

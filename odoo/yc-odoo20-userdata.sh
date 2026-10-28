@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.11  (2026-10-28 13:00 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.12  (2026-10-28 15:00 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -58,8 +58,8 @@ INSTALLER_REF="main"   # git branch or tag of yallacloud/yc-scripts to install f
 LOG=/var/log/yc-odoo-deploy.log; STATUS=/var/log/yc-odoo-deploy.status
 exec > >(tee -a "$LOG") 2>&1
 # central log (the installer adds yc-log; same line format): /var/log/yallacloud/odoo.log + errors.log
-ycl(){ local l=$1; shift; mkdir -p /var/log/yallacloud; local x; x=$(printf '%s | %-5s | %-9s | %-8s | %s' "$(date '+%F %T %z')" "$l" userdata - "$*")
-  echo "$x" >> /var/log/yallacloud/odoo.log; case "$l" in WARN|ERROR) echo "$x" >> /var/log/yallacloud/errors.log;; esac
+ycl(){ local l=$1; shift; mkdir -p -m 750 /var/log/yallacloud; local x; x=$(printf '%s | %-5s | %-9s | %-8s | %s' "$(date '+%F %T %z')" "$l" userdata - "$*")
+  ( umask 027; echo "$x" >> /var/log/yallacloud/odoo.log; case "$l" in WARN|ERROR) echo "$x" >> /var/log/yallacloud/errors.log;; esac )
   logger -t yallacloud-odoo -p user.info -- "$l userdata -: $*" 2>/dev/null; }
 say(){ echo "[$(date +%F' '%T)] userdata: $*"; case "$*" in WARN:*) ycl WARN "${*#WARN: }";; *) ycl INFO "$*";; esac; }
 echo "RUNNING step userdata ($(date '+%F %T %Z'))" > "$STATUS"
@@ -131,7 +131,7 @@ say "$(fix_gateway "$GATEWAY")"   # BEFORE the download: a dead .254 gateway mea
 # installer: GitHub (public yallacloud/yc-scripts), then the local mirror repo.oasisstack.io/odoo
 # (ycwsus01, YC ranges), then two more GitHub mirrors - each checked by its .sha256
 R=yallacloud/yc-scripts; F=odoo/yc-odoo20-install.sh; OUT=/root/yc-odoo20-install.sh; ok=""
-MIN_VER="1.5.0"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
+MIN_VER="1.5.1"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
 for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
          "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F?nocache=$(date +%s)" \
          "https://repo.oasisstack.io/odoo/yc-odoo20-install.sh" \

@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.14  (2026-10-28 13:30 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.15  (2026-10-28 13:50 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -59,7 +59,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.14
+VER=1.0.15
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -270,7 +270,9 @@ yc_extra(){   # yc_extra <area> <state> [error] - second webhook (Tech Dept): fl
     "$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")" "$(printf '%s' "${3:-}" | tr -d '"\\' | tr '\n' ' ' | head -c 300)" \
     "$(date '+%F %T %z')" "${SCRIPT_TAG:-$(basename "$0")}")
   local h; h=$(mktemp); chmod 600 "$h"; printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "${EXTRA_WEBHOOK_SECRET:-}" > "$h"   # secret never on argv
-  echo "extra webhook: vm.$1.$2 HTTP $(curl -sS -m 15 -o /dev/null -w '%{http_code}' -H @"$h" -d "$b" "$EXTRA_WEBHOOK_URL" 2>/dev/null || echo fail)"
+  local rc; rc=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -H @"$h" -d "$b" "$EXTRA_WEBHOOK_URL" 2>/dev/null || echo fail)
+  mkdir -p /var/log/yallacloud; printf '%s\n' "${b%\}},\"http\":\"$rc\"}" >> /var/log/yallacloud/yc-db-events.jsonl   # exact body sent + answer (no secrets in it)
+  echo "extra webhook: vm.$1.$2 HTTP $rc"
   rm -f "$h"
 }
 yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header file, never argv
@@ -1002,7 +1004,7 @@ EOF
 chmod 700 /usr/local/sbin/yc-db-backup
 echo "${BACKUP_TIME#*:} $((10#${BACKUP_TIME%%:*})) * * * root /usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1" > /etc/cron.d/yc-db-backup
 chmod 644 /etc/cron.d/yc-db-backup
-printf '/var/log/yallacloud/yc-db.log /var/log/yallacloud/yc-db-errors.log /var/log/yc-db-backup.log /var/log/yc-db-deploy.log {\n  monthly\n  rotate 12\n  compress\n  delaycompress\n  missingok\n  notifempty\n  copytruncate\n}\n' > /etc/logrotate.d/yallacloud-db
+printf '/var/log/yallacloud/yc-db.log /var/log/yallacloud/yc-db-errors.log /var/log/yallacloud/yc-db-events.jsonl /var/log/yc-db-backup.log /var/log/yc-db-deploy.log {\n  monthly\n  rotate 12\n  compress\n  delaycompress\n  missingok\n  notifempty\n  copytruncate\n}\n' > /etc/logrotate.d/yallacloud-db
 RETENTION="daily ${BACKUP_KEEP_DAYS}d, weekly ${BACKUP_KEEP_WEEKS}, monthly ${BACKUP_KEEP_MONTHS} at $BACKUP_TIME -> $BACKUP_DIR"
 if /usr/local/sbin/yc-db-backup >> /var/log/yc-db-backup.log 2>&1; then say "first backup ok ($RETENTION)"; MARKS="${MARKS:+$MARKS | }backup ok"; else warn "first backup failed - see $YC_LOG"; MARKS="${MARKS:+$MARKS | }backup failed"; fi   # yc-db-backup sends vm.backup.ok|failed itself
 
@@ -1079,6 +1081,7 @@ cat > /usr/local/sbin/yallacloud <<'YCEOF'
 #   yallacloud newdb NAME [USER]         database + user with a generated password
 #   yallacloud retune       re-calculate memory tuning after a resize, restart the DB
 #   yallacloud log          tagged log (deploy + day 2)   yallacloud errors   WARN/ERROR only
+#   yallacloud events       milestone events sent to the extra webhook (exact JSON + HTTP answer)
 #   yallacloud deploylog    raw deploy log incl. cloud-init
 . /etc/yallacloud/db.conf.env 2>/dev/null; . /usr/local/lib/yc-db-common.sh
 export HOME=/root
@@ -1163,8 +1166,9 @@ uri         : mysql://$u:$(urlpw "$p")@$h:$DB_PORT/$n"
 retune) need_root; o=$(db_tune) && systemctl restart "$svc" && { ylog OK day2 "retune: $o, $svc restarted"; } || ylog ERROR day2 "retune failed" ;;
 log) less +G "$YC_LOG" ;;
 errors) tail -n 60 "$YC_ERR" 2>/dev/null || echo "no warnings or errors logged" ;;
+events) tail -n 40 /var/log/yallacloud/yc-db-events.jsonl 2>/dev/null || echo "no extra-webhook events sent" ;;
 deploylog) less +G /var/log/yc-db-deploy.log ;;
-*) sed -n '2,11p' "$0" | sed 's/^# //' ;;
+*) sed -n '2,12p' "$0" | sed 's/^# //' ;;
 esac
 YCEOF
 chmod 755 /usr/local/sbin/yallacloud

@@ -272,7 +272,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.3.1"
+NC_IVER="1.3.2"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -1598,7 +1598,7 @@ chmod 600 "$OUT"
 yc_write_facts(){ for _v in VM_ID VM_NAME VM_UUID NET_IP PUBLIC_IP ZONE TENANT TENANT_SRC CLOUDSTACK_URL TZ_SET FQDN NC_IVER; do printf '%s=%q\n' "$_v" "${!_v:-}"; done > /etc/yallacloud/nextcloud.facts; }
 yc_write_facts
 chmod 644 /etc/yallacloud/nextcloud.facts
-printf '/var/log/yallacloud/*.log /var/log/yc-nextcloud-install.log {\n  weekly\n  rotate 12\n  compress\n  delaycompress\n  missingok\n  notifempty\n  create 0600 root root\n}\n' > /etc/logrotate.d/yallacloud-nextcloud
+printf '/var/log/yallacloud/*.log /var/log/yc-nextcloud-install.log {\n  weekly\n  rotate 12\n  compress\n  delaycompress\n  missingok\n  notifempty\n  create 0600 root root\n  su root syslog\n}\n' > /etc/logrotate.d/yallacloud-nextcloud
 say "DONE - handover written to $OUT"
 say "URL https://${FQDN}${PORTSFX}  admin ${ADMIN_USER}  ssh port ${SSH_PORT}  (passwords: yallacloud secrets)"
 

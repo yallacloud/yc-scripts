@@ -1,6 +1,6 @@
 #cloud-config
 ###############################################################################
-#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.3.1    #
+#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.3.2    #
 #                                                                             #
 #  WHAT TO EDIT:  only the lines under "EDIT THESE" in the nextcloud.conf     #
 #  block below. NOTHING is strictly required - leave FQDN blank and the box   #

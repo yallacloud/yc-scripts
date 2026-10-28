@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.10  (2026-10-27 23:45 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.11  (2026-10-28 13:00 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -37,7 +37,7 @@ BACKUP_TIME="02:30"    # HH:MM
 # -- 6. reporting: ntfy = phone (never passwords) | webhook = YallaCloud ERP (YCERP-01)
 ENABLE_NTFY="yes"
 NTFY_SERVER="https://ntfy.sh"
-NTFY_TOPIC="9890122212"
+NTFY_TOPIC="9890122212"   # blank = 9890122212
 ENABLE_WEBHOOK="yes"
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""  # REQUIRED for the webhook: X-Webhook-Secret from the estate secret store
@@ -57,11 +57,15 @@ INSTALLER_REF="main"   # git branch or tag of yallacloud/yc-scripts to install f
 
 LOG=/var/log/yc-odoo-deploy.log; STATUS=/var/log/yc-odoo-deploy.status
 exec > >(tee -a "$LOG") 2>&1
-say(){ echo "[$(date +%F' '%T)] userdata: $*"; }
+# central log (the installer adds yc-log; same line format): /var/log/yallacloud/odoo.log + errors.log
+ycl(){ local l=$1; shift; mkdir -p /var/log/yallacloud; local x; x=$(printf '%s | %-5s | %-9s | %-8s | %s' "$(date '+%F %T %z')" "$l" userdata - "$*")
+  echo "$x" >> /var/log/yallacloud/odoo.log; case "$l" in WARN|ERROR) echo "$x" >> /var/log/yallacloud/errors.log;; esac
+  logger -t yallacloud-odoo -p user.info -- "$l userdata -: $*" 2>/dev/null; }
+say(){ echo "[$(date +%F' '%T)] userdata: $*"; case "$*" in WARN:*) ycl WARN "${*#WARN: }";; *) ycl INFO "$*";; esac; }
 echo "RUNNING step userdata ($(date '+%F %T %Z'))" > "$STATUS"
 # before the installer exists only curl is there: ntfy without secrets, minimal ERP event
 fail(){
-  say "FATAL: $*"; mkdir -p /root/odoo-info; echo "$*" > /root/odoo-info/INSTALL-FAILED
+  echo "[$(date +%F' '%T)] userdata: FATAL: $*"; ycl ERROR "userdata FAILED: $*"; mkdir -p /root/odoo-info; echo "$*" > /root/odoo-info/INSTALL-FAILED
   echo "FAILED step userdata: $* ($(date '+%F %T %Z'))" > "$STATUS"
   local h e u; h=$(hostname); e=${1//\\/\\\\}; e=${e//\"/\\\"}; u=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)
   [ "$ENABLE_NTFY" = yes ] && curl -fsS -m 15 -H "Title: FAILED BUILD odoo $ROLE - $h" -H "Priority: 5" -H "Tags: rotating_light,odoo" \
@@ -76,6 +80,7 @@ fail(){
   exit 1; }
 
 # fast checks before anything is downloaded (the installer re-checks everything)
+[ -n "$NTFY_TOPIC" ] || NTFY_TOPIC=9890122212
 case "$ROLE" in combined|db|app) ;; *) fail "ROLE='$ROLE' - must be combined, db or app";; esac
 if [ "$ROLE" = app ]; then
   [ -n "$DB_HOST" ] || fail "ROLE=app needs DB_HOST"
@@ -126,7 +131,7 @@ say "$(fix_gateway "$GATEWAY")"   # BEFORE the download: a dead .254 gateway mea
 # installer: GitHub (public yallacloud/yc-scripts), then the local mirror repo.oasisstack.io/odoo
 # (ycwsus01, YC ranges), then two more GitHub mirrors - each checked by its .sha256
 R=yallacloud/yc-scripts; F=odoo/yc-odoo20-install.sh; OUT=/root/yc-odoo20-install.sh; ok=""
-MIN_VER="1.4.14"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
+MIN_VER="1.5.0"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
 for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
          "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F?nocache=$(date +%s)" \
          "https://repo.oasisstack.io/odoo/yc-odoo20-install.sh" \

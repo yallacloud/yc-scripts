@@ -1,6 +1,6 @@
 #cloud-config
 ###############################################################################
-#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.3.2    #
+#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.3.3    #
 #                                                                             #
 #  WHAT TO EDIT:  only the lines under "EDIT THESE" in the nextcloud.conf     #
 #  block below. NOTHING is strictly required - leave FQDN blank and the box   #
@@ -51,6 +51,7 @@ write_files:
       TZ_SET=Asia/Dubai                # system timezone
       PHONE_REGION=AE                  # default phone region
       SUDO_USER_NAME=chadmin           # extra sudo user created on the VM
+      SUDO_PASS=                       # blank = random per VM. Or one common password, in SINGLE quotes: SUDO_PASS='MyPass#2026xyz'
       HTTPS_PORT=                      # blank = 443. e.g. 8443 for a custom HTTPS port
       SET_HOSTNAME=yes                 # yes = hostnamectl set-hostname + /etc/hosts
       PERMIT_ROOT_LOGIN=yes            # yes | prohibit-password | no

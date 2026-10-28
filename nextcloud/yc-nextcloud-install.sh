@@ -272,7 +272,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.3.2"
+NC_IVER="1.3.3"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -625,7 +625,9 @@ say "using distro PHP $PHPV - no third-party APT repositories are added"
 # ------------------------------------------------------------ 3. secrets
 step "03-secrets"
 DB_PASS=$(rnd 24); DB_ROOT_PASS=$(rnd 24)
-ADMIN_PASS=$(rnd 18); SUDO_PASS=$(rnd 18); REDIS_PASS=$(rnd 24)
+ADMIN_PASS=$(rnd 18); REDIS_PASS=$(rnd 24)
+# SUDO_PASS from the conf/userdata = one common password for the sudo user on every VM; blank = generated
+if [ -n "${SUDO_PASS:-}" ]; then SUDO_PASS_SRC=userdata; [ "${#SUDO_PASS}" -ge 12 ] || warn "SUDO_PASS from the userdata is shorter than 12 characters"; else SUDO_PASS=$(rnd 18); SUDO_PASS_SRC=generated; fi
 DB_NAME=nextcloud; DB_USER=nc_user01
 
 # ------------------------------------------------------------- 4. packages
@@ -1249,8 +1251,9 @@ step "11-ssl"
 say "requesting a Let's Encrypt certificate for $FQDN (HTTP-01 on port 80)"
 mkdir -p /var/www/nextcloud
 if [ -n "${LE_EMAIL:-}" ]; then _le_em="-m $LE_EMAIL"; else _le_em="--register-unsafely-without-email"; fi
+_le_out=/root/yc-le-first.out
 if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos --deploy-hook "systemctl reload nginx" \
-     $_le_em -d "$FQDN" >/dev/null 2>&1; then
+     $_le_em -d "$FQDN" >"$_le_out" 2>&1; then
   SSL_STATUS="free (Let's Encrypt)"; yc_extra ssl ok
   # point nginx at the real cert (replaces the temporary self-signed pair)
   sed -i "s#ssl_certificate .*#ssl_certificate /etc/letsencrypt/live/${FQDN}/fullchain.pem;#;
@@ -1259,6 +1262,20 @@ if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos --deploy-hook
   nginx -t && systemctl reload nginx
   say "certificate issued and installed"
   SSL_OK=yes
+elif [ "${FQDN_AUTO:-no}" = yes ] && grep -q 'rateLimited' "$_le_out" && _alt="${PUBLIC_IP:-$NET_IP}.sslip.io" && [ "$_alt" != "$FQDN" ]; then
+  # LE allows 5 certs/week per exact name: repeat deploys on one IP use them up. The dotted sslip
+  # name is a different name for the same IP - move to it once (domain + cert in one step).
+  warn "Let's Encrypt weekly limit reached for $FQDN - retrying once as $_alt"
+  _old="$FQDN"
+  if yc-nc-domain "$_alt" --le; then
+    FQDN="$_alt"; SSL_STATUS="free (Let's Encrypt)"; SSL_OK=yes; yc_extra ssl ok
+    say "certificate issued for the fallback name $FQDN"
+  else
+    yc-nc-domain "$_old" >/dev/null 2>&1 || true   # back to the first name, still self-signed
+    SSL_STATUS="self-signed (Let's Encrypt failed)"; SSL_OK=no
+    yc_extra ssl failed "Lets Encrypt limit on both sslip names - self-signed, run yc-nc-ssl le later"
+    warn "Let's Encrypt failed for both sslip names - the site is up on the temporary self-signed cert."
+  fi
 else
   SSL_STATUS="self-signed (Let's Encrypt failed)"; yc_extra ssl failed "Lets Encrypt failed - self-signed, run yc-nc-ssl le"
   warn "Let's Encrypt failed - the site is up on the temporary self-signed cert."

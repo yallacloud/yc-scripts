@@ -61,7 +61,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.8
+VER=1.0.9
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -410,6 +410,7 @@ mkdir -p /var/log/yallacloud; chmod 750 /var/log/yallacloud
 ln -sfn /var/log/yc-db-deploy.log /var/log/yallacloud/deploy.log; ln -sfn /var/log/yc-db-backup.log /var/log/yallacloud/backup.log
 cat > /etc/logrotate.d/yallacloud <<'EOF'
 /var/log/yallacloud/events.jsonl /var/log/yallacloud/errors.log /var/log/yallacloud/day2.log /var/log/yc-db-backup.log {
+  su root root
   weekly
   rotate 12
   compress
@@ -1123,8 +1124,8 @@ printf 'RESULT=%s\nTIME=%s\nDIR=%s\nSIZE=%s\nDETAIL=%s\n' "$res" "$(date '+%F %T
 log "backup $res -> $out ${err}"
 h=$(hostname -s)
 if [ "$res" = FAILED ]; then yc_event backup failed "$err ($h)"
-elif [ "$prev" = FAILED ]; then yc_event backup backtogreen "-> $out"
-else yc_event backup ok "-> $out $(du -sh "$out" 2>/dev/null | cut -f1)"; fi
+elif [ "$prev" = FAILED ]; then yc_event backup backtogreen "saved to $out"
+else yc_event backup ok "saved to $out ($(du -sh "$out" 2>/dev/null | cut -f1))"; fi
 [ "$res" = OK ]
 EOF
 chmod 700 /usr/local/sbin/yc-db-backup
@@ -1349,7 +1350,7 @@ deploy)
     log) journalctl -t YC-POSTGRESQL-DB -n 200 --no-pager ;;
     *) echo "usage: yallacloud deploy status|resume|log" ;;
   esac ;;
-*) sed -n '2,14p' "$0" | sed 's/^# //' ;;
+*) awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "$0" ;;
 esac
 YCEOF
 chmod 755 /usr/local/sbin/yallacloud

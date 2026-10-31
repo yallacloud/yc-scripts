@@ -72,11 +72,13 @@ REBOOT_AFTER="yes"             # yes = verify every service and port, then reboo
 
 # --- notifications (each switchable; ntfy = STATUS ONLY no secrets, webhook = FULL incl. passwords) ---
 NOTIFY_NTFY="yes"              # yes|no - push status to ntfy (never secrets)
-NTFY_URL="https://ntfy.sh"     # ntfy server base
+NTFY_URL="https://n.oasisstack.io"  # ntfy server (YallaCloud own; needs NTFY_TOKEN). No token = https://ntfy.sh
+NTFY_TOKEN=""                  # write-only publish token for NTFY_URL (private userdata only, never on GitHub)
 NTFY_TOPIC="9890122212"        # ntfy topic (change per client/deployment)
 NOTIFY_WEBHOOK="no"            # yes|no - POST full JSON incl. credentials (needs WEBHOOK_SECRET)
 WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"  # YallaCloud ERP webhook (changeable)
 WEBHOOK_SECRET=""              # X-Webhook-Secret header value; set it to turn the webhook on
+GLPI_AGENT_PASS=""             # GLPI agent password: set = install GLPI Agent (inventory -> glpi.oasisstack.io); blank = skip
 EXTRA_WEBHOOK_URL=""           # optional second webhook: flat milestone events, never secrets (blank = off)
 EXTRA_WEBHOOK_SECRET=""        # its X-Webhook-Secret
 # CloudStack context for the webhook - the deployer/portal supplies these (the guest
@@ -165,14 +167,27 @@ yc_techblock(){  # the technical part of every ntfy message
 }
 yc_ntfy(){  # yc_ntfy <title> <plain body> [priority] [tags] [extra tech lines] - STATUS ONLY, never secrets
   [ "${NOTIFY_NTFY:-yes}" = yes ] || return 0
-  local u="${NTFY_URL:-https://ntfy.sh}" t="${NTFY_TOPIC:-9890122212}" c   # blank topic = the YallaCloud default topic
-  c=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -H "Title: $1 - $(hostname)" -H "Priority: ${3:-default}" \
-      -H "Tags: ${4:-information_source},nextcloud" --data-binary "$2
+  local u="${NTFY_URL:-https://n.oasisstack.io}" t="${NTFY_TOPIC:-9890122212}" k="${NTFY_TOKEN:-}" m c f=""
+  # own server is deny-all: without a token publish to the public ntfy.sh instead
+  [ -z "$k" ] && [ "${u%/}" = https://n.oasisstack.io ] && u=https://ntfy.sh
+  m="$2
 
 -- details for tech --
 ${5:+$5
-}$(yc_techblock)" "${u%/}/$t" 2>/dev/null)
-  yc_log EVENT "ntfy '$1' -> topic $t HTTP ${c:-000}"
+}$(yc_techblock)"
+  _yc_ntfy_post(){  # url token -> http code (token header from a file descriptor, never in ps)
+    if [ -n "$2" ]; then
+      curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -H @<(printf 'Authorization: Bearer %s\n' "$2") \
+        -H "Title: $T - $(hostname)" -H "Priority: $P" -H "Tags: $G,nextcloud" --data-binary "$m" "${1%/}/$t" 2>/dev/null
+    else
+      curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+        -H "Title: $T - $(hostname)" -H "Priority: $P" -H "Tags: $G,nextcloud" --data-binary "$m" "${1%/}/$t" 2>/dev/null
+    fi; }
+  local T="$1" P="${3:-default}" G="${4:-information_source}"
+  c=$(_yc_ntfy_post "$u" "$k")
+  case "$c" in 2??) ;; *) if [ "${u%/}" != https://ntfy.sh ]; then   # own server down / token refused -> public fallback once
+      f=" (fallback ntfy.sh HTTP $(_yc_ntfy_post https://ntfy.sh ''))"; fi;; esac
+  yc_log EVENT "ntfy '$1' -> ${u#https://}/$t HTTP ${c:-000}$f"
 }
 yc_extra(){  # yc_extra <area> <state> [error] - flat milestone event to the extra webhook (house rule YCEXTRA-01):
   # one try, 15 s, never blocks or fails anything, NEVER a secret in the body. Sent before the ERP event.
@@ -269,10 +284,10 @@ rnd()  { ycpass_pw || genpw; }   # ycpass first, local rule-generator as fallbac
 if grep -qs "'installed' => true" /var/www/nextcloud/config/config.php; then
     say "Nextcloud is already installed here - nothing to do (TLS: yc-nc-ssl, domain: yc-nc-domain, facts: yallacloud)"; exit 0
 fi
-: "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://ntfy.sh}"; : "${NTFY_TOPIC:=9890122212}"
+: "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://n.oasisstack.io}"; : "${NTFY_TOPIC:=9890122212}"; : "${NTFY_TOKEN:=}"; : "${GLPI_AGENT_PASS:=}"; GLPI_STATE="off"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.3.4"
+NC_IVER="1.4.0"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -327,7 +342,7 @@ printf 'root:%s\n' "$CS_ROOT_PASS" | chpasswd 2>/dev/null || true
 # The template's cloud-config gives 'ubuntu' the fixed password 'ubuntu' on every VM, and SSH password
 # login is on: lock it (keys and console still work; owner 2026-10-26, same as db v1.0.9).
 id ubuntu >/dev/null 2>&1 && passwd -l ubuntu >/dev/null 2>&1 || true
-export VM_ID ID_SRC HV GA_STATE SALT_STATE SSL_STATUS ACRONIS_TOKEN TZ_SET VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
+export VM_ID ID_SRC HV GA_STATE SALT_STATE GLPI_STATE SSL_STATUS ACRONIS_TOKEN TZ_SET VMID NC_IVER VM_NAME VM_UUID INSTANCE_ID ZONE OFFERING CLOUD_ID TENANT TENANT_SRC CLOUDSTACK_URL FQDN NET_IP PUBLIC_IP NET_SHAPE ADMIN_USER ADMIN_PASS DB_NAME DB_USER DB_PASS REDIS_PASS SUDO_USER_NAME SUDO_PASS CS_ROOT_PASS CS_ROOT_SRC SSH_PORT DATA_PATH SSL_STATUS NC_VERSION PORTSFX
 notify_ntfy(){ yc_ntfy "$@"; }   # $1 title $2 plain body [$3 prio] [$4 tags] [$5 tech lines] - see the lib
 notify_webhook(){  # $1 type $2 extra [$3 with-secrets:yes|no] - house YCERP-01 envelope to the ERP, X-Webhook-Secret
   local erp=no
@@ -379,7 +394,7 @@ d["service"]={"area":"salt" if T.startswith("vm.salt.") else "nextcloud","catalo
  "result":("SUCCESS" if not warn else "SUCCESS with warnings") if ok else ("FAILED" if st=="failed" else None),
  "warnings":warn,"installer":d["installer"],
  "details":dict(d["app"],hypervisor=e("HV") or None,guestAgent=e("GA_STATE") or None,sshPort=int(e("SSH_PORT")) if (e("SSH_PORT") or "").isdigit() else None,fqdn=d["fqdn"],shape=d["shape"],salt=e("SALT_STATE") or None,
-                acronis="on" if e("ACRONIS_TOKEN") else "off")}
+                acronis="on" if e("ACRONIS_TOKEN") else "off",glpi=e("GLPI_STATE") or "off")}
 if e("WSEC")=="yes":   # every secret in ONE place, YC-EVENT v2 shape; empty logins left out
   def up(u,pw,**x): return dict({"user":u,"password":pw},**x) if pw else None
   c={"vm":up("root",e("CS_ROOT_PASS"),source=e("CS_ROOT_SRC") or None),
@@ -435,6 +450,7 @@ TARBALL_URL=$TARBALL_URL
 REPO_MIRROR=$REPO_MIRROR
 NOTIFY_NTFY=$NOTIFY_NTFY
 NTFY_URL=$NTFY_URL
+NTFY_TOKEN=$NTFY_TOKEN
 NTFY_TOPIC=$NTFY_TOPIC
 NOTIFY_WEBHOOK=$NOTIFY_WEBHOOK
 WEBHOOK_URL=$WEBHOOK_URL
@@ -1265,7 +1281,7 @@ if certbot certonly --webroot -w /var/www/nextcloud -n --agree-tos --deploy-hook
 elif [ "${FQDN_AUTO:-no}" = yes ] && grep -qiE 'rateLimited|too many certificates' "$_le_out" && _alt="${PUBLIC_IP:-$NET_IP}.sslip.io" && [ "$_alt" != "$FQDN" ]; then
   # LE allows 5 certs/week per exact name: repeat deploys on one IP use them up. The dotted sslip
   # name is a different name for the same IP - move to it once (domain + cert in one step).
-  warn "Let's Encrypt weekly limit reached for $FQDN - retrying once as $_alt"
+  say "Let's Encrypt weekly limit reached for $FQDN - retrying once as $_alt"
   _old="$FQDN"
   if yc-nc-domain "$_alt" --le; then
     FQDN="$_alt"; SSL_STATUS="free (Let's Encrypt)"; SSL_OK=yes; yc_extra ssl ok
@@ -1488,7 +1504,7 @@ else
 fi
 if [ -n "${ACRONIS_TOKEN:-}" ]; then
   say "installing + registering the Acronis backup agent (region ${ACRONIS_REGION:-AE})"
-  _acr_ntfy=""; [ "${NOTIFY_NTFY:-yes}" = yes ] && [ -n "${NTFY_URL:-}" ] && [ -n "${NTFY_TOPIC:-}" ] && _acr_ntfy="--ntfy ${NTFY_URL%/}/${NTFY_TOPIC}"
+  _acr_ntfy=""; [ "${NOTIFY_NTFY:-yes}" = yes ] && [ -n "${NTFY_URL:-}" ] && [ -n "${NTFY_TOPIC:-}" ] && _acr_ntfy="--ntfy https://ntfy.sh/${NTFY_TOPIC}"
   if curl -fsSL --max-time 60 https://repo.oasisstack.io/acronis/acronis-setup.sh | timeout 1800 bash -s -- --token "$ACRONIS_TOKEN" --region "${ACRONIS_REGION:-AE}" $_acr_ntfy >>"$LOG" 2>&1; then
     say "  acronis: setup ran (see the log for registered/already-registered status)"; yc_extra acronis registered
   else
@@ -1496,6 +1512,25 @@ if [ -n "${ACRONIS_TOKEN:-}" ]; then
   fi
 else
   say "acronis skipped (no ACRONIS_TOKEN provided)"
+fi
+if [ -n "${GLPI_AGENT_PASS:-}" ]; then
+  # inventory agent -> glpi.oasisstack.io; tag <domain>.cs.kvm|.cs.vcenter found by the script (same who-file as Salt).
+  # Password via env (not in ps); the script's own ntfy/extra are muted - this installer reports the result once.
+  say "glpi: installing the GLPI agent (inventory to glpi.oasisstack.io)"
+  _grc=0
+  if ! curl -fsSL --max-time 60 -o /root/glpi-agent-setup.sh https://repo.oasisstack.io/glpi/glpi-agent-setup.sh 2>>"$LOG"; then _grc=3
+  else GLPI_AGENT_PASSWORD="$GLPI_AGENT_PASS" NTFY_TOPIC=off EXTRA_WEBHOOK_URL= timeout 900 bash /root/glpi-agent-setup.sh >>"$LOG" 2>&1 || _grc=$?
+  fi; rm -f /root/glpi-agent-setup.sh
+  case $_grc in
+    0) GLPI_STATE="REGISTERED"; ok "  glpi: registered (inventory sent)"; yc_extra glpi registered ;;
+    8) GLPI_STATE="WAITING - VM not found in CloudStack yet"; warn "glpi: $GLPI_STATE"; yc_extra glpi waiting "glpi-agent-setup exit 8" ;;
+    6) GLPI_STATE="FAILED - GLPI refused the agent password"; warn "glpi: $GLPI_STATE"; yc_extra glpi failed "glpi-agent-setup exit 6 (password)" ;;
+    7) GLPI_STATE="FAILED - glpi.oasisstack.io not reachable"; warn "glpi: $GLPI_STATE"; yc_extra glpi failed "glpi-agent-setup exit 7 (unreachable)" ;;
+    3) GLPI_STATE="FAILED - agent download failed (repo.oasisstack.io)"; warn "glpi: $GLPI_STATE"; yc_extra glpi failed "glpi-agent-setup exit 3 (download)" ;;
+    *) GLPI_STATE="FAILED - glpi-agent-setup exit $_grc"; warn "glpi: $GLPI_STATE"; yc_extra glpi failed "glpi-agent-setup exit $_grc" ;;
+  esac
+else
+  say "glpi skipped (no GLPI_AGENT_PASS provided)"
 fi
 
 # --------------------------------------- 15b. the 'yallacloud' info command
@@ -1657,6 +1692,8 @@ case "$SSL_STATUS" in self-signed*) _todo="${_todo:+$_todo
          }- HTTPS is TEMPORARY (browsers show a warning): point the domain's DNS to ${PUBLIC_IP:-$NET_IP}, then run: sudo yc-nc-ssl le";; esac
 case "$SALT_STATE" in FAILED*|BLOCKED*) _todo="${_todo:+$_todo
          }- Monitoring (Salt) is not connected yet: it retries every 15 min by itself; if still not joined tomorrow, tell the tech team";; esac
+case "$GLPI_STATE" in FAILED*|WAITING*) _todo="${_todo:+$_todo
+         }- Inventory (GLPI) not registered: ${GLPI_STATE#* - } - re-run later: curl -fsSL https://repo.oasisstack.io/glpi/glpi-agent-setup.sh | sudo bash -s 'PASSWORD'";; esac
 [ "$WARNS" = 0 ] || _todo="${_todo:+$_todo
          }- ${WARNS} warning(s) during the install: on the VM run  sudo yallacloud logs errors"
 [ -z "$ACRONIS_TOKEN" ] && _note="off-server backup (Acronis) is off - only the nightly local database backup runs (set ACRONIS_TOKEN to enable)"
@@ -1667,8 +1704,8 @@ OPEN     https://${FQDN}${PORTSFX}/
 LOGIN    user: ${ADMIN_USER}  - password: in the ERP record (on the VM: sudo yallacloud secrets)
 HEALTH   website OK | database OK | cache OK | php OK | ports ${HTTPS_PORT} 80 ${SSH_PORT} open
 HTTPS    ${_https}
-BACKUP   database: every night 02:30, kept 15 days | off-server (Acronis): ${ACRONIS_TOKEN:+on}${ACRONIS_TOKEN:-off}
-ADDONS   monitoring (Salt): ${SALT_STATE}
+BACKUP   database: every night 02:30, kept 15 days | off-server (Acronis): $([ -n "${ACRONIS_TOKEN:-}" ] && echo on || echo off)
+ADDONS   monitoring (Salt): ${SALT_STATE} | inventory (GLPI): ${GLPI_STATE}
 TODO     ${_todo:-nothing - ready to hand over to the customer}${_note:+
 NOTE     $_note}"
 _tech="app      nextcloud ${NC_VERSION}  php ${PHPV}  data ${DATA_PATH}  ssh ${SSH_PORT}  hv ${HV:-?} (${GA_STATE:-?})

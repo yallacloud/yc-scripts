@@ -1,5 +1,5 @@
 #cloud-config
-# YallaCloud Nextcloud - MINI userdata v1.4.0 | Ubuntu 24.04 | CloudStack KVM + VMware
+# YallaCloud Nextcloud - MINI userdata v1.4.1 | Ubuntu 24.04 | CloudStack KVM + VMware
 # Template: KVM LNX-Ubuntu-24.04-LTS-KVM-v263 | VMware LNX-Ubuntu-24.04-LTS-VC-v263-fix2
 # Not listed here = installer default. Result: ntfy + /root/yc-handover.json | log: yallacloud logs
 package_update: false

@@ -287,7 +287,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://n.oasisstack.io}"; : "${NTFY_TOPIC:=9890122212}"; : "${NTFY_TOKEN:=}"; : "${GLPI_AGENT_PASS:=}"; GLPI_STATE="off"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.4.0"
+NC_IVER="1.4.1"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -1487,8 +1487,15 @@ if [ "${JOIN_SALT:-yes}" = yes ]; then
   # reachability gate: the minion must reach the master publisher port before joining.
   if timeout 8 bash -c '</dev/tcp/salt.oasisstack.io/4506' 2>/dev/null; then
     say "salt: master salt.oasisstack.io:4506 reachable - joining via repo.oasisstack.io/salt/join.sh"
-    if timeout 1200 bash -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' >>"$LOG" 2>&1; then
+    # join.sh prints its own summary (Result : JOINED|WAITING|FAILED); its ntfy is muted here - this installer reports once
+    _sj=$(NTFY_TOPIC=off timeout 1200 bash -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1); _sjrc=$?
+    printf '%s\n' "$_sj" >>"$LOG"
+    _sjres=$(printf '%s\n' "$_sj" | sed -n 's/^ *Result *: *\([A-Z]*\).*/\1/p' | tail -1)
+    if [ "$_sjrc" = 0 ] && [ "${_sjres:-JOINED}" = JOINED ]; then
       SALT_STATE="JOINED"; yc_extra salt joined; ok "  salt: joined (the master assigns the minion id: <domain>-<vmname>)"
+    elif [ "$_sjres" = WAITING ]; then   # the master's CloudStack list does not show this VM yet - join.sh retries every 15 min
+      SALT_STATE="WAITING - the Salt master does not list this VM yet, retry every 15 min"; warn "salt: $SALT_STATE"
+      yc_extra salt waiting "master does not list this VM yet (uuid ${VM_UUID:-?}) - retry every 15 min"
     else
       printf '# YallaCloud: Salt join failed at install - retry the zero-input join until JOINED (join.sh removes this)\n*/15 * * * * root curl -fsS https://repo.oasisstack.io/salt/join.sh | sh 2>\&1 | logger -t YC-NEXTCLOUD -p user.info\n' > /etc/cron.d/yc-salt-join
       SALT_STATE="FAILED - join.sh failed (repo/apt mirror), retry every 15 min"; warn "salt: $SALT_STATE"; yc_extra salt failed "join.sh failed - retry cron every 15 min"
@@ -1690,7 +1697,7 @@ yc_write_facts
 _todo=""; _note=""
 case "$SSL_STATUS" in self-signed*) _todo="${_todo:+$_todo
          }- HTTPS is TEMPORARY (browsers show a warning): point the domain's DNS to ${PUBLIC_IP:-$NET_IP}, then run: sudo yc-nc-ssl le";; esac
-case "$SALT_STATE" in FAILED*|BLOCKED*) _todo="${_todo:+$_todo
+case "$SALT_STATE" in FAILED*|BLOCKED*|WAITING*) _todo="${_todo:+$_todo
          }- Monitoring (Salt) is not connected yet: it retries every 15 min by itself; if still not joined tomorrow, tell the tech team";; esac
 case "$GLPI_STATE" in FAILED*|WAITING*) _todo="${_todo:+$_todo
          }- Inventory (GLPI) not registered: ${GLPI_STATE#* - } - re-run later: curl -fsSL https://repo.oasisstack.io/glpi/glpi-agent-setup.sh | sudo bash -s 'PASSWORD'";; esac

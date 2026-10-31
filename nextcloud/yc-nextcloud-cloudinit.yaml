@@ -1,6 +1,6 @@
 #cloud-config
 ###############################################################################
-#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.4.0    #
+#  YallaCloud Nextcloud - cloud-init for Ubuntu 24.04 LTS           v1.4.1    #
 #                                                                             #
 #  WHAT TO EDIT:  only the lines under "EDIT THESE" in the nextcloud.conf     #
 #  block below. NOTHING is strictly required - leave FQDN blank and the box   #
@@ -68,7 +68,7 @@ write_files:
       # Notifications - ntfy = status only (no secrets), webhook = full incl. passwords:
       NOTIFY_NTFY=yes
       NTFY_URL=https://n.oasisstack.io     # YallaCloud own ntfy (needs NTFY_TOKEN); no token = public https://ntfy.sh
-      NTFY_TOKEN=                      # write-only publish token (user ycdeploy, topic 9890122212); blank = ntfy.sh
+      NTFY_TOKEN=                      # write-only publish token (user ycdeploy, label yc-nextcloud-kit, topic 9890122212); blank = ntfy.sh
       NTFY_TOPIC=9890122212              # ntfy topic (status only); blank = the YallaCloud default 9890122212
       NOTIFY_WEBHOOK=no                  # set yes + WEBHOOK_SECRET to enable
       WEBHOOK_URL=https://api.yallacloud.net/api/v1/webhooks/cloudstack

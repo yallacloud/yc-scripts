@@ -192,9 +192,9 @@ Write-Host ''
 Write-Host '=== 10. the phase is wired into the run, not just defined ===' -ForegroundColor Cyan
 T 'SALT is in AllPhases'                 ($src -match '\$AllPhases = @\(''SURVEY''.*''SALT''') ''
 T 'SALT is in the dispatcher'             ($src -match '''SALT''\s*\{\s*\$rc = Invoke-Salt') ''
-T 'SALT is in the dispatched guard list'  ($src.IndexOf("'TASKS','SALT','ACRONIS','GLPI','NOTIFY','VERIFY'") -gt 0) ''
+T 'SALT is in the dispatched guard list'  ($src.IndexOf("'TASKS','SALT','ACRONIS','GLPI','WSUS','NOTIFY','VERIFY'") -gt 0) ''
 T 'SALT runs after TASKS, before ACRONIS' ($src.IndexOf("'TASKS','SALT','ACRONIS'") -gt 0) ''
-T 'the outcome leaves the VM for ychook'  ($src -match 'salt='' \+ \[string\]\$sl\.action') ''
+T 'the outcome leaves the VM (webhooks)'  ($src -match 'salt='' \+ \[string\]\$sl\.action') ''
 T '-Help documents the phase'             ($src -match '(?m)^  SALT       hands this machine') ''
 T '-Report mode cannot reach it'          ($src -match 'if \(\$Report\) \{ \$phases = @\(''SURVEY'',''SQL''\) \}') ''
 T 'it calls the house command salt-join, not its own fetch' ($src.IndexOf("Invoke-YcCommand -Script 'Salt-Join.ps1'") -gt 0) ''
@@ -204,7 +204,7 @@ T 'a CONFIGURED line with leading spaces is still matched' ($src.IndexOf('s*(JOI
 T 'and the reason for that is written down'               ($src.IndexOf('four leading spaces') -gt 0) ''
 T 'INSTALLED / NOT INSTALLED is its own log line'         ($src.IndexOf('salt-minion   : INSTALLED') -gt 0 -and $src.IndexOf('salt-minion   : NOT INSTALLED') -gt 0) ''
 T 'a minion off the 3008 line is flagged'                 ($src.IndexOf('not on the 3008 LTS line') -gt 0) ''
-T 'install state and version leave the VM for ychook'     ($src.IndexOf('saltInstalled=') -gt 0 -and $src.IndexOf('saltVersion=') -gt 0) ''
+T 'install state and version leave the VM (webhooks)'     ($src.IndexOf('saltInstalled=') -gt 0 -and $src.IndexOf('saltVersion=') -gt 0) ''
 
 Write-Host ''
 Write-Host ('RESULT: ' + [string]$pass + ' passed, ' + [string]$fail + ' failed') -ForegroundColor $(if($fail -eq 0){'Green'}else{'Red'})

@@ -65,7 +65,7 @@ param(
 Start-YcLog 'fix-deploy'
 $ErrorActionPreference = 'Continue'
 
-$AllFixes = @('lockout','gateway','tls','console','cbinit','sqlrename','salt')
+$AllFixes = @('lockout','gateway','tls','console','cbinit','sqlrename','salt','wsus')
 
 if($Help){
 @"
@@ -100,6 +100,13 @@ THE FIXES:
             installs Salt 3008 if missing, joins as <cloudstack-domain>-<vm-name> and retries
             every 15 min until JOINED. Never fails the deployment. Skipped when already joined or
             when C:\ProgramData\YallaCloud\salt\no-join exists. Applies to: every template.
+  wsus      Windows Update from the YallaCloud local update server (ycwsus01) instead of the
+            internet: set-local-wsus -Install. Only when that server ANSWERS - otherwise the VM
+            stays on Microsoft Update and keeps patching. Never replaces a customer's own update
+            server. Registers YC-WsusGuard, which puts the VM back on Microsoft by itself if the
+            server stops answering or the VM stops getting updates (3 days). Never fails the
+            deployment. Skipped when C:\ProgramData\YallaCloud\wsus\no-local exists.
+            Back to Microsoft by hand: set-local-wsus -Uninstall. Applies to: every template.
   cbinit    Adds the cloudbase-init NetworkConfigPlugin if the template shipped without it.
             Without that plugin cloudbase-init NEVER applies the IP, netmask, gateway, routes
             or DNS that CloudStack puts in the config drive. On a network with a virtual
@@ -849,6 +856,37 @@ if($run -contains 'salt'){
     $o | ForEach-Object { Write-YcLog ('  salt-join: ' + $_) }
     if($rc -ne 0){ Write-YcLog ('  salt: salt-join exit ' + $rc + ' - not counted as a deployment failure; run salt-join -Status') 'WARN' }
     elseif($o -match 'join started'){ $script:Changed++ }   # already joined / opted out = no change
+  }
+}
+
+Step-YcFix 'wsus'
+# ===========================================================================
+# FIX 8 - Windows Update from the local update server (set-local-wsus). Never a deployment
+# failure: if the server does not answer, or the VM already belongs to another update server,
+# the VM simply stays where it is and keeps patching. set-local-wsus reports vm.wsus.* itself.
+# ===========================================================================
+if($run -contains 'wsus'){
+  Write-YcLog '--- wsus: Windows Update from the local update server (ycwsus01) ---'
+  $sw = 'C:\Scripts\Set-LocalWsus.ps1'
+  $optOut = 'C:\ProgramData\YallaCloud\wsus\no-local'
+  if(-not (Test-Path -LiteralPath $sw)){
+    Write-YcLog '  wsus: Set-LocalWsus.ps1 is not in this payload - skipped' 'WARN'
+  } elseif(Test-Path -LiteralPath $optOut){
+    Write-YcLog ('  wsus: opted out (' + $optOut + ') - left on its current update source.') 'OK'
+  } elseif($Report){
+    $o = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sw -Status *>&1)
+    $o | ForEach-Object { Write-YcLog ('  set-local-wsus: ' + $_) }
+    Write-YcLog '  WOULD run: set-local-wsus -Install (only if the local server answers)' 'WARN'; $script:Would++
+  } else {
+    $o = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sw -Install *>&1)
+    $rc = $LASTEXITCODE
+    $o | ForEach-Object { Write-YcLog ('  set-local-wsus: ' + $_) }
+    switch($rc){
+      0 { Write-YcLog '  wsus: now using the local update server (fallback guard registered).' 'OK'; $script:Changed++ }
+      6 { Write-YcLog '  wsus: this VM already uses another update server - left as it is (not a deployment failure).' 'WARN' }
+      7 { Write-YcLog '  wsus: the local server did not answer - the VM stays on Microsoft Update (not a deployment failure). Later: fix-deploy -Only wsus' 'WARN' }
+      default { Write-YcLog ('  wsus: set-local-wsus exit ' + $rc + ' - not counted as a deployment failure; run set-local-wsus -Status') 'WARN' }
+    }
   }
 }
 

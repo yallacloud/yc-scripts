@@ -150,7 +150,7 @@ function YcVerdict {
 # someone who already has C:\Scripts and can type  migrated-vm -Help .
 $Allowed = @('-Report','-Run','-Status','-AcronisToken','-AcronisRegion','-SkipAcronis',
              '-SkipSalt','-SaltMaster','-GrowDisk','-AllowReboot','-Force','-Skip','-Only',
-             '-QemuGaMsi','-SkipGlpi','-Help')
+             '-QemuGaMsi','-SkipGlpi','-SkipWsus','-Help')
 $TakesValue = @('-AcronisToken','-AcronisRegion','-SaltMaster','-Skip','-Only','-QemuGaMsi')
 $Secret     = @('-AcronisToken')
 
@@ -394,6 +394,7 @@ function YcHelp {
   YcSay '  -AcronisRegion AE|SG   AE = UAE, SG = Singapore'
   YcSay '  -SkipAcronis           never touch Acronis, and do not ask'
   YcSay '  -SkipGlpi              never touch the GLPI agent, even with a password set'
+  YcSay '  -SkipWsus              keep Windows Update on its current source'
   YcSay '  -SkipSalt              do not join the Salt master'
   YcSay '  -SaltMaster <host>     override the master. Default is derived from the IP.'
   YcSay '  -GrowDisk              actually extend partitions. Default: detect, report.'

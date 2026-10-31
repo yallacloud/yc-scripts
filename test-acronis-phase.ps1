@@ -130,9 +130,9 @@ T 'the honest limit is written down'     ($src.IndexOf('visible in the process l
 
 Write-Host ''
 Write-Host '=== 9. wired into the run ===' -ForegroundColor Cyan
-T 'ACRONIS is in AllPhases'              ($src.IndexOf("'TASKS','SALT','ACRONIS','GLPI','NOTIFY','VERIFY'") -gt 0) ''
+T 'ACRONIS is in AllPhases'              ($src.IndexOf("'TASKS','SALT','ACRONIS','GLPI','WSUS','NOTIFY','VERIFY'") -gt 0) ''
 T 'ACRONIS has a dispatcher case'        ($src.IndexOf("'ACRONIS'   { `$rc = Invoke-Acronis }") -gt 0) ''
-T 'it runs after SALT, before GLPI and NOTIFY' ($src.IndexOf("'SALT','ACRONIS','GLPI','NOTIFY'") -gt 0) ''
+T 'it runs after SALT, before GLPI, WSUS and NOTIFY' ($src.IndexOf("'SALT','ACRONIS','GLPI','WSUS','NOTIFY'") -gt 0) ''
 T 'the notification carries a line'      ($src.IndexOf("'acronis  : '") -gt 0) ''
 T 'the state leaves the VM (webhooks)'   ($src.IndexOf('acronisRegistered=') -gt 0 -and $src.IndexOf('acronisInstalled=') -gt 0) ''
 T 'but the token does NOT'               ($src.IndexOf('acronisToken=') -lt 0) ''

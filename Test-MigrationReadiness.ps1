@@ -272,6 +272,12 @@ function Get-YcMsState{
         if($Code -eq 3){ return 'waitforhuman' }      # installed and running, the installer wants a reboot
         return 'failed'
     }
+    if($Area -eq 'wsus'){
+        if($Code -eq 0){ return 'ok' }
+        if($Code -eq 6){ return 'waitforhuman' }      # already on ANOTHER update server - left as it is
+        if($Code -eq 7){ return 'waiting' }           # local server did not answer - stays on Microsoft
+        return 'failed'
+    }
     if($Area -eq 'glpi'){
         if($Code -eq 0){ return 'registered' }
         if($Code -eq 8){ return 'waiting' }           # VM not known to CloudStack yet

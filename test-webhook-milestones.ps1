@@ -108,7 +108,7 @@ $h = Get-AdoptPhaseHook -Phase 'ACRONIS' -Rc 0 -Action 'installed-registered'; T
 $h = Get-AdoptPhaseHook -Phase 'GLPI' -Rc 0 -Action 'registered';     T 'adopt GLPI ran -> nothing (glpi-join reports itself)' ($null -eq $h)
 $h = Get-AdoptPhaseHook -Phase 'GLPI' -Rc 0 -Action 'skipped-not-requested'; T 'adopt GLPI not requested -> nothing' ($null -eq $h)
 $h = Get-AdoptPhaseHook -Phase 'GLPI' -Rc 3 -Action 'no-command';     T 'adopt GLPI command missing -> vm.glpi.failed' ($h.area -eq 'glpi' -and $h.state -eq 'failed')
-T 'adopt has the GLPI phase between ACRONIS and NOTIFY' ($adopt -match "'SALT','ACRONIS','GLPI','NOTIFY','VERIFY'" -and $adopt -match "'GLPI'      \{ \`$rc = Invoke-Glpi \}")
+T 'adopt has the GLPI phase between ACRONIS and NOTIFY' ($adopt -match "'SALT','ACRONIS','GLPI','WSUS','NOTIFY','VERIFY'" -and $adopt -match "'GLPI'      \{ \`$rc = Invoke-Glpi \}")
 T 'adopt GLPI password only from the environment'      ($adopt -notmatch '\[string\]\`$Glpi\w*Password' -and $adopt -match 'GLPI_AGENT_PASSWORD')
 $h = Get-AdoptPhaseHook -Phase 'SQLBACKUP' -Rc 3;                    T 'adopt flagged phase -> waitforhuman'      ($h.area -eq 'adopt-sqlbackup' -and $h.state -eq 'waitforhuman')
 $h = Get-AdoptPhaseHook -Phase 'PREREQ' -Rc 1;                       T 'adopt reboot-wait -> waiting'             ($h.state -eq 'waiting')
@@ -137,7 +137,7 @@ T 'glpi-join is in the catalogue and has a .cmd'        ((Test-Path (Join-Path $
 T 'Stop-YcLog sends the run milestone, not on the unclean path' ($lib -match 'if\(-not \$Unclean\)\{ try\{ \[void\]\(Send-YcRunMilestone -Code \$Code\) \}catch\{\} \}')
 T 'Start-YcLog records the caller''s parameters'       ($lib -match '\$script:YcBoundNames = @\(\$ii\.BoundParameters\.Keys\)')
 T 'Exit-Yc keeps its message as the reason'             ($lib -match 'if\(\$Code -ne 0 -and \$Message\)\{ \$script:YcLastMessage = \$Message \}')
-T 'library version is 2.2.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.2\.0'")
+T 'library version is 2.3.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.3\.0'")
 # The call-stack capture, run for real: a script given -Report must be seen as read-only.
 $m = [regex]::Match($lib, '(?s)    \$script:YcBoundNames = @\(\)\r?\n    try\{.*?\n    \}catch\{\}')
 T 'capture code found' $m.Success

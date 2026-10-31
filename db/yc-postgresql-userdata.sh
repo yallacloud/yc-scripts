@@ -6,6 +6,8 @@
 # Every value is checked on the VM: a wrong REQUIRED value stops with the reason,
 # a wrong optional value falls back to the default (logged as WARN).
 # Result: /root/yc-db/handover.txt (yallacloud secrets) | log /var/log/yc-db-deploy.log
+# FULL version: every setting. Short version with only the usual settings: yc-postgresql-userdata.min.sh
+# (anything not set in the min file gets the same default as below). Both run the same installer yc-pg-install.sh.
 
 # ===================== EDIT THESE =====================
 # shellcheck disable=SC2034  # values are written out by name below

@@ -1,5 +1,5 @@
 #!/bin/bash
-# yc-odoo20-userdata.sh  v1.3.12  (2026-10-28 15:00 IST)  YallaCloud / OasisStack
+# yc-odoo20-userdata.sh  v1.3.13  (2026-10-31 10:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Ubuntu 24.04 -> Odoo 20 Community (+ PostgreSQL 18).
 # Guide: STACK4-61. Paste in CloudStack: Add Instance > Advanced > Userdata.
 # Two-server layout: deploy ROLE=db FIRST, read /root/odoo-info/handover.txt on it,
@@ -36,8 +36,10 @@ BACKUP_KEEP_DAYS="15"  # 1-365
 BACKUP_TIME="02:30"    # HH:MM
 # -- 6. reporting: ntfy = phone (never passwords) | webhook = YallaCloud ERP (YCERP-01)
 ENABLE_NTFY="yes"
-NTFY_SERVER="https://ntfy.sh"
+NTFY_SERVER="https://n.oasisstack.io"   # YallaCloud ntfy (needs NTFY_TOKEN); refused/blank token -> NTFY_FALLBACK
 NTFY_TOPIC="9890122212"   # blank = 9890122212
+NTFY_TOKEN=""             # write-only ntfy token (secret, password manager "ntfy yc-odoo-kit")
+NTFY_FALLBACK="https://ntfy.sh"   # public ntfy, same topic, only when NTFY_SERVER fails (blank = none)
 ENABLE_WEBHOOK="yes"
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""  # REQUIRED for the webhook: X-Webhook-Secret from the estate secret store
@@ -51,6 +53,10 @@ ENABLE_SALT="yes"      # join the YallaCloud Salt master (zero-input)
 ENABLE_ACRONIS="yes"   # Acronis agent - runs ONLY when ACRONIS_TOKEN is set
 ACRONIS_TOKEN=""       # registration token (secret)
 ACRONIS_REGION="AE"    # AE | SG
+ENABLE_GLPI="yes"      # GLPI agent -> glpi.oasisstack.io (inventory) - runs ONLY when GLPI_AGENT_PASSWORD is set
+GLPI_AGENT_PASSWORD="" # GLPI agent password (secret, password manager "GLPI agent glpi-agent")
+GLPI_TAG=""            # blank = automatic <tenant>.cs.kvm / .cs.vcenter; own servers: infra.<role>
+ENABLE_MONITOR="yes"   # Uptime Kuma watches the Odoo URL (request via ntfy yc-register; needs NTFY_TOKEN)
 # -- 8. advanced
 INSTALLER_REF="main"   # git branch or tag of yallacloud/yc-scripts to install from
 # ===================================================================
@@ -68,12 +74,14 @@ fail(){
   echo "[$(date +%F' '%T)] userdata: FATAL: $*"; ycl ERROR "userdata FAILED: $*"; mkdir -p /root/odoo-info; echo "$*" > /root/odoo-info/INSTALL-FAILED
   echo "FAILED step userdata: $* ($(date '+%F %T %Z'))" > "$STATUS"
   local h e u; h=$(hostname); e=${1//\\/\\\\}; e=${e//\"/\\\"}; u=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null)
-  [ "$ENABLE_NTFY" = yes ] && curl -fsS -m 15 -H "Title: FAILED BUILD odoo $ROLE - $h" -H "Priority: 5" -H "Tags: rotating_light,odoo" \
-    -d "$(printf 'result  FAILED in userdata\nerror   %s\nhost    %s  %s\nlog     %s' "$1" "$h" "$(hostname -I)" "$LOG")" "${NTFY_SERVER%/}/$NTFY_TOPIC" >/dev/null
+  local nm; nm=$(printf 'result  FAILED in userdata\nerror   %s\nhost    %s  %s\nlog     %s' "$1" "$h" "$(hostname -I)" "$LOG")
+  [ "$ENABLE_NTFY" = yes ] && { curl -fsS -m 15 ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} -H "Title: FAILED BUILD odoo $ROLE - $h" -H "Priority: 5" -H "Tags: rotating_light,odoo" \
+    -d "$nm" "${NTFY_SERVER%/}/$NTFY_TOPIC" >/dev/null 2>&1 || { [ -n "$NTFY_FALLBACK" ] && curl -fsS -m 15 -H "Title: FAILED BUILD odoo $ROLE - $h" -H "Priority: 5" \
+    -H "Tags: rotating_light,odoo" -d "$nm" "${NTFY_FALLBACK%/}/$NTFY_TOPIC" >/dev/null 2>&1; }; }
   local ev; ev="{\"type\":\"vm.deploy.failed\",\"vmId\":\"$u\",\"smbiosUuid\":\"$u\",\"identitySource\":\"smbios\",\"hostname\":\"$h\",\"ip\":\"$(hostname -I | awk '{print $1}')\",\"utc\":\"$(date -u +%FT%TZ)\",\"lastUpdated\":\"$(date '+%F %T %z')\",\"failedStep\":\"userdata\",\"error\":\"$e\",\"steps\":\"USERDATA-\",\"extra\":\"FAILED BUILD odoo $ROLE\",\"fields\":{\"area\":\"odoo\",\"status\":\"failed\"}}"
   # extra webhook FIRST (flat body, no secrets, one try), then the ERP (unchanged)
   [ -n "$EXTRA_WEBHOOK_URL" ] && curl -fsS -m 15 -H 'Content-Type: application/json' -H "X-Webhook-Secret: $EXTRA_WEBHOOK_SECRET" \
-    -d "{\"type\":\"vm.deploy.failed\",\"vmId\":\"$u\",\"hostname\":\"$h\",\"ip\":\"$(hostname -I | awk '{print $1}')\",\"os\":\"$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")\",\"error\":\"$(printf '%s' "$1" | tr -d '"\\' | head -c 300)\",\"lastUpdated\":\"$(date '+%F %T %z')\",\"extra\":\"yc-odoo20-userdata 1.3.10\"}" \
+    -d "{\"type\":\"vm.deploy.failed\",\"vmId\":\"$u\",\"hostname\":\"$h\",\"ip\":\"$(hostname -I | awk '{print $1}')\",\"os\":\"$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")\",\"error\":\"$(printf '%s' "$1" | tr -d '"\\' | head -c 300)\",\"lastUpdated\":\"$(date '+%F %T %z')\",\"extra\":\"yc-odoo20-userdata 1.3.13\"}" \
     "$EXTRA_WEBHOOK_URL" >/dev/null 2>&1
   [ "$ENABLE_WEBHOOK" = yes ] && [ -n "$ERP_WEBHOOK_URL" ] && curl -fsS -m 20 -H 'Content-Type: application/json' \
     ${ERP_WEBHOOK_SECRET:+-H "X-Webhook-Secret: $ERP_WEBHOOK_SECRET"} -d "$ev" "$ERP_WEBHOOK_URL" >/dev/null
@@ -92,8 +100,9 @@ fi
 # answers for the installer (it validates each one, moves the secrets to notify.env)
 umask 077; mkdir -p /etc/yallacloud
 for v in ROLE DOMAIN LE_EMAIL DB_HOST DB_PASS APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT ROOT_PW_FROM_CLOUDSTACK VM_PW_USERS SSH_PUBKEYS TZ_SET LOCALE_SET \
-         BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL \
-         ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT ENABLE_SALT ENABLE_ACRONIS ACRONIS_TOKEN ACRONIS_REGION; do
+         BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC NTFY_TOKEN NTFY_FALLBACK ENABLE_WEBHOOK ERP_WEBHOOK_URL \
+         ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT ENABLE_SALT ENABLE_ACRONIS ACRONIS_TOKEN ACRONIS_REGION \
+         ENABLE_GLPI GLPI_AGENT_PASSWORD GLPI_TAG ENABLE_MONITOR; do
   printf '%s=%q\n' "$v" "${!v}"
 done > /etc/yallacloud/odoo.conf.env
 umask 022
@@ -131,7 +140,7 @@ say "$(fix_gateway "$GATEWAY")"   # BEFORE the download: a dead .254 gateway mea
 # installer: GitHub (public yallacloud/yc-scripts), then the local mirror repo.oasisstack.io/odoo
 # (ycwsus01, YC ranges), then two more GitHub mirrors - each checked by its .sha256
 R=yallacloud/yc-scripts; F=odoo/yc-odoo20-install.sh; OUT=/root/yc-odoo20-install.sh; ok=""
-MIN_VER="1.5.1"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
+MIN_VER="1.6.0"   # oldest installer this userdata works with: a CDN can serve a stale copy for minutes
 for u in "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F" \
          "https://raw.githubusercontent.com/$R/$INSTALLER_REF/$F?nocache=$(date +%s)" \
          "https://repo.oasisstack.io/odoo/yc-odoo20-install.sh" \

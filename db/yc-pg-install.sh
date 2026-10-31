@@ -63,7 +63,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.15
+VER=1.0.16
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -1464,7 +1464,7 @@ if [ "$GLPI_AGENT" != yes ]; then GLPI_STATE="off (GLPI_AGENT=no)"
 elif [ "$SALT_JOIN" != yes ]; then GLPI_STATE="off (needs SALT_JOIN=yes)"
 elif [ "$SALT_STATE" != JOINED ]; then GLPI_STATE="waiting for Salt"; yc_event glpi waiting "Salt not joined yet - Salt installs the agent after the join"
 else   # the reactor applies glpi.agent on minion start; wait up to 7 min for its result line
-  t_end=$((SECONDS+420)); GLPI_STATE=""; n0=$(grep -cs "\[glpi-agent\] \[" "$GLL")
+  t_end=$((SECONDS+420)); GLPI_STATE=""; n0=$(grep -cs "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL")
   systemctl is-active -q glpi-agent && grep -qs "\[glpi-agent\] \[OK\] REGISTERED" "$GLL" && n0=0   # re-run: already registered
   while [ $SECONDS -lt $t_end ]; do
     l=$(grep -s "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL" | tail -n +$((n0+1)) | tail -1)

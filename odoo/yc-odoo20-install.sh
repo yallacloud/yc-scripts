@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.5.2  (2026-10-28 16:30 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.6.0  (2026-10-31 10:30 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -44,9 +44,10 @@ BACKUP_KEEP_DAYS="15"            # sets older than this are deleted (1-365)
 BACKUP_TIME="02:30"              # daily, HH:MM local time
 # -- 6. reporting: ntfy (phone, never secrets) + YallaCloud ERP webhook (YCERP-01), each on/off
 ENABLE_NTFY="yes"
-NTFY_SERVER="https://ntfy.sh"
+NTFY_SERVER="https://n.oasisstack.io"   # YallaCloud ntfy (yccont01); anonymous publish is refused there
 NTFY_TOPIC="9890122212"
-NTFY_TOKEN=""                    # only for a protected ntfy server
+NTFY_TOKEN=""                    # write-only token for NTFY_SERVER (secret). Blank or refused -> NTFY_FALLBACK
+NTFY_FALLBACK="https://ntfy.sh"  # public ntfy, same topic, used only when NTFY_SERVER fails (blank = no fallback)
 ENABLE_WEBHOOK="yes"
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""            # X-Webhook-Secret - REQUIRED by the ERP; paste at deploy time
@@ -65,6 +66,11 @@ ENABLE_ACRONIS="yes"             # Acronis Cyber Protect agent - only runs when 
 ACRONIS_TOKEN=""                 # registration token from the Acronis console (secret)
 ACRONIS_REGION="AE"              # AE = ae01-cloud.acronis.com | SG = sg-cloud.acronis.com
 ACRONIS_SETUP_URL="https://repo.oasisstack.io/acronis/acronis-setup.sh"
+ENABLE_GLPI="yes"                # GLPI agent -> https://glpi.oasisstack.io (inventory) - only runs when GLPI_AGENT_PASSWORD is set
+GLPI_AGENT_PASSWORD=""           # GLPI agent password (secret, password manager "GLPI agent glpi-agent")
+GLPI_TAG=""                      # blank = automatic <tenant>.cs.kvm / <tenant>.cs.vcenter (Salt who-file); own servers: infra.<role>
+GLPI_SETUP_URL="https://repo.oasisstack.io/glpi/glpi-agent-setup.sh"
+ENABLE_MONITOR="yes"             # ask Uptime Kuma (status.mgmt) to watch the Odoo URL: posts to ntfy topic yc-register (needs NTFY_TOKEN)
 # -- 8. advanced: sources and behaviour
 PASS_URL="https://pass.oasisstack.io/?len=16"
 DISABLE_CLOUD_INIT="yes"     # stops CloudStack re-running cloud-init every boot
@@ -72,7 +78,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.5.2
+VER=1.6.0
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -85,7 +91,7 @@ cat > /usr/local/sbin/yc-log <<'YCLOGEOF'
 #!/bin/bash
 # yc-log LEVEL COMPONENT MESSAGE... - the ONE central YallaCloud log of this VM: deploy AND day-2 (STACK4-61)
 #   LEVEL      INFO | OK | WARN | ERROR
-#   COMPONENT  userdata deploy ssl backup domain salt acronis notify cron ...   step tag: $YC_STEP (else -)
+#   COMPONENT  userdata deploy ssl backup domain salt acronis glpi monitor notify cron ...   step tag: $YC_STEP (else -)
 # Writes  /var/log/yallacloud/odoo.log    2026-10-28 12:30:01 +0400 | OK    | deploy    | PG       | message
 #         /var/log/yallacloud/errors.log  WARN + ERROR lines only
 #         /var/log/yallacloud/odoo.jsonl  same, one JSON object per line (ts level component step host msg)
@@ -111,14 +117,14 @@ cat > /usr/local/sbin/yc-logs <<'YCLOGSEOF'
 # yallacloud logs [option] - read the central YallaCloud log (deploy + day-2), STACK4-61
 #   (none)          summary for everyone: deploy result + steps, notifications sent, day-2 jobs, problems + what to do
 #   --errors        every WARN / ERROR line          --all      the whole central log
-#   -c COMPONENT    one part: deploy userdata ssl backup domain salt acronis notify
+#   -c COMPONENT    one part: deploy userdata ssl backup domain salt acronis glpi monitor notify
 #   --follow        live (Ctrl+C to stop)            --json     machine-readable lines
 #   --deploy        the full first-build log (userdata + installer + cloud-init)
 D=/var/log/yallacloud; L=$D/odoo.log
 case "${1:-}" in
   --errors) cat "$D/errors.log" 2>/dev/null || echo "no warnings or errors logged"; exit 0;;
   --all) cat "$L"; exit 0;;
-  -c|--component) [ -n "${2:-}" ] || { echo "usage: yallacloud logs -c deploy|ssl|backup|domain|salt|acronis|notify"; exit 2; }
+  -c|--component) [ -n "${2:-}" ] || { echo "usage: yallacloud logs -c deploy|ssl|backup|domain|salt|acronis|glpi|monitor|notify"; exit 2; }
      awk -F' [|] ' -v c="$2" '{g=$3; gsub(/ /,"",g)} g==c' "$L"; exit 0;;
   -f|--follow) exec tail -F "$L";;
   --json) cat "$D/odoo.jsonl"; exit 0;;
@@ -137,6 +143,8 @@ hint(){ case "$1" in
   backup) echo "check: odoo-backup list ; free disk: df -h ; run again: odoo-backup run";;
   salt) echo "check: yc-addons status ; ports 4505/4506 to salt.oasisstack.io ; retries every 15 min";;
   acronis) echo "check: /var/log/yc-acronis-setup.log ; token + region; re-run: yc-addons acronis";;
+  glpi) echo "check: yc-addons status ; /root/glpi-agent-setup.log ; https://glpi.oasisstack.io reachable? re-run: yc-addons glpi";;
+  monitor) echo "check: NTFY_TOKEN set? re-run: yc-addons monitor ; Kuma: https://status.mgmt.yallacloud.net";;
   notify) echo "check: yc-notify --show ; yc-notify --test";;
   *) echo "see: yallacloud logs -c $1";; esac; }
 echo "YallaCloud log summary - $(hostname) - $(date '+%F %T %Z')"
@@ -156,14 +164,14 @@ h "2. Messages sent (phone = ntfy, ERP = YallaCloud ERP webhook, Tech = extra we
 printf '  %-19s %-24s %-8s %-10s %s\n' TIME EVENT PHONE ERP TECH
 awk -F' [|] ' '$3 ~ /^notify/ {print $1 "\t" $5 "\t" $7 "\t" $8 "\t" $9}' "$L" | tail -12 |
   while IFS=$'\t' read -r ts ev n e x; do
-    v(){ case "$1" in *=ok*) echo "sent";; *=off*|*=skip*|*=no*) echo "-";; *) echo "FAILED";; esac; }
+    v(){ case "$1" in *=ok*fallback*) echo "sent-fb";; *=ok*) echo "sent";; *=off*|*=skip*|*=no*) echo "-";; *) echo "FAILED";; esac; }
     ea=$(v "$e"); case "$e" in *"NOT applied"*) ea="sent*";; esac
     printf '  %-19s %-24s %-8s %-10s %s\n' "${ts:0:19}" "$ev" "$(v "$n")" "$ea" "$(v "$x")"
   done
-echo "  (* = ERP received it but has no matching instance yet)"
+echo "  (* = ERP received it but has no matching instance yet;  sent-fb = phone message went via the public fallback ntfy.sh)"
 
 h "3. Day-2 jobs (last result of each)"
-for c in backup ssl domain salt acronis; do
+for c in backup ssl domain salt acronis glpi monitor; do
   l=$(awk -F' [|] ' -v c="$c" '{g=$3; gsub(/ /,"",g)} g==c' "$L" | tail -1)
   [ -n "$l" ] && printf '  %-8s %s  %s\n' "$c" "$(echo "$l" | awk -F' [|] ' '{gsub(/ /,"",$2); print $2}')" "$(echo "$l" | awk -F' [|] ' '{print substr($1,1,16)"  "$5}')" || printf '  %-8s %s\n' "$c" "no entry yet"
 done
@@ -301,12 +309,20 @@ NTFY_SERVER=${NTFY_SERVER%/}
 [ -n "$NTFY_TOPIC" ] || NTFY_TOPIC=9890122212   # blank = the house topic
 [[ "$NTFY_TOPIC" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { [ "$ENABLE_NTFY" = yes ] && warn "NTFY_TOPIC '$NTFY_TOPIC' invalid - ntfy off"; ENABLE_NTFY=no; }
 [ -z "$NTFY_TOKEN" ] || [[ "$NTFY_TOKEN" =~ ^[A-Za-z0-9_.-]{8,200}$ ]] || { warn "NTFY_TOKEN has bad characters - ignored"; NTFY_TOKEN=""; }
+[ -z "$NTFY_FALLBACK" ] || [[ "$NTFY_FALLBACK" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] || { warn "NTFY_FALLBACK '$NTFY_FALLBACK' invalid - using https://ntfy.sh"; NTFY_FALLBACK=https://ntfy.sh; }
+NTFY_FALLBACK=${NTFY_FALLBACK%/}
+[ "$NTFY_SERVER" = https://ntfy.sh ] || [ -n "$NTFY_TOKEN" ] || say "ntfy: no NTFY_TOKEN for $NTFY_SERVER - phone messages go to ${NTFY_FALLBACK:-nowhere} instead"
 if [ "$ENABLE_WEBHOOK" = yes ]; then
   [[ "$ERP_WEBHOOK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "ERP_WEBHOOK_URL '$ERP_WEBHOOK_URL' invalid - webhook off"; ENABLE_WEBHOOK=no; }
   [ -n "$ERP_WEBHOOK_SECRET$ERP_WEBHOOK_TOKEN" ] || warn "ERP_WEBHOOK_SECRET is blank - the ERP will refuse the events (set it and run: yc-notify --test)"
 fi
 [ -z "$EXTRA_WEBHOOK_URL" ] || [[ "$EXTRA_WEBHOOK_URL" =~ ^https?://[^[:space:]]+$ ]] || { warn "EXTRA_WEBHOOK_URL invalid - second webhook off"; EXTRA_WEBHOOK_URL=""; }
-yn ENABLE_SALT yes; yn ENABLE_ACRONIS yes; yn ROOT_PW_FROM_CLOUDSTACK yes
+yn ENABLE_SALT yes; yn ENABLE_ACRONIS yes; yn ROOT_PW_FROM_CLOUDSTACK yes; yn ENABLE_GLPI yes; yn ENABLE_MONITOR yes
+[[ "$GLPI_SETUP_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "GLPI_SETUP_URL invalid - default"; GLPI_SETUP_URL=https://repo.oasisstack.io/glpi/glpi-agent-setup.sh; }
+GLPI_TAG=$(printf '%s' "$GLPI_TAG" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+[ -z "$GLPI_TAG" ] || [[ "$GLPI_TAG" =~ ^[a-z0-9][a-z0-9.-]{0,62}$ ]] || { warn "GLPI_TAG '$GLPI_TAG' invalid - automatic"; GLPI_TAG=""; }
+[ -z "$GLPI_AGENT_PASSWORD" ] || [ ${#GLPI_AGENT_PASSWORD} -ge 12 ] && ! [[ "$GLPI_AGENT_PASSWORD" =~ [[:space:]\"\'] ]] || { warn "GLPI_AGENT_PASSWORD too short or has spaces/quotes - GLPI skipped"; GLPI_AGENT_PASSWORD=""; }
+[ "$ENABLE_GLPI" = yes ] && [ -z "$GLPI_AGENT_PASSWORD" ] && say "glpi: ENABLE_GLPI=yes but no GLPI_AGENT_PASSWORD - GLPI agent will be skipped"
 [[ "$VM_PW_USERS" =~ ^[a-z_][a-z0-9_-]*(\ [a-z_][a-z0-9_-]*)*$ ]] || { warn "VM_PW_USERS '$VM_PW_USERS' invalid - using root"; VM_PW_USERS="root"; }
 [[ "$SALT_JOIN_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "SALT_JOIN_URL '$SALT_JOIN_URL' invalid - default"; SALT_JOIN_URL=https://repo.oasisstack.io/salt/join.sh; }
 [[ "$ACRONIS_SETUP_URL" =~ ^https://[^[:space:]]+$ ]] || { warn "ACRONIS_SETUP_URL invalid - default"; ACRONIS_SETUP_URL=https://repo.oasisstack.io/acronis/acronis-setup.sh; }
@@ -317,10 +333,10 @@ ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
 [ "$ENABLE_ACRONIS" = yes ] && [ -z "$ACRONIS_TOKEN" ] && say "acronis: ENABLE_ACRONIS=yes but no ACRONIS_TOKEN - Acronis will be skipped"
 for v in ERP_WEBHOOK_SECRET ERP_WEBHOOK_TOKEN EXTRA_WEBHOOK_SECRET; do [[ "${!v}" =~ [[:space:]\"\'] ]] && { warn "$v contains spaces or quotes - ignored"; printf -v "$v" ''; }; done
 say "config: ROLE=$ROLE DOMAIN=${DOMAIN:-<sslip>} DB_HOST=${DB_HOST:--} DB_PASS=$([ -n "$DB_PASS" ] && echo set || echo generate) APP_ALLOW=${APP_ALLOW:-auto} ODOO_DB=${ODOO_DB:-none} PG=$PG_VERSION TZ=$TZ_SET SSH=${SSH_PORT:-auto} PUBLIC_IP=${PUBLIC_IP:-auto} GATEWAY=${GATEWAY:-auto}"
-say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=$ENABLE_NTFY ($NTFY_SERVER/$NTFY_TOPIC)  WEBHOOK=$ENABLE_WEBHOOK ($ERP_WEBHOOK_URL, secret $([ -n "$ERP_WEBHOOK_SECRET" ] && echo set || echo NOT set), send secrets $WEBHOOK_SEND_SECRETS)  EXTRA=$([ -n "$EXTRA_WEBHOOK_URL" ] && [ -n "$EXTRA_WEBHOOK_SECRET" ] && echo on || echo off)  SALT=$ENABLE_SALT  ACRONIS=$ENABLE_ACRONIS (token $([ -n "$ACRONIS_TOKEN" ] && echo set || echo none), $ACRONIS_REGION)"
+say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=$ENABLE_NTFY ($NTFY_SERVER/$NTFY_TOPIC)  WEBHOOK=$ENABLE_WEBHOOK ($ERP_WEBHOOK_URL, secret $([ -n "$ERP_WEBHOOK_SECRET" ] && echo set || echo NOT set), send secrets $WEBHOOK_SEND_SECRETS)  EXTRA=$([ -n "$EXTRA_WEBHOOK_URL" ] && [ -n "$EXTRA_WEBHOOK_SECRET" ] && echo on || echo off)  SALT=$ENABLE_SALT  ACRONIS=$ENABLE_ACRONIS (token $([ -n "$ACRONIS_TOKEN" ] && echo set || echo none), $ACRONIS_REGION)  GLPI=$ENABLE_GLPI (password $([ -n "$GLPI_AGENT_PASSWORD" ] && echo set || echo none), tag ${GLPI_TAG:-auto})  MONITOR=$ENABLE_MONITOR  NTFY_TOKEN=$([ -n "$NTFY_TOKEN" ] && echo set || echo none) fallback ${NTFY_FALLBACK:-none}"
 
 # == reporting tool (ntfy + ERP webhook) - installed first so a failure later is still reported
-umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" EXTRA_WEBHOOK_SECRET "$EXTRA_WEBHOOK_SECRET" ACRONIS_TOKEN "$ACRONIS_TOKEN" > "$NOTIFY_ENV"; umask 022
+umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" EXTRA_WEBHOOK_SECRET "$EXTRA_WEBHOOK_SECRET" ACRONIS_TOKEN "$ACRONIS_TOKEN" GLPI_AGENT_PASSWORD "$GLPI_AGENT_PASSWORD" > "$NOTIFY_ENV"; umask 022
 cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 #!/usr/bin/env python3
 # yc-notify v1.4.2 (2026-10-27) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
@@ -490,14 +506,25 @@ def send_ntfy(c, a, fx):
          'Tags': ascii_hdr(a.tags or 'yallacloud'), 'Content-Type': 'text/plain; charset=utf-8'}
     if c.get('NTFY_TOKEN'):
         h['Authorization'] = 'Bearer ' + c['NTFY_TOKEN']
+    body = '\n'.join(lines).encode('utf-8')
     for n in (1, 2):                        # one retry: the first message often goes out while the network is still settling
         try:
-            s, _ = post(url, '\n'.join(lines).encode('utf-8'), h, 15)
+            s, _ = post(url, body, h, 15)
             return 'ok %s' % s + (' (2nd try)' if n == 2 else '')
         except Exception as e:  # never stop the caller
             err = e
+            if getattr(e, 'code', 0) in (401, 403):   # token missing or refused: retrying will not help
+                break
             if n == 1:
                 time.sleep(5)
+    fb = (c.get('NTFY_FALLBACK') or '').rstrip('/')
+    if fb and not url.startswith(fb + '/'):    # public ntfy, same topic, no token: the phone still gets it
+        h.pop('Authorization', None)
+        try:
+            s, _ = post(fb + '/' + (c.get('NTFY_TOPIC') or '9890122212'), body, h, 15)
+            return 'ok %s via fallback %s (main: %s)' % (s, fb, str(err)[:60])
+        except Exception as e2:
+            return 'FAIL %s; fallback FAIL %s' % (err, e2)
     return 'FAIL %s' % err
 
 
@@ -663,7 +690,7 @@ save_cfg(){   # effective answers, no secrets (those live in secrets.env / notif
   local v; umask 077
   for v in ROLE DOMAIN LE_EMAIL DB_HOST APP_ALLOW ODOO_DB PG_VERSION PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEYS TZ_SET LOCALE_SET APT_MIRRORS \
            BACKUP_DIR BACKUP_KEEP_DAYS BACKUP_TIME ENABLE_NTFY NTFY_SERVER NTFY_TOPIC ENABLE_WEBHOOK ERP_WEBHOOK_URL EXTRA_WEBHOOK_URL WEBHOOK_SEND_SECRETS CLOUDSTACK_URL CS_TENANT ROOT_PW_FROM_CLOUDSTACK VM_PW_USERS \
-           ENABLE_SALT SALT_JOIN_URL ENABLE_ACRONIS ACRONIS_REGION ACRONIS_SETUP_URL \
+           ENABLE_SALT SALT_JOIN_URL ENABLE_ACRONIS ACRONIS_REGION ACRONIS_SETUP_URL ENABLE_GLPI GLPI_TAG GLPI_SETUP_URL ENABLE_MONITOR NTFY_FALLBACK \
            PASS_URL DISABLE_CLOUD_INIT ODOO_DEB_URL REPO_URL; do printf '%s=%q\n' "$v" "${!v}"; done > "$CFG"
   umask 022; }
 save_cfg
@@ -1432,12 +1459,15 @@ esac
 BAKEOF
 cat > /usr/local/sbin/yc-addons <<'ADDEOF'
 #!/bin/bash
-# yc-addons salt|acronis|status - Salt join + Acronis agent for this VM (YallaCloud, STACK4-61)
+# yc-addons salt|acronis|glpi|monitor|status - Salt, Acronis, GLPI agent, Kuma monitor for this VM (YallaCloud, STACK4-61)
 # Started in the background at the end of the deploy (systemd-run), so they never hold up or fail
 # the Odoo build. Safe to run again by hand. Each result goes to the deploy log, ntfy and the
 # ERP webhook (vm.salt.* / vm.acronis.*). The Acronis token is never written to a log or ntfy.
 #   salt    : zero-input join (STACK4-54 s17) -> id <cloudstack-domain>-<vm name>, retry cron by itself
 #   acronis : acronis-setup.sh TOKEN AE|SG (repo.oasisstack.io/acronis). No token = skipped.
+#   glpi    : glpi-agent-setup.sh (repo.oasisstack.io/glpi, STACK4-66) -> glpi.oasisstack.io, tenant tag automatic.
+#             Not registered yet (VM not published / GLPI unreachable) -> /etc/cron.d/yc-glpi-retry every 15 min.
+#   monitor : asks Uptime Kuma to watch the Odoo URL (ntfy topic yc-register, read by yc-kuma-register on yccont01).
 # Switches + values: ENABLE_SALT, SALT_JOIN_URL, ENABLE_ACRONIS, ACRONIS_REGION, ACRONIS_SETUP_URL
 # in /etc/yallacloud/odoo.conf.env; ACRONIS_TOKEN in /etc/yallacloud/notify.env (root 600).
 set -uo pipefail
@@ -1447,8 +1477,8 @@ LOG=/var/log/yc-odoo-deploy.log
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 cd /tmp || exit 1
 say(){ echo "[$(date +%F' '%T)] addon $*" | tee -a "$LOG"
-  local c=${1%%:*} l=INFO; case "$c" in salt|acronis) ;; *) c=addon;; esac
-  case "$*" in *FAILED*|*failed*) l=ERROR;; *JOINED*|*registered*|*CONFIGURED*) l=OK;; *WAITING*|*WAIT*|*skipped*) l=WARN;; esac
+  local c=${1%%:*} l=INFO; case "$c" in salt|acronis|glpi|monitor) ;; *) c=addon;; esac
+  case "$*" in *FAILED*|*failed*) l=ERROR;; *JOINED*|*registered*|*REGISTERED*|*CONFIGURED*|*requested*) l=OK;; *WAITING*|*WAIT*|*skipped*|*retry*) l=WARN;; esac
   yc-log "$l" "$c" "${*#*: }"; }
 N(){ [ -x /usr/local/sbin/yc-notify ] && /usr/local/sbin/yc-notify "$@" >>"$LOG" 2>&1; true; }
 fetch(){   # URL OUT : download, and check URL.sha256 when the server publishes one
@@ -1501,12 +1531,65 @@ acronis(){
   return "$rc"
 }
 
+glpi(){   # $1 = --retry (from cron): report only when the result changes
+  [ "${ENABLE_GLPI:-yes}" = yes ] || { say "glpi: off (ENABLE_GLPI=no)"; return 0; }
+  [ -n "${GLPI_AGENT_PASSWORD:-}" ] || { say "glpi: no GLPI_AGENT_PASSWORD - skipped (nothing installed)"; return 0; }
+  local f=/var/lib/yc-glpi/glpi-agent-setup.sh rc out r st t p g prev cr=/etc/cron.d/yc-glpi-retry; mkdir -p /var/lib/yc-glpi
+  if ! fetch "${GLPI_SETUP_URL:-https://repo.oasisstack.io/glpi/glpi-agent-setup.sh}" "$f"; then
+    rc=3; out="RESULT=FAILED EXIT=3"
+  else
+    # NTFY_TOPIC=off + no EXTRA_*: this wrapper sends the three outputs itself (one message, our ntfy server + token)
+    out=$(env -u EXTRA_WEBHOOK_URL -u EXTRA_WEBHOOK_SECRET NTFY_TOPIC=off GLPI_AGENT_PASSWORD="$GLPI_AGENT_PASSWORD" bash "$f" "" ${GLPI_TAG:+"$GLPI_TAG"} 2>&1 </dev/null); rc=$?
+    out=${out//"$GLPI_AGENT_PASSWORD"/****}; printf '%s\n' "$out" | sed 's/^/[glpi] /' >> "$LOG"
+  fi
+  local tag; tag=$(printf '%s\n' "$out" | sed -n 's/.*tag=\([^ ]*\).*/\1/p' | tail -1)
+  local why; case "$rc" in 2) why="bad password or tag";; 3) why="download failed";; 5) why="install failed";; 6) why="GLPI refused the password";; 7) why="GLPI not reachable";; *) why="see /root/glpi-agent-setup.log";; esac
+  case "$rc" in
+    0) st=registered t=vm.glpi.registered p=2 g=white_check_mark r="REGISTERED in GLPI (tag ${tag:-?}) - inventory once a day";;
+    8) st=waiting t=vm.glpi.waiting p=3 g=hourglass r="WAITING: tenant not published yet (Salt who-file) - retry every 15 min";;
+    3|5|7) st=failed t=vm.glpi.failed p=4 g=x r="FAILED (exit $rc: $why) - retry every 15 min";;
+    *) st=failed t=vm.glpi.failed p=4 g=x r="FAILED (exit $rc: $why) - no retry, fix and run: yc-addons glpi";;
+  esac
+  case "$rc" in   # worth retrying: download / install / GLPI unreachable / tenant not published yet
+    3|5|7|8) printf '# GLPI agent retry (yc-addons, STACK4-61) - removes itself once registered\n*/15 * * * * root /usr/local/sbin/yc-addons glpi --retry >/dev/null 2>&1\n' > "$cr"; chmod 644 "$cr";;
+    *) rm -f "$cr";;
+  esac
+  prev=$(cat /var/lib/yc-glpi/state 2>/dev/null); echo "$st" > /var/lib/yc-glpi/state
+  say "glpi: $r"
+  [ "${1:-}" = --retry ] && [ "$st" = "$prev" ] && return "$rc"   # 15-min retry with the same result: log only, no message
+  N -t "$t" -T "GLPI ${st^^}" -p "$p" -g "$g,glpi" -l "result  $r" -l "glpi    https://glpi.oasisstack.io -> Assets -> Computers -> $(hostname -s)" \
+    -l "log     /root/glpi-agent-setup.log" --error "$([ "$st" = registered ] || echo "$r")" -f area=glpi -f status="$st" -f tag="${tag:-}" -f summary="$r"
+  return "$rc"
+}
+
+monitor(){   # one ntfy message to topic yc-register; yc-kuma-register on yccont01 adds the Kuma HTTP monitor
+  [ "${ENABLE_MONITOR:-yes}" = yes ] || { say "monitor: off (ENABLE_MONITOR=no)"; return 0; }
+  local url name tenant body code
+  url=$(sed -n 's/^odoo url *: *//p' /root/odoo-info/handover.txt 2>/dev/null | head -1 | tr -d ' ')
+  [[ "$url" =~ ^https://[A-Za-z0-9.-]+$ ]] || { say "monitor: skipped - no public https Odoo URL (db role or private VM)"; return 0; }
+  [ -n "${NTFY_TOKEN:-}" ] || { say "monitor: skipped - needs NTFY_TOKEN for ${NTFY_SERVER:-}"; return 0; }
+  . /etc/yallacloud/vm-facts.env 2>/dev/null
+  name=${MD_NAME:-$(hostname -s)}; tenant=${TENANT:-unknown}
+  body=$(printf '{"kind":"odoo","name":"%s","url":"%s/web/login","tenant":"%s","vmId":"%s","host":"%s"}' "$name" "$url" "$tenant" "${MD_VMID:-}" "$(hostname)")
+  code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $NTFY_TOKEN" -H 'Title: yc-register odoo' -d "$body" "${NTFY_SERVER%/}/yc-register")
+  if [ "$code" = 200 ]; then
+    say "monitor: requested Uptime Kuma check for $url/web/login (name ODOO $tenant $name, added within 2 min)"
+    N --no-ntfy -t vm.monitor.registered -T "MONITOR REQUESTED" -p 2 -g "eyes,monitor" -l "result  Kuma HTTP check requested: $url/web/login" -f area=monitor -f status=registered -f url="$url/web/login"
+  else
+    say "monitor: FAILED - ntfy answered HTTP $code for topic yc-register"; return 1
+  fi
+}
+
 case "${1:-}" in
   salt) salt_join;;
   acronis) acronis;;
+  glpi) glpi "${2:-}";;
+  monitor) monitor;;
   status)
     printf '  %-9s %s\n' salt "$([ "${ENABLE_SALT:-yes}" = yes ] && echo on || echo off), minion $(systemctl is-active salt-minion 2>/dev/null), id $(cat /etc/salt/minion_id 2>/dev/null || echo -), last: $(grep -E '^(JOINED|WAITING:|FAILED:)' /var/lib/yc-salt/last.log 2>/dev/null | tail -1)"
-    printf '  %-9s %s\n' acronis "$([ "${ENABLE_ACRONIS:-yes}" = yes ] && echo on || echo off), token $([ -n "${ACRONIS_TOKEN:-}" ] && echo set || echo 'not set (skipped)'), region ${ACRONIS_REGION:-AE}, agent $(systemctl is-active acronis_mms 2>/dev/null || echo none)";;
+    printf '  %-9s %s\n' acronis "$([ "${ENABLE_ACRONIS:-yes}" = yes ] && echo on || echo off), token $([ -n "${ACRONIS_TOKEN:-}" ] && echo set || echo 'not set (skipped)'), region ${ACRONIS_REGION:-AE}, agent $(systemctl is-active acronis_mms 2>/dev/null || echo none)"
+    printf '  %-9s %s\n' glpi "$([ "${ENABLE_GLPI:-yes}" = yes ] && echo on || echo off), password $([ -n "${GLPI_AGENT_PASSWORD:-}" ] && echo set || echo 'not set (skipped)'), agent $(systemctl is-active glpi-agent 2>/dev/null || echo none), state $(cat /var/lib/yc-glpi/state 2>/dev/null || echo -)$([ -f /etc/cron.d/yc-glpi-retry ] && echo ', retry every 15 min')"
+    printf '  %-9s %s\n' monitor "$([ "${ENABLE_MONITOR:-yes}" = yes ] && echo on || echo off), Uptime Kuma https://status.mgmt.yallacloud.net (request via ntfy yc-register)";;
   *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2;;
 esac
 ADDEOF
@@ -1557,7 +1640,7 @@ else
 echo "postgres    : $DB_HOST:5432  role odoo / $DB_PASS"
 fi
 echo "backups     : odoo-backup list | run | restore <set> <db> --yes   ($BACKUP_DIR, daily $BACKUP_TIME, $BACKUP_KEEP_DAYS days)"
-echo "add-ons     : salt $ENABLE_SALT, acronis $([ "$ENABLE_ACRONIS" = yes ] && [ -n "$ACRONIS_TOKEN" ] && echo "yes ($ACRONIS_REGION)" || echo "skipped")   (background; yc-addons status)"
+echo "add-ons     : salt $ENABLE_SALT, acronis $([ "$ENABLE_ACRONIS" = yes ] && [ -n "$ACRONIS_TOKEN" ] && echo "yes ($ACRONIS_REGION)" || echo "skipped"), glpi $([ "$ENABLE_GLPI" = yes ] && [ -n "$GLPI_AGENT_PASSWORD" ] && echo yes || echo skipped), kuma monitor $ENABLE_MONITOR   (background; yc-addons status)"
 echo "logs        : yallacloud logs  (summary: build steps, messages sent, day-2 jobs, problems + fixes)"
 echo "            : /var/log/yallacloud/odoo.log (central)  errors.log  odoo.jsonl  journalctl -t yallacloud-odoo"
 echo "deploy log  : /var/log/yc-odoo-deploy.log   status: /var/log/yc-odoo-deploy.status"
@@ -1639,7 +1722,7 @@ grep -rlsE 'pg_dump|pg_basebackup' /etc/cron* /var/spool/cron 2>/dev/null | grep
 kv last-backup "$(cat /var/lib/yallacloud/backup.status 2>/dev/null || echo 'none yet')"
 kv also "${b:-no Acronis / PBS client in this VM}"
 kv note "snapshots / PBS of the VM are set in CloudStack, not visible from inside"
-h "Add-ons (Salt, Acronis)"
+h "Add-ons (Salt, Acronis, GLPI, Kuma monitor)"
 /usr/local/sbin/yc-addons status 2>/dev/null
 h "Reporting (ntfy + ERP webhook)"
 /usr/local/sbin/yc-notify --show 2>/dev/null | sed 's/^/  /'
@@ -1658,7 +1741,7 @@ h "Commands"
 kv "odoo-domain" "--show | <fqdn> | --sslip | --public <ip> --sslip | --ip"
 kv "odoo-ssl" "status | free <fqdn> | csr <fqdn> | install <fqdn> --cert F [--chain F] [--key F] | install-pfx <fqdn> --pfx F --pass P | export-pfx <fqdn> | check"
 kv "odoo-backup" "list | run | restore <set> <db> --yes"
-kv "yc-addons" "status | salt | acronis   (re-run the Salt join / Acronis agent)"
+kv "yc-addons" "status | salt | acronis | glpi | monitor   (re-run the Salt join / Acronis / GLPI agent / Kuma request)"
 kv "yc-notify" "--show | --test   (switches: ENABLE_NTFY / ENABLE_WEBHOOK in /etc/yallacloud/odoo.conf.env)"
 kv "yc-odoo-install" "re-run the installer (answers: /etc/yallacloud/odoo.conf.env)"
 kv "logs" "yallacloud logs (summary) | --errors | -c ssl|backup|salt|notify | --follow ; Odoo: journalctl -u odoo -f"
@@ -1690,6 +1773,8 @@ RES=SUCCESS; PRI=3; TAG=white_check_mark; [ -n "$WARNS" ] && { RES="SUCCESS with
 echo "$RES $(date '+%F %T %Z') steps:$STEPS${WARNS:+ warnings: $WARNS}" > "$STATUS"
 ADD_SALT=off; [ "$ENABLE_SALT" = yes ] && ADD_SALT="joining (own message follows)"
 ADD_ACR=off; [ "$ENABLE_ACRONIS" = yes ] && { [ -n "$ACRONIS_TOKEN" ] && ADD_ACR="installing $ACRONIS_REGION (own message follows)" || ADD_ACR="skipped - no token"; }
+ADD_GLPI=off; [ "$ENABLE_GLPI" = yes ] && { [ -n "$GLPI_AGENT_PASSWORD" ] && ADD_GLPI="installing (own message follows)" || ADD_GLPI="skipped - no password"; }
+ADD_MON=off; [ "$ENABLE_MONITOR" = yes ] && { [ -n "$URL" ] && [ -n "$NTFY_TOKEN" ] && ADD_MON="Kuma check requested" || ADD_MON="skipped"; }
 # credentials section of the webhook: vm / odoo / database (only with WEBHOOK_SEND_SECRETS=yes)
 SEC=(-s vm.user=root -s vm.password="${VM_PASS:-}" -s vm.passwordSource="${VM_PASS_SRC:-unchanged}" -s vm.passwordUsers="${VM_PASS_SET:-}" -s vm.sshHost="$URL_IP" -s vm.sshPort="$SSH_PORT")
 [ -n "${SUDO_PASS:-}" ] && SEC+=(-s vm.sudoUser="$SUDO_USER_NAME" -s vm.sudoPassword="$SUDO_PASS")
@@ -1700,11 +1785,11 @@ N -t vm.deploy.completed -T "OK BUILD odoo $ROLE${WARNS:+ (warnings)}" -p "$PRI"
   -l "result  $RES" -l "url     ${URL:-- (db only)}" -l "cert    $CERT${CERT_EXP:+  until $CERT_EXP}" -l "ip      $BIND_IP  url ip $URL_IP  ssh $SSH_PORT" \
   -l "odoo    $(dpkg-query -W -f='${Version}' odoo 2>/dev/null || echo -)   pg $PG_VERSION   db ${ODOO_DB:-none}" \
   -l "backup  $BACKUP_DIR daily $BACKUP_TIME keep ${BACKUP_KEEP_DAYS}d" ${WARNS:+-l "warn    $WARNS"} \
-  -l "addons  salt ${ADD_SALT}  acronis ${ADD_ACR}" -l "creds   /root/odoo-info/handover.txt (yallacloud --secrets)" \
+  -l "addons  salt ${ADD_SALT}  acronis ${ADD_ACR}" -l "addons  glpi ${ADD_GLPI}  monitor ${ADD_MON}" -l "creds   /root/odoo-info/handover.txt (yallacloud --secrets)" \
   -f area=odoo -f role="$ROLE" -f status=completed -f url="$URL" -f domain="$DOMAIN" -f certificate="$CERT" -f certificateExpires="$CERT_EXP" -f odooVersion="$(dpkg-query -W -f='${Version}' odoo 2>/dev/null)" \
-  -f pgVersion="$PG_VERSION" -f sshPort="$SSH_PORT" -f backupDir="$BACKUP_DIR" -f backupKeepDays="$BACKUP_KEEP_DAYS" -f warnings="$WARNS" -f installer="$VER" -f salt="$ADD_SALT" -f acronis="$ADD_ACR" "${SEC[@]}"
-# add-ons in the background: they report on their own (vm.salt.* / vm.acronis.*) into the same log
-for a in salt acronis; do
+  -f pgVersion="$PG_VERSION" -f sshPort="$SSH_PORT" -f backupDir="$BACKUP_DIR" -f backupKeepDays="$BACKUP_KEEP_DAYS" -f warnings="$WARNS" -f installer="$VER" -f salt="$ADD_SALT" -f acronis="$ADD_ACR" -f glpi="$ADD_GLPI" -f monitor="$ADD_MON" "${SEC[@]}"
+# add-ons in the background: they report on their own (vm.salt.* / vm.acronis.* / vm.glpi.* / vm.monitor.*) into the same log
+for a in salt acronis glpi monitor; do
   systemd-run --quiet --collect --unit "yc-addon-$a-$(date +%s)" /usr/local/sbin/yc-addons "$a" || warn "could not start add-on $a (run: yc-addons $a)"
 done
 say "DONE. $(grep -E '^odoo url' "$INFO/handover.txt" | tr -s ' ')  - logins + passwords: $INFO/handover.txt (root only, never in the logs)"

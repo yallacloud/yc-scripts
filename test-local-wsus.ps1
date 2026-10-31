@@ -1,7 +1,7 @@
 # test-local-wsus.ps1 - proves the local-WSUS rollout logic (payload 2.47.0) without a VM.
 #   pwsh -File test-local-wsus.ps1 -PayloadDir <extracted payload>
 # Covers: a customer's own update server is never replaced; the guard's revert decision (down
-# twice / no updates for 3 days / just booted / just configured); the exit codes and what each
+# twice / no updates for 8 days / just booted / just configured); the exit codes and what each
 # reports; the day-0 fix in fix-deploy (on by default, opt-out file, never a deployment failure);
 # the adopt WSUS phase (on by default, -SkipWsus, foreign = finding, unreachable = not a finding).
 # Must end with '0 failed'.
@@ -40,10 +40,11 @@ Write-Host '=== 2. the guard decides when to go back to Microsoft ===' -Foregrou
 $now = [datetime]::SpecifyKind([datetime]'2026-11-10T06:20:00', 'Utc')
 T 'server down -> down'                              ((Get-YcGuardVerdict -Answers $false -LastScanUtc $now -ConfiguredUtc $now.AddDays(-10) -NowUtc $now) -eq 'down')
 T 'answers, checked yesterday -> ok'                 ((Get-YcGuardVerdict -Answers $true -LastScanUtc $now.AddDays(-1) -ConfiguredUtc $now.AddDays(-10) -NowUtc $now) -eq 'ok')
-T 'answers, no update check for 4 days -> stale'     ((Get-YcGuardVerdict -Answers $true -LastScanUtc $now.AddDays(-4) -ConfiguredUtc $now.AddDays(-10) -NowUtc $now) -eq 'stale')
-T 'answers, never checked, configured 5 days ago -> stale' ((Get-YcGuardVerdict -Answers $true -LastScanUtc $null -ConfiguredUtc $now.AddDays(-5) -NowUtc $now) -eq 'stale')
-T 'configured 1 day ago -> ok (give it time)'        ((Get-YcGuardVerdict -Answers $true -LastScanUtc $null -ConfiguredUtc $now.AddDays(-1) -NowUtc $now) -eq 'ok')
-T 'booted 2 hours ago -> ok (switched off is not stale)' ((Get-YcGuardVerdict -Answers $true -LastScanUtc $now.AddDays(-9) -ConfiguredUtc $now.AddDays(-10) -NowUtc $now -UptimeHours 2) -eq 'ok')
+T 'answers, no update check for 7 days -> ok (limit is 8)' ((Get-YcGuardVerdict -Answers $true -LastScanUtc $now.AddDays(-7) -ConfiguredUtc $now.AddDays(-20) -NowUtc $now) -eq 'ok')
+T 'answers, no update check for 9 days -> stale'     ((Get-YcGuardVerdict -Answers $true -LastScanUtc $now.AddDays(-9) -ConfiguredUtc $now.AddDays(-20) -NowUtc $now) -eq 'stale')
+T 'answers, never checked, configured 9 days ago -> stale' ((Get-YcGuardVerdict -Answers $true -LastScanUtc $null -ConfiguredUtc $now.AddDays(-9) -NowUtc $now) -eq 'stale')
+T 'configured 7 days ago -> ok (give it 8 days)'    ((Get-YcGuardVerdict -Answers $true -LastScanUtc $null -ConfiguredUtc $now.AddDays(-7) -NowUtc $now) -eq 'ok')
+T 'booted 2 hours ago -> ok (switched off is not stale)' ((Get-YcGuardVerdict -Answers $true -LastScanUtc $now.AddDays(-12) -ConfiguredUtc $now.AddDays(-20) -NowUtc $now -UptimeHours 2) -eq 'ok')
 T 'down still counts right after a boot'             ((Get-YcGuardVerdict -Answers $false -LastScanUtc $now -ConfiguredUtc $now -NowUtc $now -UptimeHours 1) -eq 'down')
 T 'guard tests the server it is ACTUALLY pointed at' ($sw -match '\$u = \[uri\]\$s\.WUServer; \$gHost = \$u\.Host')
 T 'stale reverts at once; down needs 2 in a row'     ($sw.Contains('if($v -eq ''stale''){') -and $sw.Contains('$n = $GuardLimit') -and $sw.Contains('$GuardLimit = 2'))

@@ -104,7 +104,7 @@ THE FIXES:
             internet: set-local-wsus -Install. Only when that server ANSWERS - otherwise the VM
             stays on Microsoft Update and keeps patching. Never replaces a customer's own update
             server. Registers YC-WsusGuard, which puts the VM back on Microsoft by itself if the
-            server stops answering or the VM stops getting updates (3 days). Never fails the
+            server stops answering or the VM stops getting updates (8 days). Never fails the
             deployment. Skipped when C:\ProgramData\YallaCloud\wsus\no-local exists.
             Back to Microsoft by hand: set-local-wsus -Uninstall. Applies to: every template.
   cbinit    Adds the cloudbase-init NetworkConfigPlugin if the template shipped without it.

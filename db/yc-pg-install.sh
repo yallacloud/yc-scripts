@@ -63,7 +63,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.12
+VER=1.0.13
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -1421,24 +1421,40 @@ if [ "$SALT_JOIN" = yes ] && [ "$GLPI_AGENT" = yes ]; then   # opt-in grain for 
   mkdir -p /etc/salt; touch /etc/salt/grains
   if grep -q "^yc_glpi:" /etc/salt/grains; then sed -i "s/^yc_glpi:.*/yc_glpi: yes/" /etc/salt/grains; else echo "yc_glpi: yes" >> /etc/salt/grains; fi
 fi
-if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
-  # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
-  cat > /usr/local/sbin/yc-salt-retry <<'EOF'
+if [ "$SALT_JOIN" = yes ]; then   # reporting retry: every 15 min until JOINED, then reports vm.salt.joined and removes itself
+cat > /usr/local/sbin/yc-salt-retry <<'EOF'
 #!/bin/bash
 # yc-salt-retry - cron every 15 min until JOINED: zero-input join to salt.oasisstack.io, reports the result (STACK4-64)
 . /etc/yallacloud/db.conf.env; . /usr/local/lib/yc-db-common.sh; SCRIPT_TAG=yc-salt-retry
-out=$(timeout 900 bash -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
+out=$(NTFY_TOPIC=off timeout 900 bash -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 1)
 case "$out" in *JOINED*) yc_event salt joined; rm -f /etc/cron.d/yc-salt-join;; *) yc_log WARN salt waiting "retry: ${out:-no output} - $(salt_ports)";; esac
 EOF
-  chmod 700 /usr/local/sbin/yc-salt-retry
+chmod 700 /usr/local/sbin/yc-salt-retry
+fi
+if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
+  # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
   printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock /usr/local/sbin/yc-salt-retry >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
   SALT_STATE="BLOCKED - $sp (retry every 15 min)"; warn "salt: $sp - join skipped, retry cron /etc/cron.d/yc-salt-join"
   WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }open $SALT_MASTER 4505/4506 for this VM"; yc_event salt waiting "$sp"
 elif [ "$SALT_JOIN" = yes ]; then
   say "salt: $sp"
-  SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
-  say "salt: $SALT_STATE"; [[ "$SALT_STATE" == *JOINED* ]] || { warn "salt join not confirmed: $SALT_STATE"; SALT_STATE="not joined"; }
-  [[ "$SALT_STATE" == *JOINED* ]] && { SALT_STATE=JOINED; yc_event salt joined; } || yc_event salt failed "$SALT_STATE"
+  # join.sh exit: 0 JOINED | 8 WAITING (the master does not know this VM yet - CloudStack inventory sync every 5 min) | else FAILED.
+  # Its own ntfy is off (NTFY_TOPIC=off): the kit reports. WAITING is retried here for up to 8 min, then by the reporting cron.
+  t_end=$((SECONDS+480)); n=0
+  while :; do n=$((n+1))
+    jo=$(NTFY_TOPIC=off timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1); jrc=$?
+    jl=$(printf '%s\n' "$jo" | tail -n 1)
+    { [ "$jrc" = 8 ] && [ $SECONDS -lt $t_end ]; } || break
+    say "salt: try $n WAITING - this VM is not in the Salt inventory yet (5-min CloudStack sync) - again in 30 s"; sleep 30
+  done
+  say "salt: join.sh exit $jrc after $n try(s) - $jl"
+  case "$jrc" in
+    0) SALT_STATE=JOINED; yc_event salt joined;;
+    8) SALT_STATE="WAITING - not in the Salt inventory after $n tries (retry every 15 min)"; warn "salt: $SALT_STATE"
+       printf '# YallaCloud: VM not in the Salt inventory at install - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock /usr/local/sbin/yc-salt-retry >/dev/null 2>&1\n' > /etc/cron.d/yc-salt-join
+       WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }Salt: VM not in the inventory yet (it retries every 15 min)"; yc_event salt waiting "$jl";;
+    *) SALT_STATE="not joined - $jl"; warn "salt join failed: $jl"; yc_event salt failed "$jl";;
+  esac
 else SALT_STATE="off (SALT_JOIN=no)"; fi
 GLL=/var/log/yallacloud/yallacloud.log
 if [ "$GLPI_AGENT" != yes ]; then GLPI_STATE="off (GLPI_AGENT=no)"

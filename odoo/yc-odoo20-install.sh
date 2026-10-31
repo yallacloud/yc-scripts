@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.6.0  (2026-10-31 10:30 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.6.1  (2026-10-31 14:45 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -78,7 +78,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.6.0
+VER=1.6.1
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -172,6 +172,8 @@ echo "  (* = ERP received it but has no matching instance yet;  sent-fb = phone 
 
 h "3. Day-2 jobs (last result of each)"
 for c in backup ssl domain salt acronis glpi monitor; do
+  if [ "$c" = salt ] && grep -q '^JOINED' /var/lib/yc-salt/last.log 2>/dev/null; then   # joined later by join.sh's own retry
+    printf '  %-8s %s  %s\n' salt OK "$(date -r /var/lib/yc-salt/last.log '+%F %H:%M')  $(grep '^JOINED' /var/lib/yc-salt/last.log | tail -1)"; continue; fi
   l=$(awk -F' [|] ' -v c="$c" '{g=$3; gsub(/ /,"",g)} g==c' "$L" | tail -1)
   [ -n "$l" ] && printf '  %-8s %s  %s\n' "$c" "$(echo "$l" | awk -F' [|] ' '{gsub(/ /,"",$2); print $2}')" "$(echo "$l" | awk -F' [|] ' '{print substr($1,1,16)"  "$5}')" || printf '  %-8s %s\n' "$c" "no entry yet"
 done
@@ -386,7 +388,8 @@ def central(typ, title, nt, wh, ex):
     """one line per event in the central log (yallacloud logs): which of the 3 outputs got it"""
     state = (typ or '').rsplit('.', 1)[-1]
     bad = any(str(x).startswith(('FAIL', 'no ')) for x in (nt, wh, ex))
-    lvl = 'ERROR' if state == 'failed' else ('WARN' if bad or state in ('waiting', 'expiring', 'waitforhuman') else 'OK')
+    # the problem itself is logged by its own component (salt, glpi, ...); this line only says whether the 3 outputs delivered
+    lvl = 'WARN' if bad else ('INFO' if state in ('failed', 'waiting', 'expiring', 'waitforhuman') else 'OK')
     try:
         subprocess.run(['/usr/local/sbin/yc-log', lvl, 'notify', '%s | %s | ntfy=%s | erp=%s | extra=%s' % (typ, title, nt, wh, ex)],
                        timeout=10, check=False)
@@ -1494,14 +1497,14 @@ salt_join(){
     r="FAILED: cannot download ${SALT_JOIN_URL:-}"; rc=6
   else
     local nt=${NTFY_TOPIC:-9890122212}; [ "${ENABLE_NTFY:-yes}" = yes ] || nt=off   # join.sh sends the salt phone message to OUR topic
-    r=$(NTFY_TOPIC="$nt" NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}" sh "$f" 2>&1 </dev/null); rc=$?
+    r=$(NTFY_TOPIC="$nt" NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}" NTFY_TOKEN="${NTFY_TOKEN:-}" sh "$f" 2>&1 </dev/null); rc=$?
     printf '%s\n' "$r" | sed 's/^/[salt] /' >> "$LOG"
     r=$(printf '%s\n' "$r" | grep -E '^(JOINED|CONFIGURED|WAITING:|FAILED:)' | tail -1); r=${r:-FAILED: no result line (rc $rc)}
   fi
   say "salt: $r"
   local t=vm.salt.failed p=4 g=x st=failed
   case "$r" in JOINED*) t=vm.salt.joined p=3 g=white_check_mark st=joined;; WAITING*) t=vm.salt.waiting p=4 g=hourglass st=waiting;; esac
-  # --no-ntfy: join.sh (1.3+) already sends the phone message, also on its 15-min retries
+  # --no-ntfy: join.sh (1.3+) already sends the phone message (with NTFY_TOKEN), also on its 15-min retries
   N --no-ntfy -t "$t" -T "SALT ${st^^}" -p "$p" -g "$g,salt" -l "result  $r" --error "$([ "$st" = joined ] || echo "$r")" \
     -l "retry   $([ -f /etc/cron.d/yc-salt-join ] && echo '/etc/cron.d/yc-salt-join every 15 min until JOINED' || echo none needed)" \
     -l "log     /var/lib/yc-salt/last.log" -f area=salt -f status="$st" -f summary="$r"
@@ -1569,7 +1572,17 @@ monitor(){   # one ntfy message to topic yc-register; yc-kuma-register on yccont
   [[ "$url" =~ ^https://[A-Za-z0-9.-]+$ ]] || { say "monitor: skipped - no public https Odoo URL (db role or private VM)"; return 0; }
   [ -n "${NTFY_TOKEN:-}" ] || { say "monitor: skipped - needs NTFY_TOKEN for ${NTFY_SERVER:-}"; return 0; }
   . /etc/yallacloud/vm-facts.env 2>/dev/null
-  name=${MD_NAME:-$(hostname -s)}; tenant=${TENANT:-unknown}
+  name=${MD_NAME:-$(hostname -s)}; tenant=${TENANT:-}
+  local k w; k="$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null) $(cat /sys/class/net/*/address 2>/dev/null | grep -v '^00:00:00:00:00:00$' | tr 'A-Z' 'a-z' | sort -u | tr '\n' ' ')"
+  for _ in $(seq 1 20); do   # a new VM reaches the Salt who-file within ~5 min; the monitor name carries the tenant
+    [ -n "$tenant" ] && break
+    for w in ${MD_VMID:-} $k; do
+      tenant=$(curl -fsS -m 10 "https://repo.oasisstack.io/salt/who/$(printf '%s' "$w" | sha256sum | cut -c1-64)" 2>/dev/null | sed -n 's/.*tenant=\([A-Za-z0-9._-]*\).*/\1/p' | head -1)
+      [ -n "$tenant" ] && break
+    done
+    [ -n "$tenant" ] || sleep 30
+  done
+  tenant=${tenant:-unknown}
   body=$(printf '{"kind":"odoo","name":"%s","url":"%s/web/login","tenant":"%s","vmId":"%s","host":"%s"}' "$name" "$url" "$tenant" "${MD_VMID:-}" "$(hostname)")
   code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $NTFY_TOKEN" -H 'Title: yc-register odoo' -d "$body" "${NTFY_SERVER%/}/yc-register")
   if [ "$code" = 200 ]; then

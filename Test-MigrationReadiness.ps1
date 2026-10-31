@@ -72,7 +72,7 @@ $script:Notes    = New-Object System.Collections.Generic.List[string]
 $script:Report   = [ordered]@{
   schema='ycmig.readiness/1'; host=$env:COMPUTERNAME
   generatedUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
-  tool='Test-MigrationReadiness.ps1'; version='1.5.0'
+  tool='Test-MigrationReadiness.ps1'; version='1.5.1'
 }
 $script:Log = New-Object System.Collections.Generic.List[string]
 
@@ -131,8 +131,11 @@ function Note  { param([string]$T) $script:Notes.Add($T)    | Out-Null }
 #     3. C:\ProgramData\YallaCloud\yc-event.json (url, secret, token, extraUrl, extraSecret)
 #   The ERP url defaults to the public ERP endpoint. A webhook is only posted to when its secret
 #   is known; with no secrets anywhere no webhook is posted to.
-#   ntfy: $NtfyServer / $NtfyTopic, env NTFY_SERVER / NTFY_TOPIC, else yc-event.json "ntfy", else
-#   https://ntfy.sh/9890122212. NTFY_TOPIC=off turns it off. A phone is not a log: ntfy gets the
+#   ntfy: $NtfyServer / $NtfyTopic / $NtfyToken, env NTFY_SERVER / NTFY_TOPIC / NTFY_TOKEN, else
+#   yc-event.json "ntfy" / "ntfyToken", else topic 9890122212 on OUR server https://n.oasisstack.io
+#   when a token is known (it refuses anonymous posts - the token is a write token, sent as
+#   Authorization: Bearer), and on public https://ntfy.sh when none is, so an alert is never lost
+#   for want of a token. NTFY_TOPIC=off turns it off. A phone is not a log: ntfy gets the
 #   states a human must act on (failed, waiting, waitforhuman) and the final word of a whole run
 #   (-Ntfy always); a nightly "ok" is not pushed.
 #
@@ -159,7 +162,8 @@ function Note  { param([string]$T) $script:Notes.Add($T)    | Out-Null }
 # ------------------------------------------------------------------------------------
 $script:YcErpDefaultUrl = 'https://api.yallacloud.net/api/v1/webhooks/cloudstack'
 $script:YcMsCfgFile   = 'C:\ProgramData\YallaCloud\yc-event.json'
-$script:YcNtfyDefault   = 'https://ntfy.sh/9890122212'
+$script:YcNtfyDefault   = 'https://ntfy.sh/9890122212'      # no token: public ntfy
+$script:YcNtfyOwn       = 'https://n.oasisstack.io'         # token: our own server (2026-10-31)
 $script:YcJournalFile   = 'C:\ProgramData\YallaCloud\logs\yc-milestones.log'
 $script:YcMsSkipTags  = @('yc-event','yc-compliance','yc-integrity','report-inventory','diag','rootcause',
                             'collect-logs','vss-check','licence-report','yc-health','yallacloud','command-name',
@@ -177,7 +181,7 @@ function Get-YcMsFirst{
 function Resolve-YcMsConfig{
     param([hashtable]$Vars,[hashtable]$Env,$Json)
     $jv = @{}
-    if($Json){ foreach($k in 'url','secret','token','extraUrl','extraSecret','ntfy'){ if($Json.$k){ $jv[$k] = [string]$Json.$k } } }
+    if($Json){ foreach($k in 'url','secret','token','extraUrl','extraSecret','ntfy','ntfyToken'){ if($Json.$k){ $jv[$k] = [string]$Json.$k } } }
     $c = @{
         erpUrl      = Get-YcMsFirst @($Vars.ErpWebhookUrl,      $Env.ERP_WEBHOOK_URL,      $jv.url, $script:YcErpDefaultUrl)
         erpSecret   = Get-YcMsFirst @($Vars.ErpWebhookSecret,   $Env.ERP_WEBHOOK_SECRET,   $jv.secret)
@@ -186,24 +190,28 @@ function Resolve-YcMsConfig{
         extraSecret = Get-YcMsFirst @($Vars.ExtraWebhookSecret, $Env.EXTRA_WEBHOOK_SECRET, $jv.extraSecret)
     }
     # ntfy: an explicit topic wins, then yc-event's configured url, then the estate default.
+    $c.ntfyToken = Get-YcMsFirst @($Vars.NtfyToken, $Env.NTFY_TOKEN, $jv.ntfyToken)
     $topic  = Get-YcMsFirst @($Vars.NtfyTopic, $Env.NTFY_TOPIC)
-    $server = (Get-YcMsFirst @($Vars.NtfyServer, $Env.NTFY_SERVER, 'https://ntfy.sh')).TrimEnd('/')
+    $server = Get-YcMsFirst @($Vars.NtfyServer, $Env.NTFY_SERVER)
+    if(-not $server){ $server = $(if($c.ntfyToken){ $script:YcNtfyOwn } else { 'https://ntfy.sh' }) }
+    $server = $server.TrimEnd('/')
     if($topic -eq 'off'){ $c.ntfyUrl = '' }
     elseif($topic){ $c.ntfyUrl = $(if($topic -match '^[A-Za-z0-9_-]{1,64}$'){ $server + '/' + $topic } else { '' }) }
-    else{ $c.ntfyUrl = Get-YcMsFirst @($jv.ntfy, $script:YcNtfyDefault) }
+    elseif($jv.ntfy){ $c.ntfyUrl = $jv.ntfy }
+    else{ $c.ntfyUrl = $server + '/9890122212' }
     foreach($k in 'erpUrl','extraUrl','ntfyUrl'){ if($c[$k] -and $c[$k] -notmatch '^https://[^\s"'']+$'){ $c[$k] = '' } }
     return $c
 }
 
 function Get-YcMsConfig{
     $vars = @{}
-    foreach($n in 'ErpWebhookUrl','ErpWebhookSecret','ExtraWebhookUrl','ExtraWebhookSecret','NtfyServer','NtfyTopic'){
+    foreach($n in 'ErpWebhookUrl','ErpWebhookSecret','ExtraWebhookUrl','ExtraWebhookSecret','NtfyServer','NtfyTopic','NtfyToken'){
         $x = Get-Variable -Name $n -ValueOnly -ErrorAction SilentlyContinue
         if($x){ $vars[$n] = [string]$x }
     }
     $envs = @{ ERP_WEBHOOK_URL = $env:ERP_WEBHOOK_URL; ERP_WEBHOOK_SECRET = $env:ERP_WEBHOOK_SECRET
                EXTRA_WEBHOOK_URL = $env:EXTRA_WEBHOOK_URL; EXTRA_WEBHOOK_SECRET = $env:EXTRA_WEBHOOK_SECRET
-               NTFY_SERVER = $env:NTFY_SERVER; NTFY_TOPIC = $env:NTFY_TOPIC }
+               NTFY_SERVER = $env:NTFY_SERVER; NTFY_TOPIC = $env:NTFY_TOPIC; NTFY_TOKEN = $env:NTFY_TOKEN }
     $j = $null
     try{ if(Test-Path -LiteralPath $script:YcMsCfgFile){ $j = (Get-Content -LiteralPath $script:YcMsCfgFile -Raw) | ConvertFrom-Json } }catch{ $j = $null }
     return (Resolve-YcMsConfig -Vars $vars -Env $envs -Json $j)
@@ -249,6 +257,7 @@ function Get-YcMsArea{
         'activate-sql'     { return 'sqllicense' }
         'install-sql'      { return 'sql' }
         'fix-deploy'       { return 'fixdeploy' }
+        'glpi-join'        { return 'glpi' }
     }
     $a = ($t -replace '[^a-z0-9-]','')
     if($a -eq 'deploy'){ return '' }     # vm.deploy.* is the ERP's build lifecycle; only a build sends it
@@ -261,6 +270,11 @@ function Get-YcMsState{
     if($Area -eq 'acronis'){
         if($Code -eq 0){ return 'registered' }
         if($Code -eq 3){ return 'waitforhuman' }      # installed and running, the installer wants a reboot
+        return 'failed'
+    }
+    if($Area -eq 'glpi'){
+        if($Code -eq 0){ return 'registered' }
+        if($Code -eq 8){ return 'waiting' }           # VM not known to CloudStack yet
         return 'failed'
     }
     if(@(0,3010,1641) -contains $Code){ return 'ok' }
@@ -383,7 +397,7 @@ function Get-YcMsLabel{
         'wsus'='Windows Update (local WSUS)'; 'winupdate'='Windows Update'; 'license'='Windows licence'
         'sqllicense'='SQL Server licence'; 'sql'='SQL Server install'; 'fixdeploy'='Deployment fixes'
         'backup-sql'='SQL backup'; 'restore-sql'='SQL restore'; 'premig'='Pre-migration check'; 'adopt'='Adoption of a migrated VM'
-        'deploy'='VM deployment'; 'grow-disk'='Disk extension'; 'set-firewall'='Firewall rules'; 'set-time'='Time sync'
+        'deploy'='VM deployment'; 'glpi'='GLPI inventory agent'; 'grow-disk'='Disk extension'; 'set-firewall'='Firewall rules'; 'set-time'='Time sync'
         'rotate-password'='Password rotation'; 'vmware-tools'='VMware Tools'; 'install-dotnet'='.NET install'
     }
     if($known.ContainsKey($a)){ return $known[$a] }
@@ -433,12 +447,13 @@ function New-YcMsNtfy{
 }
 
 function Send-YcMsNtfy{
-    param([string]$Url,$Body,[string]$Log = '')
+    param([string]$Url,$Body,[string]$Log = '',[string]$Token = '')
     try{
         $n = New-YcMsNtfy -Body $Body -Log $Log
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $r = Invoke-WebRequest -Uri $Url -Method Post -Body $n.text -ContentType 'text/plain' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop `
-               -Headers @{ Title = $n.title; Priority = $n.priority; Tags = $n.tags }
+        $h = @{ Title = $n.title; Priority = $n.priority; Tags = $n.tags }
+        if($Token){ $h['Authorization'] = 'Bearer ' + $Token }
+        $r = Invoke-WebRequest -Uri $Url -Method Post -Body $n.text -ContentType 'text/plain' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop -Headers $h
         return [string][int]$r.StatusCode
     }catch{
         $c = ''
@@ -460,7 +475,7 @@ function Send-YcMilestone{
         $toNtfy  = [bool]($c.ntfyUrl -and (Test-YcMsNtfy -State $State -Mode $Ntfy))
         if(-not $Tag){ $Tag = Get-YcMsTag }
         if(-not $LogPath -and $script:YcLogFile){ $LogPath = [string]$script:YcLogFile }
-        $e = ConvertTo-YcMsError -Text $Err -Secrets @($c.erpSecret,$c.erpToken,$c.extraSecret)
+        $e = ConvertTo-YcMsError -Text $Err -Secrets @($c.erpSecret,$c.erpToken,$c.extraSecret,$c.ntfyToken,$env:GLPI_AGENT_PASSWORD)
         $b = New-YcMsBody -Area $Area -State $State -Err $e -Tag $Tag -Id (Get-YcMsIdentity)
         $json = ([pscustomobject]$b) | ConvertTo-Json -Compress
         $res = @()
@@ -471,7 +486,7 @@ function Send-YcMilestone{
             if($c.erpToken){ $h['Authorization'] = 'Bearer ' + $c.erpToken }
             $res += ('erp ' + (Send-YcMsPost -Url $c.erpUrl -Headers $h -Json $json))
         }
-        if($toNtfy){ $res += ('ntfy ' + (Send-YcMsNtfy -Url $c.ntfyUrl -Body $b -Log $LogPath)) }
+        if($toNtfy){ $res += ('ntfy ' + (Send-YcMsNtfy -Url $c.ntfyUrl -Body $b -Log $LogPath -Token $c.ntfyToken)) }
         Write-YcMsJournal -Body $b -Sent ((@($res) | ForEach-Object { ($_ -replace 'no answer','noanswer') -replace ' ',':' }) -join ',')
     }catch{}
 }
@@ -486,7 +501,7 @@ function Send-YcRunMilestone{
     if(-not $a){ return }
     $st = Get-YcMsState -Area $a -Code $Code
     $e = ''
-    if(@('ok','registered') -notcontains $st){ $e = ('exit ' + $Code + $(if($script:YcLastMessage){ ': ' + $script:YcLastMessage } else { '' })) }
+    if(@('ok','registered','joined') -notcontains $st){ $e = ('exit ' + $Code + $(if($script:YcLastMessage){ ': ' + $script:YcLastMessage } else { '' })) }
     Send-YcMilestone -Area $a -State $st -Err $e
 }
 
@@ -504,12 +519,15 @@ function Save-YcMsConfig{
             if($v){ $given[$k] = $v }
         }
         if($given.secret -and -not $given.url){ $given.url = $script:YcErpDefaultUrl }
+        $tk = Get-YcMsFirst @((Get-Variable -Name NtfyToken -ValueOnly -ErrorAction SilentlyContinue), $env:NTFY_TOKEN)
+        if($tk){ $given.ntfyToken = $tk }
         $tp = Get-YcMsFirst @((Get-Variable -Name NtfyTopic -ValueOnly -ErrorAction SilentlyContinue), $env:NTFY_TOPIC)
         if($tp -and $tp -ne 'off' -and $tp -match '^[A-Za-z0-9_-]{1,64}$'){
-            $sv = (Get-YcMsFirst @((Get-Variable -Name NtfyServer -ValueOnly -ErrorAction SilentlyContinue), $env:NTFY_SERVER, 'https://ntfy.sh')).TrimEnd('/')
-            $given.ntfy = $sv + '/' + $tp
+            $sv = Get-YcMsFirst @((Get-Variable -Name NtfyServer -ValueOnly -ErrorAction SilentlyContinue), $env:NTFY_SERVER)
+            if(-not $sv){ $sv = $(if($tk){ $script:YcNtfyOwn } else { 'https://ntfy.sh' }) }
+            $given.ntfy = $sv.TrimEnd('/') + '/' + $tp
         }
-        if(-not ($given.secret -or $given.extraSecret)){ return 'no webhook secret given to this run - nothing saved' }
+        if(-not ($given.secret -or $given.extraSecret -or $given.ntfyToken)){ return 'no webhook secret or ntfy token given to this run - nothing saved' }
         $d = Split-Path -Parent $script:YcMsCfgFile
         if(-not (Test-Path -LiteralPath $d)){ New-Item -ItemType Directory -Path $d -Force | Out-Null }
         $o = [ordered]@{}
@@ -525,7 +543,7 @@ function Save-YcMsConfig{
 # --- end of the copied block ---------------------------------------------------------------------
 
 $script:YcJournalFile   = ''
-$script:PremigHookTag   = 'Test-MigrationReadiness.ps1 1.5.0'
+$script:PremigHookTag   = 'Test-MigrationReadiness.ps1 1.5.1'
 $script:PremigLastHook  = ''
 $script:YcMsSink      = { param($line, $kw) $script:Log.Add(((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + '  [REPORT] ' + $line)) | Out-Null; $script:PremigLastHook = $line }
 $script:PremigSection   = $null

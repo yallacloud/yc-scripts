@@ -150,7 +150,7 @@ function YcVerdict {
 # someone who already has C:\Scripts and can type  migrated-vm -Help .
 $Allowed = @('-Report','-Run','-Status','-AcronisToken','-AcronisRegion','-SkipAcronis',
              '-SkipSalt','-SaltMaster','-GrowDisk','-AllowReboot','-Force','-Skip','-Only',
-             '-QemuGaMsi','-Help')
+             '-QemuGaMsi','-SkipGlpi','-Help')
 $TakesValue = @('-AcronisToken','-AcronisRegion','-SaltMaster','-Skip','-Only','-QemuGaMsi')
 $Secret     = @('-AcronisToken')
 
@@ -393,6 +393,7 @@ function YcHelp {
   YcSay '  -AcronisToken <tok>    Acronis registration token. NEEDS -AcronisRegion.'
   YcSay '  -AcronisRegion AE|SG   AE = UAE, SG = Singapore'
   YcSay '  -SkipAcronis           never touch Acronis, and do not ask'
+  YcSay '  -SkipGlpi              never touch the GLPI agent, even with a password set'
   YcSay '  -SkipSalt              do not join the Salt master'
   YcSay '  -SaltMaster <host>     override the master. Default is derived from the IP.'
   YcSay '  -GrowDisk              actually extend partitions. Default: detect, report.'
@@ -427,7 +428,9 @@ function YcHelp {
   YcSay '    $env:ERP_WEBHOOK_SECRET   = ''<value>'''
   YcSay '    $env:EXTRA_WEBHOOK_URL    = ''<value>'''
   YcSay '    $env:EXTRA_WEBHOOK_SECRET = ''<value>'''
+  YcSay '    $env:NTFY_TOKEN           = ''<value>''   (our ntfy n.oasisstack.io)'
   YcSay '    $env:NTFY_TOPIC           = ''off''     (optional: no phone push)'
+  YcSay '    $env:GLPI_AGENT_PASSWORD  = ''<value>''   (optional: GLPI phase)'
   YcSay '  Every result line is tagged  [YALLACLOUD][YC-MILESTONE][YC-OK]  - or'
   YcSay '  YC-FAILED / YC-WAITING. Search for YC-FAILED to see what went wrong.'
   YcSay '  The adopt keeps them on the VM (SYSTEM and Administrators only), so every'

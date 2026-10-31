@@ -373,6 +373,7 @@ function YcHelp {
   YcSay '    $env:ERP_WEBHOOK_SECRET   = ''<value>'''
   YcSay '    $env:EXTRA_WEBHOOK_URL    = ''<value>'''
   YcSay '    $env:EXTRA_WEBHOOK_SECRET = ''<value>'''
+  YcSay '    $env:NTFY_TOKEN           = ''<value>''   (our ntfy n.oasisstack.io)'
   YcSay '    $env:NTFY_TOPIC           = ''off''     (optional: no phone push)'
   YcSay '  Every result line is tagged  [YALLACLOUD][YC-MILESTONE][YC-OK]  - or'
   YcSay '  YC-FAILED / YC-WAITING. Search for YC-FAILED to see what went wrong.'

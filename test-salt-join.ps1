@@ -192,7 +192,7 @@ Write-Host ''
 Write-Host '=== 10. the phase is wired into the run, not just defined ===' -ForegroundColor Cyan
 T 'SALT is in AllPhases'                 ($src -match '\$AllPhases = @\(''SURVEY''.*''SALT''') ''
 T 'SALT is in the dispatcher'             ($src -match '''SALT''\s*\{\s*\$rc = Invoke-Salt') ''
-T 'SALT is in the dispatched guard list'  ($src.IndexOf("'TASKS','SALT','ACRONIS','NOTIFY','VERIFY'") -gt 0) ''
+T 'SALT is in the dispatched guard list'  ($src.IndexOf("'TASKS','SALT','ACRONIS','GLPI','NOTIFY','VERIFY'") -gt 0) ''
 T 'SALT runs after TASKS, before ACRONIS' ($src.IndexOf("'TASKS','SALT','ACRONIS'") -gt 0) ''
 T 'the outcome leaves the VM for ychook'  ($src -match 'salt='' \+ \[string\]\$sl\.action') ''
 T '-Help documents the phase'             ($src -match '(?m)^  SALT       hands this machine') ''

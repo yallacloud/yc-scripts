@@ -32,7 +32,13 @@ $none = @{}
 $c = Resolve-YcMsConfig -Vars $none -Env $none -Json $null
 T 'no settings: ERP url is the public default'      ($c.erpUrl -eq 'https://api.yallacloud.net/api/v1/webhooks/cloudstack')
 T 'no settings: no ERP secret, no extra webhook'    (-not $c.erpSecret -and -not $c.extraUrl -and -not $c.extraSecret)
-T 'no settings: ntfy is the estate default topic'   ($c.ntfyUrl -eq 'https://ntfy.sh/9890122212')
+T 'no settings, no token: ntfy is public ntfy.sh, topic 9890122212' ($c.ntfyUrl -eq 'https://ntfy.sh/9890122212')
+$c = Resolve-YcMsConfig -Vars $none -Env @{ NTFY_TOKEN = 'tkA' } -Json $null
+T 'a token moves ntfy to our own server n.oasisstack.io' ($c.ntfyUrl -eq 'https://n.oasisstack.io/9890122212' -and $c.ntfyToken -eq 'tkA') $c.ntfyUrl
+$c = Resolve-YcMsConfig -Vars @{ NtfyToken = 'tkB' } -Env @{ NTFY_SERVER = 'https://ntfy.example'; NTFY_TOPIC = 'yc-x' } -Json $null
+T 'NTFY_SERVER still wins over the token default'       ($c.ntfyUrl -eq 'https://ntfy.example/yc-x' -and $c.ntfyToken -eq 'tkB')
+$c = Resolve-YcMsConfig -Vars $none -Env $none -Json ([pscustomobject]@{ ntfyToken = 'tkJ' })
+T 'yc-event.json ntfyToken is used'                     ($c.ntfyToken -eq 'tkJ' -and $c.ntfyUrl -eq 'https://n.oasisstack.io/9890122212')
 $j = [pscustomobject]@{ url = 'https://json.example/erp'; secret = 'JSEC1'; extraUrl = 'https://json.example/x'; extraSecret = 'JSONX1'; ntfy = 'https://ntfy.example/t1' }
 $c = Resolve-YcMsConfig -Vars $none -Env $none -Json $j
 T 'yc-event.json is used when nothing else is set'  ($c.erpUrl -eq 'https://json.example/erp' -and $c.erpSecret -eq 'JSEC1' -and $c.extraUrl -eq 'https://json.example/x' -and $c.ntfyUrl -eq 'https://ntfy.example/t1')
@@ -70,6 +76,8 @@ T 'area: unknown tag -> the tag itself'               ((Get-YcMsArea 'grow-disk'
 T 'area: never vm.deploy.* (that is the ERP build signal)' ((@('fix-deploy','deploy') | ForEach-Object { Get-YcMsArea $_ }) -notcontains 'deploy')
 foreach ($t in 'yc-event','yc-compliance','report-inventory','adopt-migrated-vm','salt-join','diag') { T ('area: ' + $t + ' does not report') ((Get-YcMsArea $t) -eq '') }
 T 'state: 0 ok, 3010 ok, 1 failed'                    ((Get-YcMsState -Area 'sql' -Code 0) -eq 'ok' -and (Get-YcMsState -Area 'sql' -Code 3010) -eq 'ok' -and (Get-YcMsState -Area 'sql' -Code 1) -eq 'failed')
+T 'area: glpi-join -> glpi'                            ((Get-YcMsArea 'glpi-join') -eq 'glpi')
+T 'state: glpi 0 registered, 8 waiting, 3 failed'      ((Get-YcMsState -Area 'glpi' -Code 0) -eq 'registered' -and (Get-YcMsState -Area 'glpi' -Code 8) -eq 'waiting' -and (Get-YcMsState -Area 'glpi' -Code 3) -eq 'failed')
 T 'state: acronis 0 registered, 3 waitforhuman, 7 failed' ((Get-YcMsState -Area 'acronis' -Code 0) -eq 'registered' -and (Get-YcMsState -Area 'acronis' -Code 3) -eq 'waitforhuman' -and (Get-YcMsState -Area 'acronis' -Code 7) -eq 'failed')
 T 'read-only: -Report / -Help / -SelfCheck are not reported' ((Test-YcMsReadOnly @('Report')) -and (Test-YcMsReadOnly @('Help')) -and (Test-YcMsReadOnly @('Force','SelfCheck')))
 T 'read-only: an action run is reported'              (-not (Test-YcMsReadOnly @('Token','Region')))
@@ -97,6 +105,11 @@ $h = Get-AdoptPhaseHook -Phase 'SALT' -Rc 0 -Action 'skipped';       T 'adopt SA
 $h = Get-AdoptPhaseHook -Phase 'ACRONIS' -Rc 0 -Action 'skipped-not-requested'; T 'adopt ACRONIS not requested -> nothing' ($null -eq $h)
 $h = Get-AdoptPhaseHook -Phase 'ACRONIS' -Rc 3 -Action 'timeout';    T 'adopt ACRONIS timeout -> failed'          ($h.area -eq 'acronis' -and $h.state -eq 'failed')
 $h = Get-AdoptPhaseHook -Phase 'ACRONIS' -Rc 0 -Action 'installed-registered'; T 'adopt ACRONIS -> registered' ($h.state -eq 'registered')
+$h = Get-AdoptPhaseHook -Phase 'GLPI' -Rc 0 -Action 'registered';     T 'adopt GLPI ran -> nothing (glpi-join reports itself)' ($null -eq $h)
+$h = Get-AdoptPhaseHook -Phase 'GLPI' -Rc 0 -Action 'skipped-not-requested'; T 'adopt GLPI not requested -> nothing' ($null -eq $h)
+$h = Get-AdoptPhaseHook -Phase 'GLPI' -Rc 3 -Action 'no-command';     T 'adopt GLPI command missing -> vm.glpi.failed' ($h.area -eq 'glpi' -and $h.state -eq 'failed')
+T 'adopt has the GLPI phase between ACRONIS and NOTIFY' ($adopt -match "'SALT','ACRONIS','GLPI','NOTIFY','VERIFY'" -and $adopt -match "'GLPI'      \{ \`$rc = Invoke-Glpi \}")
+T 'adopt GLPI password only from the environment'      ($adopt -notmatch '\[string\]\`$Glpi\w*Password' -and $adopt -match 'GLPI_AGENT_PASSWORD')
 $h = Get-AdoptPhaseHook -Phase 'SQLBACKUP' -Rc 3;                    T 'adopt flagged phase -> waitforhuman'      ($h.area -eq 'adopt-sqlbackup' -and $h.state -eq 'waitforhuman')
 $h = Get-AdoptPhaseHook -Phase 'PREREQ' -Rc 1;                       T 'adopt reboot-wait -> waiting'             ($h.state -eq 'waiting')
 $h = Get-AdoptPhaseHook -Phase 'SYNC' -Rc 4;                         T 'adopt terminal -> failed'                 ($h.state -eq 'failed')
@@ -106,11 +119,25 @@ T 'premig writes no journal file (changes nothing)'    ($prem -match "(?m)^\`$sc
 T 'premig reports every section and the verdict'       ($prem -match 'Close-PremigSection; Open-PremigSection' -and $prem -match "Send-YcMilestone -Area 'premig' -State \`$fin")
 T 'adopt reports each phase, saves settings after SYNC, sends a final word' ($adopt -match 'Send-AdoptPhaseHook -Phase \$p -Rc \$rc' -and $adopt -match 'Save-YcMsConfig' -and $adopt -match "Send-YcMilestone -Area 'adopt' -State \`$fin")
 
+# --- glpi-join ------------------------------------------------------------------------------------
+$gj = [IO.File]::ReadAllText((Join-Path $PayloadDir 'Glpi-Join.ps1')) -replace "`r`n", "`n"
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($gj, [ref]$null, [ref]$null)
+$fn = $ast.Find({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Test-GlpiKit' }, $true)
+T 'Glpi-Join has Test-GlpiKit' ([bool]$fn)
+if ($fn) { . ([scriptblock]::Create($fn.Extent.Text)) }
+T 'kit check: the real header and valid PowerShell pass' (Test-GlpiKit "<#`n glpi-agent-setup.ps1 1.1.0 - YallaCloud`n#>`nparam([string]`$Password)`n'x'")
+T 'kit check: a 403 HTML page fails'                   (-not (Test-GlpiKit '<html><body>403 Forbidden</body></html>'))
+T 'kit check: a truncated kit fails'                   (-not (Test-GlpiKit "<#`n glpi-agent-setup.ps1 1.1.0`n#>`nfunction X {"))
+T 'glpi-join: no password parameter'                    (@($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -match 'Pass' }).Count -eq 0)
+T 'glpi-join: tenant passed to the kit by NAME (password stays in the environment)' ($gj -match "\`$a \+= '-Tenant'; \`$a \+= \`$Tenant")
+T 'glpi-join: the kit''s own ntfy/webhook are off for the child' ($gj -match "\`$env:NTFY_TOPIC = 'off'; \`$env:EXTRA_WEBHOOK_URL = ''")
+T 'glpi-join is in the catalogue and has a .cmd'        ((Test-Path (Join-Path $PayloadDir 'glpi-join.cmd')) -and ([IO.File]::ReadAllText((Join-Path $PayloadDir 'Yallacloud.ps1')) -match 'glpi-join'))
+
 # --- library hooks ------------------------------------------------------------------------------
 T 'Stop-YcLog sends the run milestone, not on the unclean path' ($lib -match 'if\(-not \$Unclean\)\{ try\{ \[void\]\(Send-YcRunMilestone -Code \$Code\) \}catch\{\} \}')
 T 'Start-YcLog records the caller''s parameters'       ($lib -match '\$script:YcBoundNames = @\(\$ii\.BoundParameters\.Keys\)')
 T 'Exit-Yc keeps its message as the reason'             ($lib -match 'if\(\$Code -ne 0 -and \$Message\)\{ \$script:YcLastMessage = \$Message \}')
-T 'library version is 2.1.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.1\.0'")
+T 'library version is 2.2.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.2\.0'")
 # The call-stack capture, run for real: a script given -Report must be seen as read-only.
 $m = [regex]::Match($lib, '(?s)    \$script:YcBoundNames = @\(\)\r?\n    try\{.*?\n    \}catch\{\}')
 T 'capture code found' $m.Success

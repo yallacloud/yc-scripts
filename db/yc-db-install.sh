@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.22  (2026-10-31 14:00 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.23  (2026-10-31 14:20 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -61,7 +61,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.22
+VER=1.0.23
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION GLPI_AGENT NTFY_URL NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -1281,7 +1281,8 @@ if [ "$GLPI_AGENT" != yes ]; then GLPI_STATE="off (GLPI_AGENT=no)"; MARKS="${MAR
 elif [ "$SALT_JOIN" != yes ]; then GLPI_STATE="off (needs SALT_JOIN=yes)"; MARKS="${MARKS:+$MARKS | }glpi off"
 elif [ "$SALT_STATE" != JOINED ]; then GLPI_STATE="waiting for Salt (installed after the join, reported by yc-db-salt-retry)"; yc_mark glpi waiting "Salt not joined yet - Salt installs the agent after the join"
 else   # the reactor applies glpi.agent on minion start, but join.sh drops the grain: ensure + apply ourselves, then read the result line
-  n0=$(grep -cs "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL"); yc_glpi_ensure   # count result lines only (same filter as the loop); t_end=$((SECONDS+120)); GLPI_STATE=""
+  n0=$(grep -cs "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL")   # result lines only (same filter as the loop below)
+  yc_glpi_ensure; t_end=$((SECONDS+120)); GLPI_STATE=""
   systemctl is-active -q glpi-agent && grep -qs "\[glpi-agent\] \[OK\] REGISTERED" "$GLL" && n0=0   # re-run: already registered
   while [ $SECONDS -lt $t_end ]; do
     l=$(grep -s "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL" | tail -n +$((n0+1)) | tail -1)

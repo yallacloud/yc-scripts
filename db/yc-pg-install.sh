@@ -63,7 +63,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.13
+VER=1.0.14
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -1268,7 +1268,7 @@ health(){   # one line per area: OK / WARN / FAIL + what it means
   if systemctl is-active -q salt-minion; then hk OK salt "managed by Salt ($(grep -hs '^id:' /etc/salt/minion.d/*.conf | head -1 | cut -d' ' -f2))"
   elif [ -f /etc/cron.d/yc-salt-join ]; then hk WAIT salt "not joined yet - retry every 15 min ($(salt_ports))"; else hk -- salt "off"; fi
   if systemctl is-active -q glpi-agent 2>/dev/null; then hk OK glpi "inventory agent running (tag $(sed -n 's/^tag *= *//p' /etc/glpi-agent/conf.d/00-install.cfg /etc/glpi-agent/agent.cfg 2>/dev/null | head -1))"
-  elif grep -qs '^yc_glpi: yes' /etc/salt/grains; then hk WAIT glpi "waiting for Salt to install the inventory agent"; else hk -- glpi "off"; fi
+  elif grep -qs 'yc_glpi: "yes"' /etc/salt/minion.d/30-yc-glpi.conf; then hk WAIT glpi "waiting for Salt to install the inventory agent"; else hk -- glpi "off"; fi
   e=$(awk -v d="$(date -d '-24 hours' '+%F %T')" '$0 >= d' /var/log/yallacloud/errors.log 2>/dev/null | wc -l)
   [ "$e" = 0 ] && hk OK problems "no warnings or errors in the last 24 h" || hk WARN problems "$e warning(s)/error(s) in the last 24 h - yallacloud errors"
   { [ -f /var/run/reboot-required ] || { command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; }; } && hk WARN os "reboot pending (kernel/library update)" || hk OK os "no reboot pending"
@@ -1418,8 +1418,8 @@ rm -f "$pf"
 yc_event db ok
 step "13 agents"
 if [ "$SALT_JOIN" = yes ] && [ "$GLPI_AGENT" = yes ]; then   # opt-in grain for glpi/agent.sls (ycadmin/salt): Salt installs the agent after the join, the password stays on the master
-  mkdir -p /etc/salt; touch /etc/salt/grains
-  if grep -q "^yc_glpi:" /etc/salt/grains; then sed -i "s/^yc_glpi:.*/yc_glpi: yes/" /etc/salt/grains; else echo "yc_glpi: yes" >> /etc/salt/grains; fi
+  # in minion.d, not /etc/salt/grains: the join (yc-salt-minion.sh) rewrites that file with the enrolment grains
+  install -d -m 755 /etc/salt/minion.d; printf '# YallaCloud DB kit: opt in to glpi/agent.sls (ycadmin/salt)\ngrains:\n  yc_glpi: "yes"\n' > /etc/salt/minion.d/30-yc-glpi.conf
 fi
 if [ "$SALT_JOIN" = yes ]; then   # reporting retry: every 15 min until JOINED, then reports vm.salt.joined and removes itself
 cat > /usr/local/sbin/yc-salt-retry <<'EOF'
@@ -1444,12 +1444,14 @@ elif [ "$SALT_JOIN" = yes ]; then
   while :; do n=$((n+1))
     jo=$(NTFY_TOPIC=off timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1); jrc=$?
     jl=$(printf '%s\n' "$jo" | tail -n 1)
-    { [ "$jrc" = 8 ] && [ $SECONDS -lt $t_end ]; } || break
-    say "salt: try $n WAITING - this VM is not in the Salt inventory yet (5-min CloudStack sync) - again in 30 s"; sleep 30
+    case "$jrc|$jl" in 8\|*|*"did not accept its key"*) [ $SECONDS -lt $t_end ] || break;; *) break;; esac   # both = master has not synced this VM yet
+    say "salt: try $n not known to the master yet ($([ "$jrc" = 8 ] && echo WAITING || echo 'key not accepted yet')) - 5-min CloudStack inventory sync - again in 30 s"; sleep 30
   done
   say "salt: join.sh exit $jrc after $n try(s) - $jl"
   case "$jrc" in
-    0) SALT_STATE=JOINED; yc_event salt joined;;
+    0) SALT_STATE=JOINED; yc_event salt joined
+       # minion.d grains load at minion start, and the reactor applies glpi.agent on minion start: restart once if the agent is not there yet
+       [ "$GLPI_AGENT" = yes ] && ! systemctl is-active -q glpi-agent && { systemctl restart salt-minion; say "salt: minion restarted - reactor applies glpi.agent"; };;
     8) SALT_STATE="WAITING - not in the Salt inventory after $n tries (retry every 15 min)"; warn "salt: $SALT_STATE"
        printf '# YallaCloud: VM not in the Salt inventory at install - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock /usr/local/sbin/yc-salt-retry >/dev/null 2>&1\n' > /etc/cron.d/yc-salt-join
        WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }Salt: VM not in the inventory yet (it retries every 15 min)"; yc_event salt waiting "$jl";;

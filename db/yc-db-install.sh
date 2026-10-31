@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.21  (2026-10-31 13:20 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.22  (2026-10-31 14:00 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -61,7 +61,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.21
+VER=1.0.22
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION GLPI_AGENT NTFY_URL NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -619,10 +619,14 @@ if [ "$OSF" = ubuntu ]; then
     say "apt mirror $m not answering or too slow (${got:-0} of 262144 bytes in 10 s) - next"
   done
   [ -n "$MIRROR" ] || die "no apt mirror answered: $APT_MIRRORS"
-  set_mirror(){ for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
-    [ -f "$F" ] && sed -i -E "s#https?://([a-z0-9.-]*\.)?archive\.ubuntu\.com/ubuntu#http://$1/ubuntu#g" "$F"; done; }
-  set_mirror "$MIRROR"
-  printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::ForceIPv4 "true";\nDPkg::Lock::Timeout "900";\n' > /etc/apt/apt.conf.d/99yallacloud
+  # apt mirror list (mirror+file): apt itself moves to the next mirror for ANY file that fails or stalls - indexes and .deb
+  # (ae.archive 2026-10-31 stalled on big files: universe index, snapd). First = the chosen mirror, then the rest of APT_MIRRORS.
+  set_mirror(){ { for m2 in $1 $(printf '%s\n' $APT_MIRRORS | grep -vx "$1"); do printf 'http://%s/ubuntu\tpriority:%s\n' "$m2" $((++_p)); done; } > /etc/apt/yc-mirrors.txt; _p=0; }
+  _p=0; set_mirror "$MIRROR"
+  for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+    [ -f "$F" ] && sed -i -E "s#https?://([a-z0-9.-]*\.)?archive\.ubuntu\.com/ubuntu/?#mirror+file:/etc/apt/yc-mirrors.txt#g" "$F"
+  done
+  printf 'Acquire::Retries "3";\nAcquire::http::Timeout "15";\nAcquire::ForceIPv4 "true";\nDPkg::Lock::Timeout "900";\n' > /etc/apt/apt.conf.d/99yallacloud
   mkdir -p /etc/needrestart/conf.d; echo "\$nrconf{restart} = 'a';" > /etc/needrestart/conf.d/99-yallacloud.conf
   say "apt mirror = $MIRROR"
   # apt's own result is the real test: a mirror can serve the start of an index and then stall (ae.archive 2026-10-31,
@@ -633,7 +637,7 @@ if [ "$OSF" = ubuntu ]; then
     [ $rc = 0 ] && ! printf '%s\n' "$out" | grep -qE '^(Ign|Err):[0-9]+ .* Packages' && break
   done
   [ $rc = 0 ] || die "apt update failed (mirrors: $APT_MIRRORS)"
-  say "apt mirror in use = $MIRROR"
+  say "apt mirrors = $(cut -f1 /etc/apt/yc-mirrors.txt | sed 's#http://##;s#/ubuntu##' | paste -sd' ') (mirror+file, first = $MIRROR)"
   apt-get -y -q -o Dpkg::Options::=--force-confold upgrade || warn "apt upgrade had errors"
   apt-get -y -q install curl ca-certificates gnupg ufw chrony locales xfsprogs cron gzip fail2ban openssh-server || die "base packages failed"
   locale-gen "$LOCALE_SET" >/dev/null && update-locale LANG="$LOCALE_SET"

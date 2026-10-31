@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.17  (2026-10-31 06:30 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.18  (2026-10-31 07:10 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -61,7 +61,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.17
+VER=1.0.18
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION GLPI_AGENT NTFY_URL NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -1213,11 +1213,21 @@ if ! sp=$(salt_ports); then yc_mark salt waiting "$sp"; exit 0; fi
 out=$(timeout 900 sh -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
 case "$out" in
   *JOINED*) yc_mark salt joined "$out"; rm -f /etc/cron.d/yc-salt-join
+            g="off"
+            if grep -qs '^yc_glpi: yes' /etc/salt/grains; then   # Salt installs the GLPI agent after the join: wait up to 7 min for its result line
+              g="waiting - salt <minion> state.apply glpi.agent"
+              for i in $(seq 42); do l=$(grep -s "\[glpi-agent\] \[\(OK\|ERROR\)\]" /var/log/yallacloud/yallacloud.log | tail -1)
+                case "$l" in *"[OK] REGISTERED"*) g="REGISTERED tag $(sed -n 's/^tag *= *//p' /etc/glpi-agent/conf.d/00-install.cfg /etc/glpi-agent/agent.cfg 2>/dev/null | head -1)"; break;;
+                  *"[ERROR]"*) g="failed - ${l##*\[ERROR\] }"; break;; esac; sleep 10; done
+              case "$g" in REGISTERED*) yc_mark glpi registered "$g";; failed*) yc_mark glpi failed "$g";; *) yc_mark glpi waiting "$g";; esac
+            fi
             yc_ntfy "SALT JOINED $ENGINE - $(hostname -s)" 3 "white_check_mark,salt" "Salt management is connected now (was waiting since the install).
 
 salt     : $out
+glpi     : $g
 master   : $SALT_MASTER  (ports 4505/4506 open)
 log      : $YC_LOG" ;;
+  *WAITING*) yc_mark salt waiting "VM not in the CloudStack inventory yet" ;;
   *) yc_mark salt failed "$out" ;;
 esac
 EOF
@@ -1228,19 +1238,27 @@ if [ "$SALT_JOIN" = yes ] && [ "$GLPI_AGENT" = yes ]; then   # opt-in grain for 
 fi
 if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
   # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
-  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock timeout 1000 /usr/local/sbin/yc-db-salt-retry >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
+  printf '# YallaCloud: Salt master was unreachable at install (%s) - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock timeout 1500 /usr/local/sbin/yc-db-salt-retry >/dev/null 2>&1\n' "$sp" > /etc/cron.d/yc-salt-join
   SALT_STATE="BLOCKED - $sp (retry every 15 min)"; warn "salt: $sp - join skipped, retry cron /etc/cron.d/yc-salt-join"; yc_mark salt waiting "$sp"
   WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }open $SALT_MASTER 4505/4506 for this VM"
 elif [ "$SALT_JOIN" = yes ]; then
   say "salt: $sp"
-  SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
-  say "salt: $SALT_STATE"; [[ "$SALT_STATE" == *JOINED* ]] || { warn "salt join not confirmed: $SALT_STATE"; SALT_STATE="not joined"; }
-  if [[ "$SALT_STATE" == *JOINED* ]]; then SALT_STATE=JOINED; yc_mark salt joined; else yc_mark salt failed "$SALT_STATE"; fi
+  for i in 1 2 3 4 5 6 7 8 9; do   # a VM built in < 5 min is not in the Salt inventory yet (CloudStack sync every 5 min): retry 60 s, up to 8 min
+    SALT_STATE=$(timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1 | tail -n 3 | tr '\n' ' ')
+    [[ "$SALT_STATE" == *WAITING* ]] || break
+    [ $i = 1 ] && say "salt: VM not in the Salt inventory yet (syncs every 5 min) - retry every 60 s, up to 8 min"; [ $i = 9 ] || sleep 60
+  done
+  say "salt: $SALT_STATE"
+  if [[ "$SALT_STATE" == *JOINED* ]]; then SALT_STATE=JOINED; yc_mark salt joined
+  elif [[ "$SALT_STATE" == *WAITING* ]]; then   # still not listed: our reporting retry job takes over (replaces join.sh's own cron)
+    printf '# YallaCloud: VM not in the Salt inventory at install - retry the zero-input join until JOINED (STACK4-62)\n*/15 * * * * root flock -n /run/yc-salt-join.lock timeout 1500 /usr/local/sbin/yc-db-salt-retry >/dev/null 2>&1\n' > /etc/cron.d/yc-salt-join
+    SALT_STATE="WAITING - VM not in the CloudStack inventory yet (retry every 15 min)"; warn "salt: $SALT_STATE"; yc_mark salt waiting "VM not in the CloudStack inventory yet - retry every 15 min"
+  else warn "salt join not confirmed: $SALT_STATE"; yc_mark salt failed "$SALT_STATE"; SALT_STATE="not joined"; fi
 else SALT_STATE="off (SALT_JOIN=no)"; MARKS="${MARKS:+$MARKS | }salt off"; fi
 GLL=/var/log/yallacloud/yallacloud.log   # glpi-agent-setup.sh (run by Salt) writes its result line here
 if [ "$GLPI_AGENT" != yes ]; then GLPI_STATE="off (GLPI_AGENT=no)"; MARKS="${MARKS:+$MARKS | }glpi off"
 elif [ "$SALT_JOIN" != yes ]; then GLPI_STATE="off (needs SALT_JOIN=yes)"; MARKS="${MARKS:+$MARKS | }glpi off"
-elif [ "$SALT_STATE" != JOINED ]; then GLPI_STATE="waiting for Salt"; yc_mark glpi waiting "Salt not joined yet - Salt installs the agent after the join"
+elif [ "$SALT_STATE" != JOINED ]; then GLPI_STATE="waiting for Salt (installed after the join, reported by yc-db-salt-retry)"; yc_mark glpi waiting "Salt not joined yet - Salt installs the agent after the join"
 else   # the reactor applies glpi.agent on minion start; wait up to 7 min for its result line
   t_end=$((SECONDS+420)); GLPI_STATE=""; n0=$(grep -cs "\[glpi-agent\] \[" "$GLL")
   systemctl is-active -q glpi-agent && grep -qs "\[glpi-agent\] \[OK\] REGISTERED" "$GLL" && n0=0   # re-run: already registered

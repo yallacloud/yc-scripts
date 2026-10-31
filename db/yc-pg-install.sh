@@ -63,7 +63,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.16
+VER=1.0.17
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -758,7 +758,8 @@ if [ "$OSF" = ubuntu ]; then
     [ -f "$F" ] && sed -i -E "s#https?://([a-z0-9.-]*\.)?archive\.ubuntu\.com/ubuntu#http://${MIRROR}/ubuntu#g" "$F"
   done
   printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::ForceIPv4 "true";\nDPkg::Lock::Timeout "900";\n' > /etc/apt/apt.conf.d/99yallacloud
-  mkdir -p /etc/needrestart/conf.d; echo "\$nrconf{restart} = 'a';" > /etc/needrestart/conf.d/99-yallacloud.conf
+  mkdir -p /etc/needrestart/conf.d   # automatic restarts, but never the running build or the Salt minion (a GLPI apt run restarted yc-deploy.service -> CANCELLED)
+  printf '%s\n' "\$nrconf{restart} = 'a';" "\$nrconf{override_rc}{qr(^yc-deploy\\.service\$)} = 0;" "\$nrconf{override_rc}{qr(^salt-minion\\.service\$)} = 0;" > /etc/needrestart/conf.d/99-yallacloud.conf
   say "apt mirror = $MIRROR"
   aptupd || die "apt update failed"
   aptdl upgrade; apt-get -y -q -o Dpkg::Options::=--force-confold upgrade || warn "apt upgrade had errors"
@@ -1451,8 +1452,7 @@ elif [ "$SALT_JOIN" = yes ]; then
   say "salt: join.sh exit $jrc after $n try(s) - $jl"
   case "$jrc" in
     0) SALT_STATE=JOINED; yc_event salt joined
-       # minion.d grains load at minion start, and the reactor applies glpi.agent on minion start: restart once if the agent is not there yet
-       [ "$GLPI_AGENT" = yes ] && ! systemctl is-active -q glpi-agent && { systemctl restart salt-minion; say "salt: minion restarted - reactor applies glpi.agent"; };;
+       ;;   # join.sh (re)started the minion with 30-yc-glpi.conf in place -> the reactor applies glpi.agent; no extra restart (it killed that install)
     8) SALT_STATE="WAITING - not in the Salt inventory after $n tries (retry every 15 min)"; warn "salt: $SALT_STATE"
        printf '# YallaCloud: VM not in the Salt inventory at install - retry the zero-input join until JOINED (STACK4-54 s17)\n*/15 * * * * root flock -n /run/yc-salt-join.lock /usr/local/sbin/yc-salt-retry >/dev/null 2>&1\n' > /etc/cron.d/yc-salt-join
        WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }Salt: VM not in the inventory yet (it retries every 15 min)"; yc_event salt waiting "$jl";;

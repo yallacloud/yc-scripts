@@ -15,11 +15,12 @@ bootcmd:
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
-# yc-mariadb-userdata.sh  v1.0.11  (2026-10-31 06:30 IST)  YallaCloud / OasisStack
+# yc-mariadb-userdata.sh  v1.0.12  (2026-10-31 12:00 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: MariaDB database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Hypervisor: CloudStack KVM or VMware, same file. VMware: use a 'VC Standard' offering (gp.* fails with 533);
 #   VC templates that run cloud-init today: LNX-AlmaLinux-9-VC-v263 (and Oracle Linux 9 VC, intermittent).
+# FULL version: every setting, with comments. Short version: yc-mariadb-userdata.min.sh (same script, common settings only).
 # Paste in CloudStack: Add Instance > Advanced > Userdata. Edit ONLY the block below.
 # Every value is checked on the VM: a wrong REQUIRED value stops with the reason,
 # a wrong optional value falls back to the default (logged as WARN).
@@ -115,7 +116,7 @@ fi
 # answers for the installer (it validates everything again; re-run: yc-db-install)
 umask 077; mkdir -p /etc/yallacloud
 for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION GLPI_AGENT NTFY_URL NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL; do
-  printf '%s=%q\n' "$v" "${!v}"
+  [ -n "${!v+x}" ] && printf '%s=%q\n' "$v" "${!v}"   # only settings this file sets; the rest = installer defaults
 done > /etc/yallacloud/db.conf.env
 umask 022
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.18  (2026-10-31 07:10 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.19  (2026-10-31 11:00 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -61,7 +61,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.18
+VER=1.0.19
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION GLPI_AGENT NTFY_URL NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -291,6 +291,12 @@ yc_erp(){    # json-file - ERP webhook (credentials allowed), secret via header 
   local h; h=$(mktemp); chmod 600 "$h"; printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$ERP_WEBHOOK_SECRET" > "$h"
   echo "erp webhook: HTTP $(timeout 30 curl -sS -o /dev/null -w '%{http_code}' -H @"$h" --data-binary @"$1" "$ERP_WEBHOOK_URL" 2>/dev/null || echo fail)"
   rm -f "$h"
+}
+yc_glpi_ensure(){   # after a Salt join: join.sh rewrites /etc/salt/grains (drops yc_glpi) -> put it back QUOTED (glpi/agent.sls compares the string 'yes'), then apply glpi.agent
+  grep -qs '^yc_glpi: "yes"' /etc/salt/grains || { sed -i '/^yc_glpi:/d' /etc/salt/grains 2>/dev/null; echo 'yc_glpi: "yes"' >> /etc/salt/grains; }
+  systemctl is-active -q glpi-agent && return 0
+  salt-call saltutil.refresh_grains >/dev/null 2>&1
+  timeout 600 salt-call state.apply glpi.agent >/dev/null 2>&1 || true   # result line -> /var/log/yallacloud/yallacloud.log (glpi-agent-setup.sh)
 }
 LIBEOF
 chmod 644 "$LIB"
@@ -1146,7 +1152,7 @@ info)
   hd "Agents"
   kv salt "$(st salt-minion) $(grep -hs '^id:' /etc/salt/minion.d/*.conf | head -1) - $(salt_ports)$([ -f /etc/cron.d/yc-salt-join ] && echo ', join retry pending')"
   kv acronis "$(st acronis_mms)"
-  kv glpi "$(st glpi-agent) $(grep -hs '^tag' /etc/glpi-agent/conf.d/*.cfg /etc/glpi-agent/agent.cfg | head -1)$(grep -qs '^yc_glpi: yes' /etc/salt/grains && ! systemctl is-active -q glpi-agent && echo ' - waiting for Salt (state.apply glpi.agent)')"
+  kv glpi "$(st glpi-agent) $(grep -hs '^tag' /etc/glpi-agent/conf.d/*.cfg /etc/glpi-agent/agent.cfg | head -1)$(grep -qsE '^yc_glpi: "?yes' /etc/salt/grains && ! systemctl is-active -q glpi-agent && echo ' - waiting for Salt (state.apply glpi.agent)')"
   hd "Commands"
   kv "yallacloud secrets" "credentials + connection strings"
   kv "yallacloud backup" "backup now (yallacloud backups = list, restore FILE)"
@@ -1214,7 +1220,8 @@ out=$(timeout 900 sh -c 'curl -fsS --max-time 60 https://repo.oasisstack.io/salt
 case "$out" in
   *JOINED*) yc_mark salt joined "$out"; rm -f /etc/cron.d/yc-salt-join
             g="off"
-            if grep -qs '^yc_glpi: yes' /etc/salt/grains; then   # Salt installs the GLPI agent after the join: wait up to 7 min for its result line
+            if [ "${GLPI_AGENT:-yes}" = yes ]; then   # Salt installs the GLPI agent after the join: ensure grain + apply, then read its result line
+              yc_glpi_ensure
               g="waiting - salt <minion> state.apply glpi.agent"
               for i in $(seq 42); do l=$(grep -s "\[glpi-agent\] \[\(OK\|ERROR\)\]" /var/log/yallacloud/yallacloud.log | tail -1)
                 case "$l" in *"[OK] REGISTERED"*) g="REGISTERED tag $(sed -n 's/^tag *= *//p' /etc/glpi-agent/conf.d/00-install.cfg /etc/glpi-agent/agent.cfg 2>/dev/null | head -1)"; break;;
@@ -1234,7 +1241,7 @@ EOF
 chmod 700 /usr/local/sbin/yc-db-salt-retry
 if [ "$SALT_JOIN" = yes ] && [ "$GLPI_AGENT" = yes ]; then   # opt-in grain for glpi/agent.sls (ycadmin/salt): Salt installs the agent after the join, the password stays on the master
   mkdir -p /etc/salt; touch /etc/salt/grains
-  if grep -q "^yc_glpi:" /etc/salt/grains; then sed -i "s/^yc_glpi:.*/yc_glpi: yes/" /etc/salt/grains; else echo "yc_glpi: yes" >> /etc/salt/grains; fi
+  sed -i '/^yc_glpi:/d' /etc/salt/grains; echo 'yc_glpi: "yes"' >> /etc/salt/grains   # quoted: unquoted yes is a YAML boolean and glpi/agent.sls never matches
 fi
 if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
   # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
@@ -1259,8 +1266,8 @@ GLL=/var/log/yallacloud/yallacloud.log   # glpi-agent-setup.sh (run by Salt) wri
 if [ "$GLPI_AGENT" != yes ]; then GLPI_STATE="off (GLPI_AGENT=no)"; MARKS="${MARKS:+$MARKS | }glpi off"
 elif [ "$SALT_JOIN" != yes ]; then GLPI_STATE="off (needs SALT_JOIN=yes)"; MARKS="${MARKS:+$MARKS | }glpi off"
 elif [ "$SALT_STATE" != JOINED ]; then GLPI_STATE="waiting for Salt (installed after the join, reported by yc-db-salt-retry)"; yc_mark glpi waiting "Salt not joined yet - Salt installs the agent after the join"
-else   # the reactor applies glpi.agent on minion start; wait up to 7 min for its result line
-  t_end=$((SECONDS+420)); GLPI_STATE=""; n0=$(grep -cs "\[glpi-agent\] \[" "$GLL")
+else   # the reactor applies glpi.agent on minion start, but join.sh drops the grain: ensure + apply ourselves, then read the result line
+  n0=$(grep -cs "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL"); yc_glpi_ensure   # count result lines only (same filter as the loop); t_end=$((SECONDS+120)); GLPI_STATE=""
   systemctl is-active -q glpi-agent && grep -qs "\[glpi-agent\] \[OK\] REGISTERED" "$GLL" && n0=0   # re-run: already registered
   while [ $SECONDS -lt $t_end ]; do
     l=$(grep -s "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL" | tail -n +$((n0+1)) | tail -1)

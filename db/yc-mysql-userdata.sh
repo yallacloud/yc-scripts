@@ -15,7 +15,7 @@ bootcmd:
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
-# yc-mysql-userdata.sh  v1.0.10  (2026-10-28 14:00 IST)  YallaCloud / OasisStack
+# yc-mysql-userdata.sh  v1.0.11  (2026-10-31 06:30 IST)  YallaCloud / OasisStack
 # CloudStack cloud-init userdata: Oracle MySQL Community database server (DBaaS node), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9-10.  Guide: STACK4-62.
 # Hypervisor: CloudStack KVM or VMware, same file. VMware: use a 'VC Standard' offering (gp.* fails with 533);
@@ -55,8 +55,10 @@ LOCALE_SET="en_US.UTF-8"
 SALT_JOIN="yes"            # yes | no   join salt.oasisstack.io
 ACRONIS_TOKEN=""           # blank = no Acronis
 ACRONIS_REGION="AE"        # AE | SG
-NTFY_URL="https://ntfy.sh"   # ntfy server (blank = ntfy off) - status only, never secrets
+GLPI_AGENT="yes"           # GLPI inventory agent: Salt installs it after the join (no password here); no = skip
+NTFY_URL="https://n.oasisstack.io"   # ntfy server (YallaCloud own, needs NTFY_TOKEN; no token = https://ntfy.sh; blank = off) - never secrets
 NTFY_TOPIC="9890122212"      # ntfy topic (blank = 9890122212)
+NTFY_TOKEN=""                # write-only publish token (user ycdeploy, topic 9890122212) - private userdata only, never on GitHub
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""      # ERP webhook X-Webhook-Secret (blank = webhook off)
 EXTRA_WEBHOOK_URL=""       # optional second webhook (Tech Dept): milestone events, never passwords; blank = off
@@ -76,14 +78,15 @@ say(){   # same tagged line as the installer: time | LEVEL | area | run | messag
 fail(){   # early failure (before the installer runs): status file + the three outputs (extra webhook, ntfy, ERP) - no secrets
   say ERROR "FATAL: $*"; mkdir -p /root/yc-db; echo "$*" > /root/yc-db/INSTALL-FAILED
   printf 'RESULT=FAILED\nTIME=%s\nSTEP=userdata\nREASON=%s\n' "$(date '+%F %T %Z')" "$*" > /var/log/yc-db-deploy.status
-  local id ip os why h b; id=$(tr 'A-Z' 'a-z' 2>/dev/null < /sys/class/dmi/id/product_uuid); id=${id:-$(hostname)}
+  local id ip os why h b u; id=$(tr 'A-Z' 'a-z' 2>/dev/null < /sys/class/dmi/id/product_uuid); id=${id:-$(hostname)}
   ip=$(hostname -I 2>/dev/null | awk '{print $1}'); os=$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME"); why=$(printf '%s' "$*" | tr -d '"\\' | head -c 300)
   h=$(mktemp); b=$(printf '{"type":"vm.deploy.failed","vmId":"%s","hostname":"%s","ip":"%s","os":"%s","error":"%s","lastUpdated":"%s","extra":"yc-%s-userdata"}' "$id" "$(hostname)" "$ip" "$os" "$why" "$(date '+%F %T %z')" "$ENGINE")
   if [ -n "$EXTRA_WEBHOOK_URL" ]; then printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$EXTRA_WEBHOOK_SECRET" > "$h"; curl -fsS -m 15 -o /dev/null -H @"$h" -d "$b" "$EXTRA_WEBHOOK_URL"; fi
   if [ -n "$ERP_WEBHOOK_SECRET" ]; then printf 'X-Webhook-Secret: %s\nContent-Type: application/json\n' "$ERP_WEBHOOK_SECRET" > "$h"
     curl -fsS -m 30 -o /dev/null -H @"$h" -d "${b%\}},\"area\":\"db\",\"status\":\"FAILED\",\"steps\":\"userdata\",\"installer\":\"yc-$ENGINE-userdata\"}" "$ERP_WEBHOOK_URL"; fi
-  rm -f "$h"
-  [ -n "$NTFY_URL" ] && timeout 20 curl -fsS -o /dev/null -H "Title: FAILED BUILD $ENGINE - $(hostname -s)" -H "Priority: 5" -H "Tags: x,db" --data-binary "NOT READY - the build stopped before the installer could start: $*
+  : > "$h"; u=${NTFY_URL%/}; [ -z "$NTFY_TOKEN" ] && [ "$u" = https://n.oasisstack.io ] && u=https://ntfy.sh   # own server is deny-all
+  [ -n "$NTFY_TOKEN" ] && [ "$u" != https://ntfy.sh ] && printf 'Authorization: Bearer %s\n' "$NTFY_TOKEN" > "$h"
+  [ -n "$NTFY_URL" ] && timeout 20 curl -fsS -o /dev/null -H @"$h" -H "Title: FAILED BUILD $ENGINE - $(hostname -s)" -H "Priority: 5" -H "Tags: x,db" --data-binary "NOT READY - the build stopped before the installer could start: $*
 next     : check DNS / outbound 443 / GATEWAY, then redeploy (or run the userdata again as root)
 
 [ server ]
@@ -91,8 +94,8 @@ vm       : $(hostname -s)  ($os)  ip ${ip:--}
 
 [ trace ]
 run      : $RUN   stage userdata (yc-$ENGINE-userdata)
-logs     : /var/log/yallacloud/yc-db.log  errors /var/log/yallacloud/yc-db-errors.log  (journalctl -t yc-db)" "${NTFY_URL%/}/${NTFY_TOPIC:-9890122212}"
-  exit 1; }
+logs     : /var/log/yallacloud/yc-db.log  errors /var/log/yallacloud/yc-db-errors.log  (journalctl -t yc-db)" "$u/${NTFY_TOPIC:-9890122212}"
+  rm -f "$h"; exit 1; }
 case "$ENGINE" in mariadb|mysql) ;; *) fail "ENGINE='$ENGINE' - must be mariadb or mysql";; esac
 
 # gateway fix BEFORE the download: CloudStack SDN without a gateway declares .254 (dead), firewall is .1
@@ -111,7 +114,7 @@ fi
 
 # answers for the installer (it validates everything again; re-run: yc-db-install)
 umask 077; mkdir -p /etc/yallacloud
-for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL; do
+for v in ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION GLPI_AGENT NTFY_URL NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL; do
   printf '%s=%q\n' "$v" "${!v}"
 done > /etc/yallacloud/db.conf.env
 umask 022

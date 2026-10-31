@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-db-install.sh  v1.0.19  (2026-10-31 11:00 IST)  YallaCloud / OasisStack
+# yc-db-install.sh  v1.0.20  (2026-10-31 12:40 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): MariaDB or Oracle MySQL Community, nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Hypervisor: CloudStack KVM or VMware.   Guide: STACK4-62.
 #
@@ -61,7 +61,7 @@ REPO_URL="https://repo.oasisstack.io/db"       # local mirror (ycwsus01, YC rang
 DISABLE_CLOUD_INIT="yes"
 # ================
 
-VER=1.0.19
+VER=1.0.20
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME BINLOG BINLOG_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION GLPI_AGENT NTFY_URL NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT"
 CFG=/etc/yallacloud/db.conf.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -613,8 +613,10 @@ timedatectl set-timezone "$TZ_SET" 2>/dev/null || ln -sf "/usr/share/zoneinfo/$T
 if [ "$OSF" = ubuntu ]; then
   MIRROR=""
   for m in $APT_MIRRORS; do
-    curl -fsI --max-time 10 "http://$m/ubuntu/dists/noble/InRelease" >/dev/null 2>&1 && { MIRROR=$m; break; }
-    say "apt mirror $m not answering"
+    # real data test: a mirror can answer InRelease and still hang on the big indexes (ae.archive 2026-10-31: universe 0 B in 12 s)
+    got=$(curl -fs -r 0-262143 -o /dev/null --max-time 10 -w '%{size_download}' "http://$m/ubuntu/dists/noble/universe/binary-amd64/Packages.gz" 2>/dev/null)
+    [ "${got:-0}" -ge 262144 ] && curl -fsI --max-time 10 "http://$m/ubuntu/dists/noble/InRelease" >/dev/null 2>&1 && { MIRROR=$m; break; }
+    say "apt mirror $m not answering or too slow (${got:-0} of 262144 bytes in 10 s) - next"
   done
   [ -n "$MIRROR" ] || die "no apt mirror answered: $APT_MIRRORS"
   for F in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do

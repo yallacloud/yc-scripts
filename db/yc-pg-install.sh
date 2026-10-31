@@ -42,11 +42,13 @@ SSH_PUBKEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSMLjQxi/2e/MTTyuzD34SA+94GP1+
 TZ_SET="Asia/Dubai"
 LOCALE_SET="en_US.UTF-8"
 SALT_JOIN="yes"             # join salt.oasisstack.io (zero-input join.sh)
+GLPI_AGENT="yes"            # GLPI inventory agent: installed BY SALT after the join (glpi/agent.sls), no password here. no = skip
 ACRONIS_TOKEN=""            # blank = Acronis skipped
 ACRONIS_REGION="AE"         # AE | SG
 NTFY_TOPIC="9890122212"     # ntfy topic for people (phone alerts, never secrets). blank = 9890122212, off = no ntfy
-NTFY_SERVER="https://ntfy.sh"   # ntfy server
+NTFY_SERVER="https://n.oasisstack.io"   # ntfy server: YallaCloud own (needs NTFY_TOKEN; no token = https://ntfy.sh)
 NTFY_URL=""                 # advanced: full ntfy URL, overrides NTFY_SERVER/NTFY_TOPIC (older userdata)
+NTFY_TOKEN=""               # publish token for NTFY_SERVER (private userdata only, never on GitHub, never in a message)
 ERP_WEBHOOK_URL="https://api.yallacloud.net/api/v1/webhooks/cloudstack"
 ERP_WEBHOOK_SECRET=""       # blank = ERP webhook skipped (carries the credentials)
 EXTRA_WEBHOOK_URL=""        # optional second webhook: one flat event per milestone (vm.<area>.<state>), never secrets (blank = off)
@@ -61,9 +63,9 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.11
+VER=1.0.12
 SCRIPT_TAG="yc-pg-install $VER"
-KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
+KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
 PGENV=/etc/yallacloud/pg.env
 LIB=/usr/local/lib/yc-db-common.sh
@@ -311,12 +313,27 @@ fw_db(){   # add|del CIDR
   fi
 }
 # notifications: separate, best effort, never block or fail the work
-yc_ntfy_url(){ [ -n "${NTFY_URL:-}" ] && { echo "$NTFY_URL"; return 0; }; local t=${NTFY_TOPIC:-9890122212}; [ "$t" = off ] && return 1; echo "${NTFY_SERVER:-https://ntfy.sh}/$t"; }
-yc_ntfy(){   # title priority tags message - NO secrets here
-  local u; u=$(yc_ntfy_url) || { NTFY_LAST=off; return 0; }
-  timeout 20 curl -fsS -o /dev/null -H "Title: $1" -H "Priority: $2" -H "Tags: $3" --data-binary "$4
+yc_ntfy_url(){   # the URL people see in the summary (never the token)
+  [ -n "${NTFY_URL:-}" ] && { echo "$NTFY_URL"; return 0; }
+  local t=${NTFY_TOPIC:-9890122212} v=${NTFY_SERVER:-https://n.oasisstack.io}; [ "$t" = off ] && return 1
+  [ -z "${NTFY_TOKEN:-}" ] && [ "${v%/}" = https://n.oasisstack.io ] && v=https://ntfy.sh   # own server is deny-all: no token -> public ntfy.sh
+  echo "${v%/}/$t"; }
+yc_ntfy(){   # title priority tags message - NO secrets here. Token only in a 600 header file (never argv). Own server refused -> one try on ntfy.sh
+  local u b h; u=$(yc_ntfy_url) || { NTFY_LAST=off; return 0; }
+  b="$4
 time    : $(date '+%F %T %z')  ($(date -u +%FT%TZ))
-by      : $([ -n "${VER:-}" ] && echo "yc-pg-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)" "$u" 2>/dev/null && NTFY_LAST=sent || { NTFY_LAST=failed; echo "ntfy: post failed (ignored)"; }
+by      : $([ -n "${VER:-}" ] && echo "yc-pg-install $VER" || cut -d" " -f1-2 /etc/yallacloud/db.version 2>/dev/null) on $(hostname -s)"
+  h=$(mktemp); chmod 600 "$h"; printf 'Title: %s\nPriority: %s\nTags: %s\n' "$1" "$2" "$3" > "$h"
+  case "$u" in https://ntfy.sh/*) ;; *) [ -n "${NTFY_TOKEN:-}" ] && printf 'Authorization: Bearer %s\n' "$NTFY_TOKEN" >> "$h";; esac
+  if timeout 20 curl -fsS -o /dev/null -H @"$h" --data-binary "$b" "$u" 2>/dev/null; then NTFY_LAST=sent
+  else
+    case "$u" in https://ntfy.sh/*) NTFY_LAST=failed; echo "ntfy: post failed (ignored)";;
+      *) sed -i '/^Authorization:/d' "$h"
+         if timeout 20 curl -fsS -o /dev/null -H @"$h" --data-binary "$b" "https://ntfy.sh/${u##*/}" 2>/dev/null; then NTFY_LAST="sent via fallback ntfy.sh (own server refused)"; echo "ntfy: $u refused - sent to https://ntfy.sh/${u##*/}"
+         else NTFY_LAST=failed; echo "ntfy: post failed on $u and ntfy.sh (ignored)"; fi;;
+    esac
+  fi
+  rm -f "$h"
 }
 yc_extra(){   # yc_extra <area> <state> [error] - flat milestone event to the optional second webhook. NO secrets, one try, 15 s, never blocks
   [ -n "${EXTRA_WEBHOOK_URL:-}" ] || return 0
@@ -370,6 +387,9 @@ yc_explain(){   # AREA STATE -> "what happened|what to do", plain words for non-
     salt.joined) echo "The server joined YallaCloud management (Salt).|Nothing.";;
     salt.waiting) echo "The management agent (Salt) cannot reach salt.oasisstack.io yet. It tries again every 15 minutes.|Network team: allow TCP 4505 and 4506 from this server to salt.oasisstack.io.";;
     salt.failed) echo "Joining YallaCloud management (Salt) failed.|Run: curl -fsS https://repo.oasisstack.io/salt/join.sh | sh - and read the last lines.";;
+    glpi.registered) echo "The server is listed in the YallaCloud inventory (GLPI).|Nothing.";;
+    glpi.waiting) echo "The inventory agent (GLPI) is not installed yet - Salt installs it after the join.|If it stays like this: salt <minion> state.apply glpi.agent (on ycsalt01).";;
+    glpi.failed) echo "The inventory agent (GLPI) could not register.|See /root/glpi-agent-setup.log and /var/log/yallacloud/yallacloud.log on this server.";;
     acronis.registered) echo "Acronis backup agent installed and registered.|Nothing.";;
     acronis.waitforhuman) echo "The Acronis agent is installed but NOT registered.|Register it in the Acronis console, or deploy again with a valid ACRONIS_TOKEN.";;
     acronis.failed) echo "The Acronis agent install failed.|See /var/log/yc-acronis-setup.log, then retry with a valid token.";;
@@ -478,7 +498,7 @@ d.update({"offering": e("OFFERING") or None, "identitySource": e("ID_SRC") or "m
 st = {"vm.deploy.started": "started", "vm.deploy.completed": "completed"}.get(e("T"), "failed")
 f = {"area": "db", "status": st, "summary": e("S"), "engine": e("ENGINE"), "dbVersion": e("DB_REAL_VERSION") or e("DB_VERSION"),
      "dbHost": e("HOST_PUB") or e("HOST_PRIV") or None, "dbPort": e("DB_PORT"), "sshPort": e("SSH_PORT") or None,
-     "warnings": e("WARN_TXT") or "", "installer": e("VER"), "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}
+     "warnings": e("WARN_TXT") or "", "installer": e("VER"), "salt": e("SALT_STATE") or None, "glpi": e("GLPI_STATE") or None, "acronis": e("ACRONIS_STATE") or None}
 if e("W") == "yes":
     f.update({"dbRootUser": e("ROOTU"), "dbRootPassword": e("DB_ROOT_PASS") or None, "dbAdminUser": e("DB_ADMIN_USER"),
               "dbAdminPassword": e("DB_ADMIN_PASS") or None, "dbName": e("DB_NAME") or None,
@@ -503,7 +523,7 @@ d["service"] = {"area": "db", "catalogue": d["catalogue"], "status": st,
                             "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP, sslmode=disable)", "hypervisor": e("HV") or None, "guestAgent": e("GA_STATE") or None,
                             "sshPort": num(e("SSH_PORT")), "dataDir": e("PGDATA") or None, "backupDir": e("BACKUP_DIR") or None,
                             "backupRetention": e("RETENTION") or None, "pitr": e("PITR_TXT") or None,
-                            "salt": e("SALT_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
+                            "salt": e("SALT_STATE") or None, "glpi": e("GLPI_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
 if e("W") == "yes":   # every secret in ONE place; empty logins left out
     up = lambda u, p, **x: dict({"user": u, "password": p}, **x) if p else None
     db = {"root": up(e("ROOTU"), e("DB_ROOT_PASS")), "admin": up(e("DB_ADMIN_USER"), e("DB_ADMIN_PASS")),
@@ -522,6 +542,7 @@ d["vm"]["instanceName"] = "unknown"; d["vm"]["hypervisor"] = e("HV") or None
 d["ssh"] = {"port": num(e("SSH_PORT")), "users": ["root"] + (["chadmin"] if e("CHADMIN_PASS") else []),
             "key_fingerprints": [x for x in (e("SSH_KEY_FP") or "").split() if x.startswith("SHA256:")], "password_auth": True}
 d["salt"] = {"joined": e("SALT_STATE") == "JOINED", "minion_id": e("SALT_ID") or None, "state": e("SALT_STATE") or None}
+d["glpi"] = {"registered": e("GLPI_STATE").startswith("REGISTERED"), "state": e("GLPI_STATE") or None, "via": "salt glpi/agent.sls"}
 d["acronis"] = {"installed": (e("ACRONIS_STATE") or "").startswith(("registered", "installed")), "reason": e("ACRONIS_STATE") or None}
 if e("W") == "yes":
     d["db"].update({"host": e("HOST_PRIV") or e("HOST_PUB") or None, "public_host": e("HOST_PUB") or None, "bind": "0.0.0.0",
@@ -541,7 +562,7 @@ yc_summary(){   # $1=yes: add the delivery lines. Plain first, technical after. 
   local plain todo m n=0 w ck=""
   if [ "$RESULT" = SUCCESS ]; then plain="READY - the PostgreSQL server can be used now"; todo=${WAIT_HUMAN:-nothing}
   else IFS='|' read -r plain todo <<< "$(yc_step_help "$STEP")"; plain="STOPPED - $plain"; fi
-  for m in network os db backup salt acronis; do
+  for m in network os db backup salt glpi acronis; do
     case "${YC_MS[$m]:-}" in ok|joined|registered|backtogreen) ck="$ck [OK] $m";; failed) ck="$ck [FAIL] $m";; waiting|waitforhuman) ck="$ck [WAIT] $m";; *) ck="$ck [--] $m";; esac; done
   if [ "$RESULT" != SUCCESS ]; then local fa   # the area the failed step belongs to
     case "$STEP" in 0\ *|1\ *) fa=network;; 2\ *|3\ *|4\ *|5\ *) fa=os;; 10\ *) fa=backup;; *acronis*) fa=acronis;; 13\ *) fa=salt;; *) fa=db;; esac
@@ -553,7 +574,7 @@ yc_summary(){   # $1=yes: add the delivery lines. Plain first, technical after. 
   [ "$RESULT" = SUCCESS ] || printf ' %-15s: %s\n' "REASON" "step $STEP - ${FAIL_REASON:-exit code}"
   printf ' %-15s: %s\n' "CHECKLIST" "${ck# }" "WARNINGS" "$WARNS"
   while IFS= read -r w; do [ -n "$w" ] && { n=$((n+1)); printf '   %d. %s\n' "$n" "$w"; }; done <<< "${WARN_LIST:-}"
-  printf ' %-15s: %s\n' "CREDENTIALS" "yallacloud secrets (as root) - never sent to ntfy or the extra webhook" "SALT / ACRONIS" "${SALT_STATE:-not run} / ${ACRONIS_STATE:-not run}"
+  printf ' %-15s: %s\n' "CREDENTIALS" "yallacloud secrets (as root) - never sent to ntfy or the extra webhook" "SALT / GLPI" "${SALT_STATE:-not run} / ${GLPI_STATE:-not run}" "ACRONIS" "${ACRONIS_STATE:-not run}"
   [ "${1:-no}" = yes ] && printf ' %-15s: %s\n' "DELIVERED" "ntfy ${NTFY_LAST:-not sent} ($(yc_ntfy_url 2>/dev/null || echo off)) | extra webhook ${EXTRA_LAST:-off} | ERP webhook ${ERP_LAST:-off}"
   printf ' %-15s: %s\n' "RUN" "$RUN_ID  yc-pg-install $VER  ${HV:-?}  step $STEP" "LOGS" "/var/log/yallacloud/ deploy.log events.jsonl errors.log | yallacloud events | yallacloud errors"
   echo "==================================================================="
@@ -566,7 +587,7 @@ finish(){
   FREE_GB=$({ df -BM --output=avail "$PGROOT" || df -BM --output=avail /var/lib; } 2>/dev/null | tail -1 | tr -dc 0-9 | awk '{printf "%.1f", $1/1024}')
   DURATION=$((SECONDS-T0)); SALT_ID=$(cat /etc/salt/minion_id 2>/dev/null); status_json "$RESULT" "$RESULT"
   [ "$RESULT" = SUCCESS ] && { touch /var/lib/yallacloud/deploy.done; systemctl disable yc-deploy.service >/dev/null 2>&1; }
-  export DURATION SALT_ID SSH_KEY_FP RESULT STEP WARNS WARN_TXT WARN_LIST SALT_STATE ACRONIS_STATE FREE_GB VM_PASS VM_PASS_SRC CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER PGDATA BACKUP_DIR RETENTION SSH_PORT PITR_TXT
+  export DURATION SALT_ID SSH_KEY_FP RESULT STEP WARNS WARN_TXT WARN_LIST SALT_STATE GLPI_STATE ACRONIS_STATE FREE_GB VM_PASS VM_PASS_SRC CHADMIN_PASS HOST_PRIV HOST_PUB PUB_NIC DB_REAL_VERSION DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS URI_ADMIN URI_USER PGDATA BACKUP_DIR RETENTION SSH_PORT PITR_TXT
   {
     echo "RESULT=$RESULT"; echo "TIME=$(date '+%F %T %Z')"; echo "INSTALLER=yc-pg-install $VER"
     echo "ENGINE=$ENGINE ${DB_REAL_VERSION:-$DB_VERSION}"; echo "STEP=$STEP"; echo "WARNINGS=$WARNS${WARN_TXT:+ ($WARN_TXT)}"
@@ -650,7 +671,9 @@ ACRONIS_TOKEN=$(printf '%s' "$ACRONIS_TOKEN" | tr -d '[:space:]')
 ACRONIS_REGION=$(printf '%s' "$ACRONIS_REGION" | tr 'a-z' 'A-Z' | tr -d '[:space:]'); case "$ACRONIS_REGION" in AE|SG) ;; *) warn "ACRONIS_REGION '$ACRONIS_REGION' invalid - AE"; ACRONIS_REGION=AE;; esac
 CLOUDSTACK_URL=${CLOUDSTACK_URL%/}
 NTFY_TOPIC=${NTFY_TOPIC:-9890122212}; [ "$NTFY_TOPIC" = off ] || [[ "$NTFY_TOPIC" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { warn "NTFY_TOPIC '$NTFY_TOPIC' invalid - 9890122212"; NTFY_TOPIC=9890122212; }
-[[ "${NTFY_SERVER:-}" =~ ^https?://[^[:space:]]+$ ]] || NTFY_SERVER=https://ntfy.sh; NTFY_SERVER=${NTFY_SERVER%/}
+[[ "${NTFY_SERVER:-}" =~ ^https?://[^[:space:]]+$ ]] || NTFY_SERVER=https://n.oasisstack.io; NTFY_SERVER=${NTFY_SERVER%/}
+[ -z "${NTFY_TOKEN:-}" ] || [[ "$NTFY_TOKEN" =~ ^[A-Za-z0-9_.-]{8,200}$ ]] || { warn "NTFY_TOKEN has bad characters - ignored (ntfy goes to ntfy.sh)"; NTFY_TOKEN=""; }
+GLPI_AGENT=$(low "${GLPI_AGENT:-yes}"); case "$GLPI_AGENT" in yes|no) ;; *) warn "GLPI_AGENT '$GLPI_AGENT' invalid - yes"; GLPI_AGENT=yes;; esac
 for v in NTFY_URL ERP_WEBHOOK_URL EXTRA_WEBHOOK_URL CLOUDSTACK_URL; do [ -z "${!v}" ] || [[ "${!v}" =~ ^https?://[^[:space:]]+$ ]] || { warn "$v invalid - disabled"; printf -v "$v" '%s' ""; }; done
 [[ "$PASS_URL" =~ ^https?:// ]] || PASS_URL="https://pass.oasisstack.io/?len=16"
 [[ "$REPO_URL" =~ ^https?:// ]] || REPO_URL="https://repo.oasisstack.io/db"
@@ -1244,6 +1267,8 @@ health(){   # one line per area: OK / WARN / FAIL + what it means
   d=$(df --output=pcent "$PGDATA" 2>/dev/null | tail -1 | tr -dc 0-9); [ "${d:-0}" -lt 85 ] && hk OK disk "${d}% used" || hk WARN disk "${d}% used - add disk space soon"
   if systemctl is-active -q salt-minion; then hk OK salt "managed by Salt ($(grep -hs '^id:' /etc/salt/minion.d/*.conf | head -1 | cut -d' ' -f2))"
   elif [ -f /etc/cron.d/yc-salt-join ]; then hk WAIT salt "not joined yet - retry every 15 min ($(salt_ports))"; else hk -- salt "off"; fi
+  if systemctl is-active -q glpi-agent 2>/dev/null; then hk OK glpi "inventory agent running (tag $(sed -n 's/^tag *= *//p' /etc/glpi-agent/conf.d/00-install.cfg /etc/glpi-agent/agent.cfg 2>/dev/null | head -1))"
+  elif grep -qs '^yc_glpi: yes' /etc/salt/grains; then hk WAIT glpi "waiting for Salt to install the inventory agent"; else hk -- glpi "off"; fi
   e=$(awk -v d="$(date -d '-24 hours' '+%F %T')" '$0 >= d' /var/log/yallacloud/errors.log 2>/dev/null | wc -l)
   [ "$e" = 0 ] && hk OK problems "no warnings or errors in the last 24 h" || hk WARN problems "$e warning(s)/error(s) in the last 24 h - yallacloud errors"
   { [ -f /var/run/reboot-required ] || { command -v needs-restarting >/dev/null && ! needs-restarting -r >/dev/null 2>&1; }; } && hk WARN os "reboot pending (kernel/library update)" || hk OK os "no reboot pending"
@@ -1392,6 +1417,10 @@ rm -f "$pf"
 # ================= 13. agents: Salt, Acronis (never fail the DB build)
 yc_event db ok
 step "13 agents"
+if [ "$SALT_JOIN" = yes ] && [ "$GLPI_AGENT" = yes ]; then   # opt-in grain for glpi/agent.sls (ycadmin/salt): Salt installs the agent after the join, the password stays on the master
+  mkdir -p /etc/salt; touch /etc/salt/grains
+  if grep -q "^yc_glpi:" /etc/salt/grains; then sed -i "s/^yc_glpi:.*/yc_glpi: yes/" /etc/salt/grains; else echo "yc_glpi: yes" >> /etc/salt/grains; fi
+fi
 if [ "$SALT_JOIN" = yes ] && ! sp=$(salt_ports); then
   # join.sh would fail the same way: record why, keep the 15-min retry (removed by join.sh after JOINED)
   cat > /usr/local/sbin/yc-salt-retry <<'EOF'
@@ -1411,6 +1440,23 @@ elif [ "$SALT_JOIN" = yes ]; then
   say "salt: $SALT_STATE"; [[ "$SALT_STATE" == *JOINED* ]] || { warn "salt join not confirmed: $SALT_STATE"; SALT_STATE="not joined"; }
   [[ "$SALT_STATE" == *JOINED* ]] && { SALT_STATE=JOINED; yc_event salt joined; } || yc_event salt failed "$SALT_STATE"
 else SALT_STATE="off (SALT_JOIN=no)"; fi
+GLL=/var/log/yallacloud/yallacloud.log
+if [ "$GLPI_AGENT" != yes ]; then GLPI_STATE="off (GLPI_AGENT=no)"
+elif [ "$SALT_JOIN" != yes ]; then GLPI_STATE="off (needs SALT_JOIN=yes)"
+elif [ "$SALT_STATE" != JOINED ]; then GLPI_STATE="waiting for Salt"; yc_event glpi waiting "Salt not joined yet - Salt installs the agent after the join"
+else   # the reactor applies glpi.agent on minion start; wait up to 7 min for its result line
+  t_end=$((SECONDS+420)); GLPI_STATE=""; n0=$(grep -cs "\[glpi-agent\] \[" "$GLL")
+  systemctl is-active -q glpi-agent && grep -qs "\[glpi-agent\] \[OK\] REGISTERED" "$GLL" && n0=0   # re-run: already registered
+  while [ $SECONDS -lt $t_end ]; do
+    l=$(grep -s "\[glpi-agent\] \[\(OK\|ERROR\)\]" "$GLL" | tail -n +$((n0+1)) | tail -1)
+    case "$l" in *"[OK] REGISTERED"*) GLPI_STATE="REGISTERED tag $(sed -n 's/^tag *= *//p' /etc/glpi-agent/conf.d/00-install.cfg /etc/glpi-agent/agent.cfg 2>/dev/null | head -1)"; break;;
+      *"[ERROR]"*) GLPI_STATE="failed - ${l##*\[ERROR\] }"; break;; esac
+    sleep 10; done
+  case "$GLPI_STATE" in REGISTERED*) yc_event glpi registered "$GLPI_STATE";;
+    failed*) warn "glpi: $GLPI_STATE"; yc_event glpi failed "$GLPI_STATE";;
+    *) GLPI_STATE="waiting - Salt has not installed it yet (salt $(grep -hs '^id:' /etc/salt/minion.d/*.conf | head -1 | cut -d' ' -f2) state.apply glpi.agent)"; yc_event glpi waiting "$GLPI_STATE";; esac
+fi
+say "glpi: $GLPI_STATE"
 if [ -n "$ACRONIS_TOKEN" ]; then
   YC_AT="$ACRONIS_TOKEN" YC_AR="$ACRONIS_REGION" timeout 3600 bash -c 'curl -fsSL --retry 3 --max-time 120 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s "$YC_AT" "$YC_AR"'; arc=$?   # shortcut: token is argv of the inner bash -s (acronis-setup.sh takes no env token yet)
   case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 8|10) ACRONIS_STATE="installed, NOT registered (exit $arc)"; WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }acronis needs a human (exit $arc)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac

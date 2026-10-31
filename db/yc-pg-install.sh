@@ -63,7 +63,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.14
+VER=1.0.15
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -1440,9 +1440,10 @@ elif [ "$SALT_JOIN" = yes ]; then
   say "salt: $sp"
   # join.sh exit: 0 JOINED | 8 WAITING (the master does not know this VM yet - CloudStack inventory sync every 5 min) | else FAILED.
   # Its own ntfy is off (NTFY_TOPIC=off): the kit reports. WAITING is retried here for up to 8 min, then by the reporting cron.
+  rm -f /etc/cron.d/yc-salt-join   # join.sh's own retry cron would run a second join at the same time (two key pairs -> master rejects the minion)
   t_end=$((SECONDS+480)); n=0
   while :; do n=$((n+1))
-    jo=$(NTFY_TOPIC=off timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1); jrc=$?
+    jo=$(NTFY_TOPIC=off flock -w 900 /run/yc-salt-join.lock timeout 1200 bash -c 'curl -fsS --retry 3 --max-time 60 https://repo.oasisstack.io/salt/join.sh | sh' 2>&1); jrc=$?
     jl=$(printf '%s\n' "$jo" | tail -n 1)
     case "$jrc|$jl" in 8\|*|*"did not accept its key"*) [ $SECONDS -lt $t_end ] || break;; *) break;; esac   # both = master has not synced this VM yet
     say "salt: try $n not known to the master yet ($([ "$jrc" = 8 ] && echo WAITING || echo 'key not accepted yet')) - 5-min CloudStack inventory sync - again in 30 s"; sleep 30

@@ -37,7 +37,10 @@ $need = @('ConvertTo-YcText','ConvertTo-YcAscii','Get-YcDubaiTime','Merge-YcFact
           'Resolve-YcIdentity','Get-YcSqlKeyForBody','Get-YcTrialDaysForBody')
 $src = @(); $found = @()
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
-  if ($need -contains $f.Name) { $src += $f.Extent.Text; $found += $f.Name }
+  # Every TOP-LEVEL function is loaded (2.47.6): the -SelfCheck block grows with each release and a
+  # hand list fell behind twice (Get-YcExtraBody in 2.47.5, New-YcCredentials in 2.47.6). $need stays
+  # as the must-exist list. Definitions only - nothing in the script body runs.
+  if ($f.Parent.Parent -eq $ast) { $src += $f.Extent.Text; $found += $f.Name }
 }
 $missing = @($need | Where-Object { $found -notcontains $_ })
 if ($missing.Count) { throw ('Yc-Event.ps1 no longer defines: ' + ($missing -join ', ')) }

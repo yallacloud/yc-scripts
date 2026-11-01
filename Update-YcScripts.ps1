@@ -19,8 +19,9 @@ param(
   # Once-per-clone STATE FILES a full overwrite must not delete. .authorized_keys.baked is
   # yc-keyguard's only copy of the tenant SSH key - the last way back in - and the rest are
   # markers that gate destructive first-boot steps. None ship in the zip, so without this
-  # list every sync destroyed them.
-  [string[]]$KeepFile = @('.rearm-done','.sshhostkeys','.provisioned','.goldenimage','.authorized_keys.baked','.firstboot-runs','.payload-sha256'),
+  # list every sync destroyed them. yc-deploy.log (2.47.6) is the YC-BUILDER userdata's link to the
+  # deployment log - the owner wants it in C:\Scripts, and the payload does not ship it.
+  [string[]]$KeepFile = @('.rearm-done','.sshhostkeys','.provisioned','.goldenimage','.authorized_keys.baked','.firstboot-runs','.payload-sha256','yc-deploy.log'),
   [switch]$NoCompliance,
   [switch]$Help
 )
@@ -428,6 +429,7 @@ if($NoCompliance){
         $rel = $f.FullName.Substring($S.Length).TrimStart('\')
         $top = ($rel -split '\\')[0]
         if($Keep -contains $top){ continue }
+        if($KeepFile -contains $f.Name){ continue }   # never backed up, so never delete it here either
         try{ Remove-Item -LiteralPath $f.FullName -Force -EA Stop }catch{}
       }
       $rb = Copy-YcTree -From $Bak -To $S

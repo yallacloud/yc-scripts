@@ -47,6 +47,20 @@ $sha = '22B8F00B53AF207B9AAE36C472D2C9C9391BC0159FF1B028FC8CBD242764F3A7'
 Check 'sha found in sidecar text' ([regex]::Match(($sha + '  YallaCloud-CScripts-latest.zip'), '([0-9a-fA-F]{64})').Groups[1].Value) $sha
 Check 'no sha in a 404 page'      ([regex]::Match('404: Not Found', '([0-9a-fA-F]{64})').Success) 'False'
 
+# 2.47.6 (E8): yc-deploy.log survives an update, and a gate rollback never deletes a KeepFile
+# (KeepFiles are not in the backup, so deleting one there lost it for good). Read from the script
+# beside this test (C:\Scripts on a VM); skipped when it is not there.
+$us = Join-Path $PSScriptRoot 'Update-YcScripts.ps1'
+if(Test-Path -LiteralPath $us){
+  $e = $null; $ua = [System.Management.Automation.Language.Parser]::ParseFile($us, [ref]$null, [ref]$e)
+  $kf = @($ua.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'KeepFile' })[0]
+  $kv = if($kf){ [string[]]@(& ([scriptblock]::Create($kf.DefaultValue.Extent.Text))) } else { @() }
+  Check 'KeepFile keeps yc-deploy.log'           ($kv -contains 'yc-deploy.log') 'True'
+  Check '  and still the first-boot markers'     ($kv -contains '.provisioned' -and $kv -contains '.firstboot-runs') 'True'
+  $ut = [IO.File]::ReadAllText($us)
+  Check 'rollback skips KeepFile when clearing'  ($ut -match 'KeepFile -contains \$f\.Name\)\{ continue \}\s+# never backed up') 'True'
+}else{ Write-Host ('[SKIP] ' + $us + ' not beside this test') }
+
 if($fail -gt 0){ Write-Host ("RESULT: FAIL - " + $fail + " check(s) failed.") -ForegroundColor Red; exit 1 }
 Write-Host 'RESULT: PASS' -ForegroundColor Green
 exit 0

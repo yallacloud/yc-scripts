@@ -207,4 +207,13 @@ T 'a minion off the 3008 line is flagged'                 ($src.IndexOf('not on 
 T 'install state and version leave the VM (webhooks)'     ($src.IndexOf('saltInstalled=') -gt 0 -and $src.IndexOf('saltVersion=') -gt 0) ''
 
 Write-Host ''
+Write-Host '=== 11. the retry task downloads to a FILE, checks it, then runs it (2.47.6, P3) ===' -ForegroundColor Cyan
+$sj = Join-Path $PayloadDir 'Salt-Join.ps1'
+$sjs = if (Test-Path -LiteralPath $sj) { Get-Content -LiteralPath $sj -Raw } else { '' }
+T 'Salt-Join.ps1 is in the payload'                      ($sjs -ne '') $sj
+T 'the retry file never pipes a download into iex'      ($sjs -notmatch 'irm \$Url \| iex') ''
+T 'it downloads to a file with a timeout'               ($sjs.IndexOf('-OutFile `$f -TimeoutSec 120') -gt 0) ''
+T 'a failed, tiny or foreign download ends with exit 3' ($sjs.IndexOf('Length -lt 500') -gt 0 -and $sjs.IndexOf("-Pattern 'JOINED' -Quiet)) { exit 3 }") -gt 0) ''
+T 'join.ps1 exit code is passed through'                ($sjs.IndexOf('exit `$LASTEXITCODE') -gt 0) ''
+Write-Host ''
 Write-Host ('RESULT: ' + [string]$pass + ' passed, ' + [string]$fail + ' failed') -ForegroundColor $(if($fail -eq 0){'Green'}else{'Red'})

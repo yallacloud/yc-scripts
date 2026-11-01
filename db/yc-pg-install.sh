@@ -1,6 +1,6 @@
 #!/bin/bash
 ####################
-# yc-pg-install.sh  v1.0.8  (2026-10-28 13:30 IST)  YallaCloud / OasisStack
+# yc-pg-install.sh  v1.0.18  (2026-11-01 16:00 IST)  YallaCloud / OasisStack
 # Database server (DBaaS node): PostgreSQL (PGDG packages), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-64.
 # Sibling of yc-db-install.sh (MariaDB / MySQL, STACK4-62): same layout, files, yallacloud command, ERP contract.
@@ -63,7 +63,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.17
+VER=1.0.18
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -1477,7 +1477,8 @@ else   # the reactor applies glpi.agent on minion start; wait up to 7 min for it
 fi
 say "glpi: $GLPI_STATE"
 if [ -n "$ACRONIS_TOKEN" ]; then
-  YC_AT="$ACRONIS_TOKEN" YC_AR="$ACRONIS_REGION" timeout 3600 bash -c 'curl -fsSL --retry 3 --max-time 120 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s "$YC_AT" "$YC_AR"'; arc=$?   # shortcut: token is argv of the inner bash -s (acronis-setup.sh takes no env token yet)
+  # the kit's own extra webhook is off - yc_event below reports vm.acronis.* once (no duplicate event)
+  YC_AT="$ACRONIS_TOKEN" YC_AR="$ACRONIS_REGION" EXTRA_WEBHOOK_URL= timeout 3600 bash -c 'curl -fsSL --retry 3 --max-time 120 https://repo.oasisstack.io/acronis/acronis-setup.sh | bash -s "$YC_AT" "$YC_AR"'; arc=$?   # shortcut: token is argv of the inner bash -s (acronis-setup.sh takes no env token yet)
   case $arc in 0) ACRONIS_STATE="registered ($ACRONIS_REGION)";; 8|10) ACRONIS_STATE="installed, NOT registered (exit $arc)"; WAIT_HUMAN="${WAIT_HUMAN:+$WAIT_HUMAN; }acronis needs a human (exit $arc)";; *) ACRONIS_STATE="failed (exit $arc)"; warn "acronis-setup exit $arc - see /var/log/yc-acronis-setup.log";; esac
   say "acronis: $ACRONIS_STATE"
   case $arc in 0) yc_event acronis registered;; 8|10) yc_event acronis waitforhuman "$ACRONIS_STATE";; *) yc_event acronis failed "$ACRONIS_STATE";; esac

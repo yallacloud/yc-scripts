@@ -1,7 +1,7 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.6.1  (2026-10-31 14:45 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.6.2  (2026-11-01 16:00 IST)  YallaCloud / OasisStack
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -78,7 +78,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.6.1
+VER=1.6.2
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -1519,7 +1519,8 @@ acronis(){
     rc=3; r="download failed: ${ACRONIS_SETUP_URL:-}"
   else
     say "acronis: installing agent, region ${ACRONIS_REGION:-AE} (log /var/log/yc-acronis-setup.log)"
-    bash "$f" "$ACRONIS_TOKEN" "${ACRONIS_REGION:-AE}" 2>&1 </dev/null | sed "s/${ACRONIS_TOKEN//\//\\/}/****/g; s/^/[acronis] /" >> "$LOG"
+    # 1.6.2: the kit runs QUIET (no ntfy / extra / ERP of its own) - N below reports vm.acronis.* once
+    NTFY_TOPIC=off EXTRA_WEBHOOK_URL= ERP_WEBHOOK_SECRET= bash "$f" "$ACRONIS_TOKEN" "${ACRONIS_REGION:-AE}" 2>&1 </dev/null | sed "s/${ACRONIS_TOKEN//\//\\/}/****/g; s/^/[acronis] /" >> "$LOG"
     rc=${PIPESTATUS[0]}
   fi
   case "$rc" in

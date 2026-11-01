@@ -140,4 +140,23 @@ T '-Help documents the phase'            ($src -match '(?m)^  ACRONIS    OPTIONA
 T 'the web installer is left alone'      ($src.IndexOf('Register-Acronis.ps1 is the WEB installer') -gt 0) ''
 
 Write-Host ''
+Write-Host '=== 10. the kit runs QUIET - the adopt reports vm.acronis.* itself (payload 2.47.5) ===' -ForegroundColor Cyan
+$td = Join-Path $env:TEMP ('yc-acr-quiet-' + [string](Get-Random)); New-Item -ItemType Directory -Force -Path $td | Out-Null
+$probe = Join-Path $td 'env.txt'
+Set-Content -LiteralPath (Join-Path $td 'acronis-setup.ps1') -Encoding ASCII -Value ("Set-Content -LiteralPath '" + $probe + "' -Value ('NTFY_TOPIC=' + `$env:NTFY_TOPIC + '|EXTRA=' + `$env:EXTRA_WEBHOOK_URL + '|ERP=' + `$env:ERP_WEBHOOK_SECRET); exit 0")
+$keepDir = $ScriptsDir; $ScriptsDir = $td
+$env:NTFY_TOPIC = 'caller-topic'; $env:EXTRA_WEBHOOK_URL = 'https://extra.example.invalid/in'; $env:ERP_WEBHOOK_SECRET = $FakeValue
+Set-Acr; $AcronisToken = $FakeValue; $AcronisRegion = 'AE'
+$null = Invoke-Acronis
+$seen = if (Test-Path -LiteralPath $probe) { (Get-Content -LiteralPath $probe -Raw).Trim() } else { '(kit did not run)' }
+T 'the kit saw NTFY_TOPIC=off and no webhooks' ($seen -eq 'NTFY_TOPIC=off|EXTRA=|ERP=') $seen
+T 'the caller environment is back afterwards' ($env:NTFY_TOPIC -eq 'caller-topic' -and $env:EXTRA_WEBHOOK_URL -eq 'https://extra.example.invalid/in' -and $env:ERP_WEBHOOK_SECRET -eq $FakeValue) ''
+Remove-Item -Path env:NTFY_TOPIC, env:EXTRA_WEBHOOK_URL, env:ERP_WEBHOOK_SECRET -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $probe -ErrorAction SilentlyContinue
+Set-Acr; $null = Invoke-Acronis
+T 'unset before = still unset after (nothing invented)' (-not (Test-Path env:NTFY_TOPIC) -and -not (Test-Path env:EXTRA_WEBHOOK_URL) -and -not (Test-Path env:ERP_WEBHOOK_SECRET)) ''
+$ScriptsDir = $keepDir; $AcronisToken = ''; $AcronisRegion = ''
+Remove-Item -LiteralPath $td -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host ''
 Write-Host ('RESULT: ' + [string]$pass + ' passed, ' + [string]$fail + ' failed') -ForegroundColor $(if($fail -eq 0){'Green'}else{'Red'})

@@ -287,7 +287,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://n.oasisstack.io}"; : "${NTFY_TOPIC:=9890122212}"; : "${NTFY_TOKEN:=}"; : "${GLPI_AGENT_PASS:=}"; GLPI_STATE="off"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.4.1"
+NC_IVER="1.4.2"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -1512,7 +1512,8 @@ fi
 if [ -n "${ACRONIS_TOKEN:-}" ]; then
   say "installing + registering the Acronis backup agent (region ${ACRONIS_REGION:-AE})"
   _acr_ntfy=""; [ "${NOTIFY_NTFY:-yes}" = yes ] && [ -n "${NTFY_URL:-}" ] && [ -n "${NTFY_TOPIC:-}" ] && _acr_ntfy="--ntfy https://ntfy.sh/${NTFY_TOPIC}"
-  if curl -fsSL --max-time 60 https://repo.oasisstack.io/acronis/acronis-setup.sh | timeout 1800 bash -s -- --token "$ACRONIS_TOKEN" --region "${ACRONIS_REGION:-AE}" $_acr_ntfy >>"$LOG" 2>&1; then
+  # 1.4.2: the kit's own extra webhook is off - yc_extra below sends vm.acronis.* once
+  if curl -fsSL --max-time 60 https://repo.oasisstack.io/acronis/acronis-setup.sh | EXTRA_WEBHOOK_URL= timeout 1800 bash -s -- --token "$ACRONIS_TOKEN" --region "${ACRONIS_REGION:-AE}" $_acr_ntfy >>"$LOG" 2>&1; then
     say "  acronis: setup ran (see the log for registered/already-registered status)"; yc_extra acronis registered
   else
     warn "acronis: setup failed (token/region/egress) - continuing without it"; yc_extra acronis failed "acronis-setup failed (token/region/egress)"

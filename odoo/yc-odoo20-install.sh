@@ -1,7 +1,8 @@
 #!/bin/bash
 # shellcheck disable=SC1090  # config files are written by this script
 ####################
-# yc-odoo20-install.sh  v1.6.2  (2026-11-01 16:00 IST)  YallaCloud / OasisStack
+# yc-odoo20-install.sh  v1.6.3  (2026-11-01 19:30 IST)  YallaCloud / OasisStack
+# 1.6.3: yc-event/3 ERP format (owner 2026-11-01) - one structure, no duplicate blocks (YCEVT-01); vm.deploy.started to the extra webhook
 # Odoo 20 Community + PostgreSQL 18 on Ubuntu 24.04 (CloudStack). Guide: STACK4-61.
 #
 # Normally started by yc-odoo20-userdata.sh (cloud-init), which writes the answers to
@@ -78,7 +79,7 @@ ODOO_DEB_URL="https://github.com/yallacloud/yc-scripts/releases/download/odoo20-
 REPO_URL="https://repo.oasisstack.io/odoo"   # local mirror (ycwsus01, YC ranges): fallback when GitHub fails
 # ================ nothing to edit below this line ================
 
-VER=1.6.2
+VER=1.6.3
 CFG=/etc/yallacloud/odoo.conf.env
 LIB=/usr/local/lib/yc-odoo-common.sh
 INFO=/root/odoo-info
@@ -341,7 +342,7 @@ say "config: BACKUP=$BACKUP_DIR keep ${BACKUP_KEEP_DAYS}d at $BACKUP_TIME  NTFY=
 umask 077; printf '%s=%q\n' NTFY_TOKEN "$NTFY_TOKEN" ERP_WEBHOOK_SECRET "$ERP_WEBHOOK_SECRET" ERP_WEBHOOK_TOKEN "$ERP_WEBHOOK_TOKEN" EXTRA_WEBHOOK_SECRET "$EXTRA_WEBHOOK_SECRET" ACRONIS_TOKEN "$ACRONIS_TOKEN" GLPI_AGENT_PASSWORD "$GLPI_AGENT_PASSWORD" > "$NOTIFY_ENV"; umask 022
 cat > /usr/local/sbin/yc-notify <<'NTFYEOF'
 #!/usr/bin/env python3
-# yc-notify v1.4.2 (2026-10-27) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
+# yc-notify v1.5.0 (2026-11-01, ERP body yc-event/3) - YallaCloud Linux reporting: ntfy (phone) + YallaCloud ERP webhook
 # (contract YCERP-01) + optional second webhook (EXTRA_WEBHOOK_URL, no credentials). Same event shape as the Windows
 # C-Scripts payload so the ERP matches it by vmId = SMBIOS UUID.
 #   yc-notify -t vm.deploy.completed -T "OK BUILD odoo combined" -p 3 -g white_check_mark,odoo \
@@ -532,27 +533,65 @@ def send_ntfy(c, a, fx):
 
 
 def build_event(c, a, fx, with_creds):
+    """yc-event/3 (owner 2026-11-01, YCEVT-01): one structure for every kit, no duplicated keys.
+    -f fields -> app{} (kit facts) except the ones that have a v3 place; -s group.key secrets -> credentials{}."""
     fields = {}
     for kv in (a.field or []):
         if '=' in kv:
             k, v = kv.split('=', 1)
             fields[k] = v
-    creds = {}                              # every user/password in ONE section, grouped: vm / odoo / database
+    raw = {}
     if with_creds and c.get('WEBHOOK_SEND_SECRETS', 'yes') == 'yes':
         for kv in (a.secret or []):
             if '=' in kv:
                 k, v = kv.split('=', 1)
                 grp, _, key = k.rpartition('.')
-                (creds.setdefault(grp, {}) if grp else creds)[key] = v
-    ev = dict(fx)
-    ev.update({'type': a.type, 'steps': a.steps or '', 'extra': a.title, 'fields': fields})
-    if creds:
-        ev['credentials'] = creds
-    if a.line:
-        fields.setdefault('summary', ' | '.join(x.strip() for x in a.line[:6]))
+                (raw.setdefault(grp, {}) if grp else raw)[key] = v
+    t = a.type or ''
+    st = {'vm.deploy.started': 'started', 'vm.deploy.completed': 'completed'}.get(t, t.split('.')[-1])
+    warn = fields.pop('warnings', '')
+    res = ('SUCCESS with warnings' if warn else 'SUCCESS') if t == 'vm.deploy.completed' else ('FAILED' if st == 'failed' else None)
+    num = lambda x: int(x) if (x or '').isdigit() else None
+    portal = fx.get('cloudstackUrl') or None
+    for k in ('area', 'status', 'summary', 'installer'):
+        fields.pop(k, None)
+    ssh = fields.pop('sshPort', '')
+    svc = {k: fields.pop(k, None) or None for k in ('salt', 'acronis', 'glpi', 'monitor')}
+    ev = {'schema': 'yc-event/3', 'type': t, 'status': st, 'result': res,
+          'summary': a.title + ((' | ' + ' | '.join(x.strip() for x in a.line[:6])) if a.line else ''),
+          'vmId': fx.get('vmId') or None, 'smbiosUuid': fx.get('smbiosUuid') or None, 'hostname': fx.get('hostname'),
+          'ip': fx.get('publicIp') or fx.get('ip') or None, 'publicIp': fx.get('publicIp') or None,
+          'utc': fx.get('utc'), 'lastUpdated': fx.get('lastUpdated'),
+          'vm': {'name': fx.get('vmName') or None, 'uuid': fx.get('vmUuid') or None, 'instanceId': fx.get('instanceId') or None,
+                 'identitySource': fx.get('identitySource'), 'vmIdMismatch': fx.get('vmIdMismatch'),
+                 'privateIp': fx.get('ip') if fx.get('ip') and fx.get('ip') != fx.get('publicIp') else None,
+                 'os': fx.get('os'), 'osVersion': fx.get('osVersion'), 'hypervisor': fx.get('hypervisor'),
+                 'guestAgent': fx.get('guestAgent'), 'freeGb': fx.get('freeGb')},
+          'cloud': {'id': fx.get('cloud') or None, 'zone': fx.get('zone') or None, 'tenant': fx.get('tenant'),
+                    'tenantSource': fx.get('tenantSource'), 'offering': fx.get('offering') or fx.get('serviceOffering') or None,
+                    'portal': portal, 'vmUrl': (portal.rstrip('/') + '/#/vm/' + fx['vmUuid']) if portal and fx.get('vmUuid') else None},
+          'build': {'kit': 'odoo20', 'installer': 'yc-odoo20-install ' + (fx.get('payload') or ''), 'version': fx.get('payload') or '',
+                    'runId': None, 'steps': a.steps or '', 'warnings': [w.strip() for w in warn.split(';') if w.strip()],
+                    'log': '/var/log/yc-odoo-deploy.log', 'errorLog': None},
+          'access': {'host': fx.get('publicIp') or fx.get('ip') or None, 'sshPort': num(ssh)},
+          'services': svc, 'app': fields}
     if a.failed_step:
-        ev['failedStep'] = a.failed_step
-        ev['error'] = a.error or ''
+        ev['build']['failedStep'] = a.failed_step
+        ev['build']['error'] = a.error or ''
+    if raw:   # every user/password in ONE place as {user,password,...} objects
+        up = lambda u, p, **x: dict({'user': u, 'password': p}, **{k: v for k, v in x.items() if v}) if p else None
+        vm, od, db = raw.pop('vm', {}), raw.pop('odoo', {}), raw.pop('database', {})
+        cr = {'vm': up(vm.get('user', 'root'), vm.get('password'), source=vm.get('passwordSource'), users=vm.get('passwordUsers'),
+                       host=vm.get('sshHost'), sshPort=vm.get('sshPort'), note='active root password'),
+              'sudo': up(vm.get('sudoUser'), vm.get('sudoPassword'), note='sudo user'),
+              'odooAdmin': up(od.get('adminUser', 'admin'), od.get('adminPassword'), url=od.get('url'), note='Odoo web admin'),
+              'odooMaster': up('master', od.get('masterPassword'), note='Odoo database manager (master) password'),
+              'dbApp': up(db.get('user'), db.get('password'), engine=db.get('engine'), version=db.get('version'), host=db.get('host'),
+                          port=db.get('port'), database=db.get('name'), note='Odoo database user')}
+        cr.update(raw)   # any other -s group passes through unchanged
+        cr = {k: v for k, v in cr.items() if v}
+        if cr:
+            ev['credentials'] = cr
     return ev
 
 
@@ -567,12 +606,12 @@ def strip_secrets(v):
     return v
 
 
-EXTRA_STATES = ('failed', 'ok', 'joined', 'registered', 'backtogreen', 'waiting', 'waitforhuman', 'completed')
+EXTRA_STATES = ('started', 'failed', 'ok', 'joined', 'registered', 'backtogreen', 'waiting', 'waitforhuman', 'completed')
 
 
 def send_extra(c, a, fx):
     """second webhook (house contract): FLAT body, strings only, NO secrets, one try 15 s, never raises.
-    Only types vm.<area>.<state> with a contract state are sent (vm.deploy.started is not one)."""
+    Only types vm.<area>.<state> with a contract state are sent (1.6.3: vm.deploy.started too - YCHOOK ntfy STARTED)."""
     url, key = c.get('EXTRA_WEBHOOK_URL', ''), c.get('EXTRA_WEBHOOK_SECRET', '')
     parts = (a.type or '').split('.')
     if len(parts) == 4 and parts[1] == 'odoo':          # vm.odoo.backup.failed -> vm.backup.failed
@@ -615,7 +654,6 @@ def send_webhook(c, a, fx):
         except Exception:
             break
     left = len(glob.glob(QDIR + '/*.json'))
-    ev['delivery'] = {'queued': left}
     body = json.dumps(ev, separators=(',', ':')).encode('utf-8')
 
     def keep(answer):

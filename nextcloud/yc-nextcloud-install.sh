@@ -14,6 +14,7 @@
 #  Progress: /var/log/yc-nextcloud-install.log                              #
 #  Result:   /root/yc-handover.json   (all passwords, chmod 600)            #
 #                                                                            #
+#  1.4.3  yc-event/3 ERP format (owner 2026-11-01) - YCEVT-01                 #
 #  1.4.0  sshd: ALL settings in one drop-in (00-yallacloud-root.conf, first   #
 #              in the include glob so it wins). Pubkey auth explicit,         #
 #              optional operator key install. Socket activation dropped and   #
@@ -287,7 +288,7 @@ fi
 : "${NOTIFY_NTFY:=yes}"; : "${NTFY_URL:=https://n.oasisstack.io}"; : "${NTFY_TOPIC:=9890122212}"; : "${NTFY_TOKEN:=}"; : "${GLPI_AGENT_PASS:=}"; GLPI_STATE="off"
 : "${NOTIFY_WEBHOOK:=no}"; : "${WEBHOOK_URL:=}"; : "${WEBHOOK_SECRET:=}"; : "${EXTRA_WEBHOOK_URL:=}"; : "${EXTRA_WEBHOOK_SECRET:=}"
 VMID=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_uuid 2>/dev/null || echo ""); SSL_STATUS="pending"; NC_VERSION=""; : "${PUBLIC_IP:=}"; SALT_STATE="pending"
-NC_IVER="1.4.2"
+NC_IVER="1.4.3"
 YC_VER="yc-nextcloud-install $NC_IVER"
 : "${VM_NAME:=}"; : "${CS_INSTANCE:=}"; : "${CS_DOMAIN:=}"; : "${CS_ACCOUNT:=}"; : "${CS_ROOT_PASS:=}"
 : "${CLOUDSTACK_URL:=https://dxb01.oasisstack.io/client}"; CLOUDSTACK_URL="${CLOUDSTACK_URL%/}"
@@ -361,49 +362,42 @@ def osr():
     except OSError: pass
     return d
 o=osr(); PORTSFX=e("PORTSFX") or ""; CU=e("CLOUDSTACK_URL") or ""; VU=e("VM_UUID") or ""
-d={"type":e("WTYPE"),"extra":e("WEXTRA"),
- "vmId":e("VM_ID") or e("VMID") or None,"smbiosUuid":e("VMID") or None,"identitySource":e("ID_SRC") or "smbios",
- "vmName":e("VM_NAME") or None,"vmUuid":VU or None,"instanceId":e("INSTANCE_ID") or None,
- "vmIdMismatch":bool(VU and e("VMID") and VU!=e("VMID")),
- "hostname":socket.gethostname(),"fqdn":e("FQDN") or None,
- "ip":e("NET_IP") or None,"publicIp":e("PUBLIC_IP") or None,"shape":e("NET_SHAPE") or None,
- "zone":e("ZONE") or None,"cloud":"YallaCloud","cloudIdentifier":e("CLOUD_ID") or None,
- "cloudPortal":CU or None,"cloudVmUrl":(CU+"/#/vm/"+VU) if CU and VU else None,
- "tenant":e("TENANT") or None,"tenantSource":e("TENANT_SRC") or None,"serviceOffering":e("OFFERING") or None,
- "os":o.get("PRETTY_NAME","Linux"),"osVersion":o.get("VERSION_ID","")+" / "+os.uname().release,
- "catalogue":"nextcloud-"+(e("NC_VERSION") or ""),"area":"nextcloud",
- "installer":"yc-nextcloud-install "+(e("NC_IVER") or ""),
- "utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
- "app":{"url":"https://%s%s/"%(e("FQDN") or "",PORTSFX),"tls":e("SSL_STATUS") or "",
-   "ncVersion":e("NC_VERSION") or "","sshPort":e("SSH_PORT") or "","dataPath":e("DATA_PATH") or "",
-   "dbName":e("DB_NAME") or ""}}
+nul=lambda k: e(k) or None
 T=e("WTYPE") or ""; ok=T=="vm.deploy.completed"
 st={"vm.deploy.started":"started","vm.deploy.completed":"completed"}.get(T,"failed")
 warn=[w for w in ["salt: "+e("SALT_STATE") if (e("SALT_STATE") or "").startswith(("FAILED","BLOCKED")) else "",
                   "tls: "+e("SSL_STATUS") if (e("SSL_STATUS") or "").startswith("self-signed") else ""] if w]
 try: fs=os.statvfs(e("DATA_PATH") or "/")
 except OSError: fs=os.statvfs("/")
-d["schema"]="yc-event/2"; d["summary"]=e("WEXTRA") or T
-d["vm"]={"vmId":d["vmId"],"smbiosUuid":d["smbiosUuid"],"vmUuid":d["vmUuid"],"instanceId":d["instanceId"],
- "identitySource":d["identitySource"],"vmIdMismatch":d["vmIdMismatch"],"routerVmId":None,"vmName":d["vmName"],
- "hostname":d["hostname"],"ip":d["ip"],"publicIp":d["publicIp"],"os":d["os"],"osVersion":o.get("VERSION_ID",""),
- "freeGb":round(fs.f_bavail*fs.f_frsize/1073741824,1)}
-d["cloud"]={"id":e("CLOUD_ID") or None,"zone":d["zone"],"tenant":d["tenant"],"tenantSource":d["tenantSource"],
- "offering":d["serviceOffering"],"portal":d["cloudPortal"],"vmUrl":d["cloudVmUrl"]}
-d["service"]={"area":"salt" if T.startswith("vm.salt.") else "nextcloud","catalogue":d["catalogue"],"status":st,
+pub=nul("PUBLIC_IP"); ip=nul("NET_IP")
+# yc-event/3 (owner 2026-11-01): one structure for every kit (YCEVT-01), no duplicated keys. Top level = ERP match + list keys.
+d={"schema":"yc-event/3","type":T,"status":st,
  "result":("SUCCESS" if not warn else "SUCCESS with warnings") if ok else ("FAILED" if st=="failed" else None),
- "warnings":warn,"installer":d["installer"],
- "details":dict(d["app"],hypervisor=e("HV") or None,guestAgent=e("GA_STATE") or None,sshPort=int(e("SSH_PORT")) if (e("SSH_PORT") or "").isdigit() else None,fqdn=d["fqdn"],shape=d["shape"],salt=e("SALT_STATE") or None,
-                acronis="on" if e("ACRONIS_TOKEN") else "off",glpi=e("GLPI_STATE") or "off")}
-if e("WSEC")=="yes":   # every secret in ONE place, YC-EVENT v2 shape; empty logins left out
-  def up(u,pw,**x): return dict({"user":u,"password":pw},**x) if pw else None
-  c={"vm":up("root",e("CS_ROOT_PASS"),source=e("CS_ROOT_SRC") or None),
-     "sudo":up(e("SUDO_USER_NAME"),e("SUDO_PASS")),
-     "nextcloud":{"admin":up(e("ADMIN_USER"),e("ADMIN_PASS"))},
-     "db":{"app":up(e("DB_USER"),e("DB_PASS")),"database":e("DB_NAME") or None},
-     "redis":{"password":e("REDIS_PASS")} if e("REDIS_PASS") else None}
-  d["credentials"]={k:v for k,v in c.items() if v and any(x is not None for x in v.values())}
-d["delivery"]={"queued":0}
+ "summary":e("WEXTRA") or T,
+ "vmId":e("VM_ID") or e("VMID") or None,"smbiosUuid":nul("VMID"),"hostname":socket.gethostname(),
+ "ip":pub or ip,"publicIp":pub,
+ "utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+ "lastUpdated":time.strftime("%Y-%m-%d %H:%M:%S %z ")+(e("TZ_SET") or "UTC").split("/")[-1],
+ "vm":{"name":nul("VM_NAME"),"uuid":VU or None,"instanceId":nul("INSTANCE_ID"),"identitySource":e("ID_SRC") or "smbios",
+  "vmIdMismatch":bool(VU and e("VMID") and VU!=e("VMID")),"privateIp":ip if ip and ip!=pub else None,
+  "os":o.get("PRETTY_NAME","Linux"),"osVersion":o.get("VERSION_ID",""),"hypervisor":nul("HV"),"guestAgent":nul("GA_STATE"),
+  "freeGb":round(fs.f_bavail*fs.f_frsize/1073741824,1)},
+ "cloud":{"id":nul("CLOUD_ID"),"zone":nul("ZONE"),"tenant":nul("TENANT"),"tenantSource":nul("TENANT_SRC"),
+  "offering":nul("OFFERING"),"portal":CU or None,"vmUrl":(CU+"/#/vm/"+VU) if CU and VU else None},
+ "build":{"kit":"nextcloud","installer":"yc-nextcloud-install "+(e("NC_IVER") or ""),"version":e("NC_IVER") or "",
+  "runId":None,"steps":None,"warnings":warn,"log":"/var/log/yc-nextcloud-install.log","errorLog":None},
+ "access":{"host":pub or ip,"sshPort":int(e("SSH_PORT")) if (e("SSH_PORT") or "").isdigit() else None,"fqdn":nul("FQDN"),"shape":nul("NET_SHAPE")},
+ "services":{"salt":nul("SALT_STATE"),"acronis":"on" if e("ACRONIS_TOKEN") else "off","glpi":e("GLPI_STATE") or "off"},
+ "app":{"url":"https://%s%s/"%(e("FQDN") or "",PORTSFX),"tls":e("SSL_STATUS") or "","version":e("NC_VERSION") or "",
+  "dataPath":e("DATA_PATH") or "","dbName":e("DB_NAME") or ""}}
+if e("WSEC")=="yes":   # every secret in ONE place; empty logins left out
+  def up(u,pw,**x): return dict({"user":u,"password":pw},**{k:v for k,v in x.items() if v}) if pw else None
+  c={"vm":up("root",e("CS_ROOT_PASS"),source=nul("CS_ROOT_SRC"),note="active root password"),
+     "sudo":up(e("SUDO_USER_NAME"),e("SUDO_PASS"),note="sudo user"),
+     "nextcloudAdmin":up(e("ADMIN_USER"),e("ADMIN_PASS"),note="Nextcloud web admin"),
+     "dbApp":up(e("DB_USER"),e("DB_PASS"),database=nul("DB_NAME"),note="Nextcloud database user"),
+     "redis":up("default",e("REDIS_PASS"),note="Redis requirepass")}
+  d["credentials"]={k:v for k,v in c.items() if v}
 print(json.dumps(d))
 PY
   if [ "$erp" = yes ]; then
@@ -604,6 +598,7 @@ OPEN     https://${FQDN}/   (works once the OK BUILD message arrives)
 TODO     nothing - wait for OK BUILD (or FAILED BUILD)" low "hourglass_flowing_sand" "setup    network ${NET_SHAPE}  tier ${TIER}  data ${DATA_PATH}"
 yc_extra network ok
 notify_webhook "vm.deploy.started" "network ${NET_SHAPE}"
+yc_extra deploy started ""
 PRIV_IP="$NET_IP"
 
 if [ "$SET_HOSTNAME" = "yes" ]; then

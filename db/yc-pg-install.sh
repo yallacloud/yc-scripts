@@ -1,6 +1,7 @@
 #!/bin/bash
 ####################
-# yc-pg-install.sh  v1.0.18  (2026-11-01 16:00 IST)  YallaCloud / OasisStack
+# yc-pg-install.sh  v1.0.19  (2026-11-01 19:30 IST)  YallaCloud / OasisStack
+# 1.0.19: yc-event/3 ERP format (owner 2026-11-01) - one structure, no duplicate blocks (YCEVT-01)
 # Database server (DBaaS node): PostgreSQL (PGDG packages), nothing else.
 # OS: Ubuntu 24.04 | RHEL / Rocky / AlmaLinux / Oracle Linux 9 and 10.   Guide: STACK4-64.
 # Sibling of yc-db-install.sh (MariaDB / MySQL, STACK4-62): same layout, files, yallacloud command, ERP contract.
@@ -63,7 +64,7 @@ NET_RETRY_INTERVAL="300"   # internet gate: seconds between checks (master promp
 NET_MAX_WAIT="0"           # internet gate: give up after N seconds (0 = wait forever)
 # ================
 
-VER=1.0.18
+VER=1.0.19
 SCRIPT_TAG="yc-pg-install $VER"
 KEYS="ENGINE DB_VERSION DB_PORT DB_ALLOW DB_ADMIN_USER DB_NAME DB_USER DB_ROOT_PASS DB_ADMIN_PASS DB_USER_PASS DATA_DISK BACKUP_KEEP_DAYS BACKUP_KEEP_WEEKS BACKUP_KEEP_MONTHS BACKUP_TIME WAL_ARCHIVE WAL_DAYS PUBLIC_IP GATEWAY SSH_PORT SSH_PUBKEY TZ_SET LOCALE_SET SALT_JOIN GLPI_AGENT ACRONIS_TOKEN ACRONIS_REGION NTFY_URL NTFY_SERVER NTFY_TOPIC NTFY_TOKEN ERP_WEBHOOK_URL ERP_WEBHOOK_SECRET EXTRA_WEBHOOK_URL EXTRA_WEBHOOK_SECRET CLOUDSTACK_URL APT_MIRRORS PASS_URL REPO_URL DISABLE_CLOUD_INIT NET_RETRY_INTERVAL NET_MAX_WAIT"
 CFG=/etc/yallacloud/db.conf.env
@@ -468,91 +469,47 @@ facts_json(){   # $1 type  $2 summary  $3 with-secrets(yes|no) -> stdout   (same
   T="$1" S="$2" W="$3" python3 - <<'PY'
 import json, os, time
 e = os.environ.get
-d = {"type": e("T"), "extra": e("S"), "vmId": e("VM_ID") or None, "smbiosUuid": e("SMBIOS") or None,
-     "vmName": e("VM_NAME"), "vmUuid": e("VM_UUID") or None,
-     "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
-     "tenant": e("TENANT") or None, "tenantSource": e("TENANT_SRC") or None, "serviceOffering": e("OFFERING") or None,
-     "hostname": e("VM_NAME"), "ip": e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": e("HOST_PUB") or None,
-     "zone": e("ZONE") or None, "cloud": e("CLOUD_ID") or "YallaCloud", "cloudIdentifier": e("CLOUD_ID") or None,
-     "cloudPortal": e("CLOUDSTACK_URL") or None,
-     "cloudVmUrl": (e("CLOUDSTACK_URL") + "/#/vm/" + e("VM_UUID")) if e("CLOUDSTACK_URL") and e("VM_UUID") else None, "os": e("PRETTY_NAME"), "osVersion": e("VERSION_ID"),
-     "hypervisor": e("HV") or None,
-     "catalogue": e("ENGINE") + "-" + e("DB_VERSION"), "area": "db", "status": e("RESULT"), "steps": e("STEP"),
-     "warnings": int(e("WARNS") or 0), "installer": "yc-pg-install " + e("VER"),
-     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-if e("W") == "yes":
-    d["db"] = {k: (e(v) or None) for k, v in {
-        "engine": "ENGINE", "version": "DB_REAL_VERSION", "port": "DB_PORT", "hostPrivate": "HOST_PRIV",
-        "hostPublic": "HOST_PUB", "allow": "DB_ALLOW", "rootUser": "ROOTU", "rootPassword": "DB_ROOT_PASS",
-        "adminUser": "DB_ADMIN_USER", "adminPassword": "DB_ADMIN_PASS", "database": "DB_NAME",
-        "user": "DB_USER", "userPassword": "DB_USER_PASS", "uriAdmin": "URI_ADMIN", "uriUser": "URI_USER",
-        "dataDir": "PGDATA", "backupDir": "BACKUP_DIR", "backupRetention": "RETENTION",
-        "sshPort": "SSH_PORT"}.items()}
-    d["vmUser"] = "root"; d["vmPassword"] = e("VM_PASS") or None
-    if e("CHADMIN_PASS"): d["sudoUser"] = "chadmin"; d["sudoPassword"] = e("CHADMIN_PASS")
-# same keys as the Odoo kit / payload events (one ERP contract) - additive only
-d.update({"offering": e("OFFERING") or None, "identitySource": e("ID_SRC") or "metadata",
-          "instanceId": e("INSTANCE_ID") or None, "routerVmId": None, "cloudstackUrl": e("CLOUDSTACK_URL") or None,
-          "lastUpdated": time.strftime("%Y-%m-%d %H:%M:%S %z ") + (e("TZ_SET") or "UTC").split("/")[-1], "payload": e("VER"), "freeGb": float(e("FREE_GB")) if e("FREE_GB") else None,
-          "delivery": {"queued": 0}})
-st = {"vm.deploy.started": "started", "vm.deploy.completed": "completed"}.get(e("T"), "failed")
-f = {"area": "db", "status": st, "summary": e("S"), "engine": e("ENGINE"), "dbVersion": e("DB_REAL_VERSION") or e("DB_VERSION"),
-     "dbHost": e("HOST_PUB") or e("HOST_PRIV") or None, "dbPort": e("DB_PORT"), "sshPort": e("SSH_PORT") or None,
-     "warnings": e("WARN_TXT") or "", "installer": e("VER"), "salt": e("SALT_STATE") or None, "glpi": e("GLPI_STATE") or None, "acronis": e("ACRONIS_STATE") or None}
-if e("W") == "yes":
-    f.update({"dbRootUser": e("ROOTU"), "dbRootPassword": e("DB_ROOT_PASS") or None, "dbAdminUser": e("DB_ADMIN_USER"),
-              "dbAdminPassword": e("DB_ADMIN_PASS") or None, "dbName": e("DB_NAME") or None,
-              "dbUser": e("DB_USER") or e("DB_ADMIN_USER"), "dbPassword": (e("DB_USER_PASS") if e("DB_USER") else e("DB_ADMIN_PASS")) or None,
-              "backupDir": e("BACKUP_DIR") or None, "backupRetention": e("RETENTION") or None,
-              "vmUser": "root", "vmPassword": e("VM_PASS") or None})
-    if e("CHADMIN_PASS"): f.update({"sudoUser": "chadmin", "sudoPassword": e("CHADMIN_PASS")})
-d["fields"] = f
-# YC-EVENT v2 sections (STACK4-63), additive - flat v1 keys above stay for the ERP
-d["schema"] = "yc-event/2"; d["summary"] = e("S") or e("T")
-d["vm"] = {k: d.get(k) for k in ("vmId", "smbiosUuid", "vmUuid", "instanceId", "identitySource", "vmIdMismatch",
-                                 "routerVmId", "vmName", "hostname", "ip", "publicIp", "os", "freeGb")}
-d["vm"]["osVersion"] = e("VERSION_ID") or ""
-d["cloud"] = {"id": e("CLOUD_ID") or None, "zone": d["zone"], "tenant": d["tenant"], "tenantSource": d["tenantSource"],
-              "offering": d["serviceOffering"], "portal": d["cloudPortal"], "vmUrl": d["cloudVmUrl"]}
+OSR = {}
+try:
+    for l in open('/etc/os-release'):
+        if '=' in l: k, v = l.rstrip().split('=', 1); OSR[k] = v.strip('"')
+except OSError: pass
+nul = lambda k: e(k) or None
 num = lambda x: int(x) if (x or "").isdigit() else None
-d["service"] = {"area": "db", "catalogue": d["catalogue"], "status": st,
-                "result": e("RESULT") if e("RESULT") not in (None, "", "RUNNING") else None, "steps": e("STEP"),
-                "warnings": [w for w in (e("WARN_LIST") or "").split("\n") if w], "installer": d["installer"],
-                "details": {"engine": e("ENGINE"), "version": e("DB_REAL_VERSION") or e("DB_VERSION"),
-                            "host": e("HOST_PUB") or e("HOST_PRIV") or None, "hostPrivate": e("HOST_PRIV") or None,
-                            "port": num(e("DB_PORT")), "allow": e("DB_ALLOW") or None, "tls": "off (plain TCP, sslmode=disable)", "hypervisor": e("HV") or None, "guestAgent": e("GA_STATE") or None,
-                            "sshPort": num(e("SSH_PORT")), "dataDir": e("PGDATA") or None, "backupDir": e("BACKUP_DIR") or None,
-                            "backupRetention": e("RETENTION") or None, "pitr": e("PITR_TXT") or None,
-                            "salt": e("SALT_STATE") or None, "glpi": e("GLPI_STATE") or None, "acronis": e("ACRONIS_STATE") or None}}
+portal = nul("CLOUDSTACK_URL")
+vmurl = (portal + "/#/vm/" + e("VM_UUID")) if portal and e("VM_UUID") else None
+st = {"vm.deploy.started": "started", "vm.deploy.completed": "completed"}.get(e("T"), "failed")
+res = e("RESULT") if e("RESULT") not in (None, "", "RUNNING") else None
+# yc-event/3 (owner 2026-11-01): one structure for every kit (YCEVT-01), no duplicated keys. Top level = ERP match + list keys.
+d = {"schema": "yc-event/3", "type": e("T"), "status": st, "result": res, "summary": e("S") or e("T"),
+     "vmId": nul("VM_ID"), "smbiosUuid": nul("SMBIOS"), "hostname": e("VM_NAME"),
+     "ip": e("HOST_PUB") or e("HOST_PRIV") or e("PUB_NIC") or None, "publicIp": nul("HOST_PUB"),
+     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+     "lastUpdated": time.strftime("%Y-%m-%d %H:%M:%S %z ") + (e("TZ_SET") or "UTC").split("/")[-1],
+     "vm": {"name": e("VM_NAME"), "uuid": nul("VM_UUID"), "instanceId": nul("INSTANCE_ID"), "identitySource": e("ID_SRC") or "metadata",
+            "vmIdMismatch": bool(e("VM_UUID") and e("SMBIOS") and e("VM_UUID") != e("SMBIOS")),
+            "privateIp": nul("HOST_PRIV"), "os": OSR.get("PRETTY_NAME") or nul("PRETTY_NAME"), "osVersion": OSR.get("VERSION_ID") or nul("VERSION_ID"),
+            "hypervisor": nul("HV"), "guestAgent": nul("GA_STATE"), "freeGb": float(e("FREE_GB")) if e("FREE_GB") else None},
+     "cloud": {"id": nul("CLOUD_ID"), "zone": nul("ZONE"), "tenant": nul("TENANT"), "tenantSource": nul("TENANT_SRC"),
+               "offering": nul("OFFERING"), "portal": portal, "vmUrl": vmurl},
+     "build": {"kit": "postgresql", "installer": "yc-pg-install" + " " + e("VER"), "version": e("VER"), "runId": nul("RUN_ID"),
+               "steps": e("STEP"), "warnings": [w for w in (e("WARN_LIST") or "").splitlines() if w], "log": "/var/log/yc-db-deploy.log", "errorLog": None},
+     "access": {"host": e("HOST_PUB") or e("HOST_PRIV") or None, "sshPort": num(e("SSH_PORT")), "allow": nul("DB_ALLOW")},
+     "services": {"salt": nul("SALT_STATE"), "acronis": nul("ACRONIS_STATE"), "glpi": nul("GLPI_STATE")},
+     "db": {"engine": e("ENGINE"), "version": e("DB_REAL_VERSION") or e("DB_VERSION"), "port": num(e("DB_PORT")),
+            "dbName": nul("DB_NAME"), "tls": "off (plain TCP, sslmode=disable)", "dataDir": nul("PGDATA"), "backupDir": nul("BACKUP_DIR"), "backupRetention": nul("RETENTION")}}
 if e("W") == "yes":   # every secret in ONE place; empty logins left out
-    up = lambda u, p, **x: dict({"user": u, "password": p}, **x) if p else None
-    db = {"root": up(e("ROOTU"), e("DB_ROOT_PASS")), "admin": up(e("DB_ADMIN_USER"), e("DB_ADMIN_PASS")),
-          "app": up(e("DB_USER"), e("DB_USER_PASS")) if e("DB_USER") else None, "database": e("DB_NAME") or None,
-          "uriAdmin": e("URI_ADMIN") or None, "uriApp": e("URI_USER") or None}
-    c = {"vm": up("root", e("VM_PASS"), source=e("VM_PASS_SRC") or None), "sudo": up("chadmin", e("CHADMIN_PASS")),
-         "db": {k: v for k, v in db.items() if v}}
+    up = lambda u, p, **x: dict({"user": u, "password": p}, **{k: v for k, v in x.items() if v}) if p else None
+    c = {"vm": up("root", e("VM_PASS"), source=nul("VM_PASS_SRC"), note="active root password"),
+         "sudo": up("chadmin", e("CHADMIN_PASS"), source=nul("CHADMIN_PASS_SRC"), note="sudo user"),
+         "dbRoot": up(e("ROOTU"), e("DB_ROOT_PASS"), note="database superuser, local socket"),
+         "dbAdmin": up(e("DB_ADMIN_USER"), e("DB_ADMIN_PASS"), uri=nul("URI_ADMIN"), note="database admin, remote"),
+         "dbApp": up(e("DB_USER"), e("DB_USER_PASS"), uri=nul("URI_USER"), note="application user") if e("DB_USER") else None}
     d["credentials"] = {k: v for k, v in c.items() if v}
-# master prompt v1.9.3 section 7.3 / 3B / 5A keys - additive, the ERP keys above stay
-ev = {"vm.deploy.started": "deploy.started", "vm.deploy.completed": "deploy.succeeded", "vm.deploy.waiting_network": "deploy.waiting_network"}.get(e("T"), "deploy.failed")
-d.update({"event": ev, "tag": e("DEPLOY_TAG"), "run_id": e("RUN_ID"), "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-          "software": "postgresql", "version": e("DB_REAL_VERSION") or e("DB_VERSION"), "role": "db", "topology": "single",
-          "result": d["service"]["result"], "duration_s": int(e("DURATION") or 0), "log": "/var/log/yc-db-deploy.log",
-          "instanceName": "unknown"})
-d["vm"]["instanceName"] = "unknown"; d["vm"]["hypervisor"] = e("HV") or None
-d["ssh"] = {"port": num(e("SSH_PORT")), "users": ["root"] + (["chadmin"] if e("CHADMIN_PASS") else []),
-            "key_fingerprints": [x for x in (e("SSH_KEY_FP") or "").split() if x.startswith("SHA256:")], "password_auth": True}
-d["salt"] = {"joined": e("SALT_STATE") == "JOINED", "minion_id": e("SALT_ID") or None, "state": e("SALT_STATE") or None}
-d["glpi"] = {"registered": e("GLPI_STATE").startswith("REGISTERED"), "state": e("GLPI_STATE") or None, "via": "salt glpi/agent.sls"}
-d["acronis"] = {"installed": (e("ACRONIS_STATE") or "").startswith(("registered", "installed")), "reason": e("ACRONIS_STATE") or None}
-if e("W") == "yes":
-    d["db"].update({"host": e("HOST_PRIV") or e("HOST_PUB") or None, "public_host": e("HOST_PUB") or None, "bind": "0.0.0.0",
-                    "allowed_sources": (e("DB_ALLOW") or "").split(), "name": e("DB_NAME") or None,
-                    "user": e("DB_USER") or e("DB_ADMIN_USER"),
-                    "password": (e("DB_USER_PASS") if e("DB_USER") else e("DB_ADMIN_PASS")) or None})
-    srcmap = {"cloudstack": "cloudstack-cloudinit", "cloudstack-password-server": "cloudstack-vr", "generated": "script-generated"}
-    osu = [{"user": "root", "password": e("VM_PASS"), "source": srcmap.get(e("VM_PASS_SRC") or "", e("VM_PASS_SRC") or None)}]
-    if e("CHADMIN_PASS"): osu.append({"user": "chadmin", "password": e("CHADMIN_PASS"), "source": "script-generated"})
-    d.setdefault("credentials", {})["os_users"] = osu
+d["build"]["durationSec"] = int(e("DURATION") or 0)
+d["access"]["keyFingerprints"] = [x for x in (e("SSH_KEY_FP") or "").split() if x.startswith("SHA256:")]
+d["services"]["saltMinion"] = nul("SALT_ID")
+d["db"].update({"pitr": nul("PITR_TXT"), "topology": "single", "deployTag": nul("DEPLOY_TAG")})
 print(json.dumps(d))
 PY
 }
@@ -742,6 +699,7 @@ engine  : postgresql $DB_VERSION  port $DB_PORT  allow $DB_ALLOW
 run     : $RUN_ID   installer yc-pg-install $VER
 logs    : /var/log/yallacloud/ (deploy.log events.jsonl errors.log)"
 j=$(mktemp); chmod 600 "$j"; facts_json vm.deploy.started "deploy started $ENGINE $DB_VERSION" no > "$j" && yc_erp "$j"; rm -f "$j"
+yc_extra deploy started "" >/dev/null
 
 # ================= 2. base OS: time, locale, repos, updates, kernel
 step "2 os"

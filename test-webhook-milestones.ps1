@@ -62,10 +62,14 @@ T 'error: at most 300 characters'                     ((ConvertTo-YcMsError -Tex
 # --- body -------------------------------------------------------------------------------------
 $id = @{ vmId = '11111111-2222-3333-4444-555555555555'; hostname = 'WEB01'; ip = '93.177.125.10'; os = 'Windows Server 2022 Standard' }
 $b = New-YcMsBody -Area 'Acronis' -State 'FAILED' -Err 'exit 4' -Tag 'acronis-register payload 2.45.0' -Id $id -UtcNow ([datetime]::SpecifyKind([datetime]'2026-10-28T06:15:02', 'Utc'))
-T 'body: exactly the agreed 8 keys, in order'         ((@($b.Keys) -join ',') -eq 'type,vmId,hostname,ip,os,error,lastUpdated,extra') (@($b.Keys) -join ',')
+T 'body: the event head, then the agreed 8 keys, in order' ((@($b.Keys) -join ',') -eq 'deploymentId,event,stage,status,seq,time,vm,kit,kitVersion,detail,progress,type,vmId,hostname,ip,os,error,lastUpdated,extra') (@($b.Keys) -join ',')
+T 'body: head - no portal = deploymentId -, status failed, stage acronis' ($b.deploymentId -eq '-' -and $b.status -eq 'failed' -and $b.stage -eq 'acronis' -and $b.event -eq 'vm.acronis.failed')
+$bd = New-YcMsBody -Area 'salt' -State 'joined' -Err '' -Tag 't' -Id $id -DeployId 'YCD-20261104-000042' -Seq 5 -Detail 'JOINED x' -KitVersion '2.47.7'
+T 'body: head carries id, seq, detail, payload version' ($bd.deploymentId -eq 'YCD-20261104-000042' -and $bd.seq -eq 5 -and $bd.detail -eq 'JOINED x' -and $bd.kit -eq 'payload' -and $bd.kitVersion -eq '2.47.7' -and $bd.status -eq 'ok')
+T 'body: vm name / uuid / ip'                           ($bd.vm.name -eq 'web01' -and $bd.vm.uuid -eq $id.vmId -and $bd.vm.ip -eq $id.ip)
 T 'body: type is vm.<area>.<state>, lower case'       ($b.type -eq 'vm.acronis.failed')
 T 'body: lastUpdated is Dubai time, +04'              ($b.lastUpdated -eq '2026-10-28 10:15:02 +04') $b.lastUpdated
-T 'body: every value is a string'                     (@($b.Values | Where-Object { $_ -isnot [string] }).Count -eq 0)
+T 'body: the eight old values are strings'           (@('type','vmId','hostname','ip','os','error','lastUpdated','extra' | Where-Object { $b[$_] -isnot [string] }).Count -eq 0)
 T 'body: area/state cannot inject dots or spaces'     ((New-YcMsBody -Area 'a.b c' -State 'x.y' -Err '' -Tag '' -Id $id).type -eq 'vm.abc.xy')
 
 # --- areas, states, keywords --------------------------------------------------------------------
@@ -85,12 +89,19 @@ T 'keyword: failed / waiting / ok'                    ((Get-YcMsKeyword 'failed'
 $ln = Format-YcMsLine -Body $b -Sent 'extra:202,erp:200,ntfy:200'
 T 'journal line: fixed tags first'                    ($ln -like '2026-10-28 10:15:02 +04 `[YALLACLOUD`]`[YC-MILESTONE`]`[YC-FAILED`] type=vm.acronis.failed *') $ln
 T 'journal line: key=value fields'                    ($ln -match ' area=acronis state=failed host=WEB01 vmId=11111111-' -and $ln -match ' by="acronis-register payload 2.45.0" error="exit 4" sent=extra:202,erp:200,ntfy:200$') $ln
+T 'journal line: carries the deployment id and seq'   ($ln -match ' deployment=- seq=0 by=') $ln
 T 'ntfy: only what a human must act on, unless always' ((Test-YcMsNtfy 'failed') -and (Test-YcMsNtfy 'waiting') -and -not (Test-YcMsNtfy 'ok') -and (Test-YcMsNtfy 'completed' 'always') -and -not (Test-YcMsNtfy 'failed' 'never'))
 $n = New-YcMsNtfy -Body $b -Log 'C:\Scripts\acronis-register.log'
-T 'ntfy: title says result, what and where'           ($n.title -eq 'FAILED: Acronis backup agent - WEB01') $n.title
+T 'ntfy: title says result, what, where and the deployment' ($n.title -eq 'FAILED: Acronis backup agent - WEB01 | -') $n.title
 T 'ntfy: failed is priority 5'                        ($n.priority -eq '5')
-T 'ntfy: labelled lines, plain words first'           ($n.text -match '^RESULT   FAILED - action needed' -and $n.text -match "`nWHAT     Acronis backup agent" -and $n.text -match "`nWHY      exit 4" -and $n.text -match "`nLOG      C:\\Scripts\\acronis-register.log")
+T 'ntfy: deployment first, then labelled lines'       ($n.text -match '^deployment : -\nRESULT   FAILED - action needed' -and $n.text -match "`nWHAT     Acronis backup agent" -and $n.text -match "`nWHY      exit 4" -and $n.text -match "`nLOG      C:\\Scripts\\acronis-register.log")
 T 'ntfy: ok is priority 3'                            ((New-YcMsNtfy -Body (New-YcMsBody -Area 'adopt' -State 'completed' -Err '' -Tag '' -Id $id)).priority -eq '3')
+
+# --- 2.47.7: agents send one final status, only when it changed -----------------------------------
+T 'agent areas: salt glpi acronis wsus'                ((Test-YcAgentArea 'salt') -and (Test-YcAgentArea 'glpi') -and (Test-YcAgentArea 'acronis') -and (Test-YcAgentArea 'wsus') -and -not (Test-YcAgentArea 'sql'))
+T 'send: agents go to ntfy on a final result, in the agent format' ($block -match "if\(\`$agent -and \`$Ntfy -eq 'auto'\)\{ \`$mode = \`$\(if\(\`$final\)\{ 'always' \} else \{ 'never' \}\) \}" -and $block -match 'New-YcAgentNtfy -Area \$Area')
+T 'send: an unchanged agent result is journalled, not sent' ($block -match "Test-YcAgentChanged -Area \`$Area -State \`$State\)\)\{\s+Write-YcMsJournal -Body \`$b -Sent 'unchanged'\s+return")
+T 'send: a copy to the portal stage table'             ($block -match 'Send-YcMsReport -Json \$json')
 
 # --- adopt and pre-migration mappings -------------------------------------------------------------
 foreach ($pair in @(@($adopt, 'Get-AdoptPhaseHook'), @($prem, 'Get-PremigSlug'), @($prem, 'Get-PremigSectionState'))) {
@@ -137,7 +148,7 @@ T 'glpi-join is in the catalogue and has a .cmd'        ((Test-Path (Join-Path $
 T 'Stop-YcLog sends the run milestone, not on the unclean path' ($lib -match 'if\(-not \$Unclean\)\{ try\{ \[void\]\(Send-YcRunMilestone -Code \$Code\) \}catch\{\} \}')
 T 'Start-YcLog records the caller''s parameters'       ($lib -match '\$script:YcBoundNames = @\(\$ii\.BoundParameters\.Keys\)')
 T 'Exit-Yc keeps its message as the reason'             ($lib -match 'if\(\$Code -ne 0 -and \$Message\)\{ \$script:YcLastMessage = \$Message \}')
-T 'library version is 2.3.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.3\.0'")
+T 'library version is 2.4.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.4\.0'")
 # The call-stack capture, run for real: a script given -Report must be seen as read-only.
 $m = [regex]::Match($lib, '(?s)    \$script:YcBoundNames = @\(\)\r?\n    try\{.*?\n    \}catch\{\}')
 T 'capture code found' $m.Success

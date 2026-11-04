@@ -228,12 +228,17 @@ function ConvertTo-YcMsError{
     return $t
 }
 
-# Pure: the flat body. Area and state are reduced to [a-z0-9-] and [a-z].
+# Pure: the flat body - the event head (2.47.7) first, then the agreed eight keys.
+# Area and state are reduced to [a-z0-9-] and [a-z].
 function New-YcMsBody{
-    param([string]$Area,[string]$State,[string]$Err,[string]$Tag,[hashtable]$Id,[datetime]$UtcNow = [datetime]::UtcNow)
+    param([string]$Area,[string]$State,[string]$Err,[string]$Tag,[hashtable]$Id,[datetime]$UtcNow = [datetime]::UtcNow,
+          [string]$DeployId = '-',[int]$Seq = 0,[string]$Detail = $null,[string]$KitVersion = '')
     $a = ([string]$Area).ToLower() -replace '[^a-z0-9-]',''
     $s = ([string]$State).ToLower() -replace '[^a-z]',''
-    return [ordered]@{
+    $nm = $(if($Id.vmName){ [string]$Id.vmName } else { ([string]$Id.hostname).ToLower() })
+    $h = New-YcEventHead -DeployId $DeployId -Type ('vm.' + $a + '.' + $s) -Seq $Seq -VmName $nm -VmUuid ([string]$Id.vmId) -Ip ([string]$Id.ip) `
+                         -Kit 'payload' -KitVersion $KitVersion -Detail $(if($null -ne $Detail){ $Detail } else { $Err }) -UtcNow $UtcNow
+    return Join-YcEventHead -Head $h -Body ([ordered]@{
         type        = ('vm.' + $a + '.' + $s)
         vmId        = [string]$Id.vmId
         hostname    = [string]$Id.hostname
@@ -242,7 +247,7 @@ function New-YcMsBody{
         error       = [string]$Err
         lastUpdated = ($UtcNow.AddHours(4).ToString('yyyy-MM-dd HH:mm:ss') + ' +04')
         extra       = [string]$Tag
-    }
+    })
 }
 
 # Pure: which area a command reports as; '' = this command does not report.
@@ -357,6 +362,7 @@ function Format-YcMsLine{
     $q = { param($v) '"' + ([string]$v -replace '"','') + '"' }
     return ($Body.lastUpdated + ' [YALLACLOUD][YC-MILESTONE][' + (Get-YcMsKeyword $st) + '] type=' + $Body.type +
             ' area=' + $area + ' state=' + $st + ' host=' + $Body.hostname + ' vmId=' + $Body.vmId + ' ip=' + $Body.ip +
+            $(if($Body.Contains('deploymentId')){ ' deployment=' + $Body.deploymentId + ' seq=' + $Body.seq } else { '' }) +
             ' by=' + (& $q $Body.extra) + ' error=' + (& $q $Body.error) + ' sent=' + $(if($Sent){ $Sent } else { 'none' }))
 }
 
@@ -436,7 +442,9 @@ function New-YcMsNtfy{
     $p = '3'; $tg = 'white_check_mark'
     if($st -eq 'failed'){ $p = '5'; $tg = 'rotating_light' }
     elseif(@('waiting','waitforhuman') -contains $st){ $p = '4'; $tg = 'warning' }
+    $did = $(if($Body.Contains('deploymentId')){ [string]$Body.deploymentId } else { '-' })
     $lines = @(
+        ('deployment : ' + $did),
         ('RESULT   ' + (Get-YcMsStateWords $st)),
         ('WHAT     ' + $what),
         ('MACHINE  ' + $Body.hostname + '  ' + $Body.ip),
@@ -449,13 +457,13 @@ function New-YcMsNtfy{
     $lines += ('EVENT    ' + $Body.type)
     if($Log){ $lines += ('LOG      ' + $Log) }
     if($st -eq 'failed'){ $lines += 'NEXT     read the LOG line above on the VM; every result is also in C:\ProgramData\YallaCloud\logs\yc-milestones.log' }
-    return @{ title = ((Get-YcMsStateWords $st).Split(' ')[0] + ': ' + $what + ' - ' + $Body.hostname); priority = $p; tags = $tg; text = ($lines -join "`n") }
+    return @{ title = ((Get-YcMsStateWords $st).Split(' ')[0] + ': ' + $what + ' - ' + $Body.hostname + ' | ' + $did); priority = $p; tags = $tg; text = ($lines -join "`n") }
 }
 
 function Send-YcMsNtfy{
-    param([string]$Url,$Body,[string]$Log = '',[string]$Token = '')
+    param([string]$Url,$Body,[string]$Log = '',[string]$Token = '',[hashtable]$Message = $null)
     try{
-        $n = New-YcMsNtfy -Body $Body -Log $Log
+        $n = $(if($Message){ $Message } else { New-YcMsNtfy -Body $Body -Log $Log })
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $h = @{ Title = $n.title; Priority = $n.priority; Tags = $n.tags }
         if($Token){ $h['Authorization'] = 'Bearer ' + $Token }
@@ -471,19 +479,33 @@ function Send-YcMsNtfy{
 
 # Send-YcMilestone -Area salt -State joined [-Err 'text'] [-Tag 'script version']
 #   The one sender. Safe to call from anywhere: no settings = no-op, never throws.
+#   2.47.7: every body starts with the event head (deploymentId, seq ...); an agent area (salt,
+#   glpi, acronis, wsus) sends ONE final status on all channels, ntfy included, only when the result
+#   changed; on a portal-built VM a copy goes to the portal's stage table.
 function Send-YcMilestone{
     param([string]$Area,[string]$State,[string]$Err = '',[string]$Tag = '',[ValidateSet('auto','always','never')][string]$Ntfy = 'auto',[string]$LogPath = '')
     try{
         if(-not $Area -or -not $State){ return }
         $c = Get-YcMsConfig
-        $toExtra = [bool]($c.extraUrl -and $c.extraSecret)
-        $toErp   = [bool]($c.erpUrl -and ($c.erpSecret -or $c.erpToken))
-        $toNtfy  = [bool]($c.ntfyUrl -and (Test-YcMsNtfy -State $State -Mode $Ntfy))
+        $agent = Test-YcAgentArea $Area
+        $final = (@('ok','failed','waiting') -contains (Get-YcHeadStatus $State))
         if(-not $Tag){ $Tag = Get-YcMsTag }
         if(-not $LogPath -and $script:YcLogFile){ $LogPath = [string]$script:YcLogFile }
         $e = ConvertTo-YcMsError -Text $Err -Secrets @($c.erpSecret,$c.erpToken,$c.extraSecret,$c.ntfyToken,$env:GLPI_AGENT_PASSWORD)
-        $b = New-YcMsBody -Area $Area -State $State -Err $e -Tag $Tag -Id (Get-YcMsIdentity)
-        $json = ([pscustomobject]$b) | ConvertTo-Json -Compress
+        $d = $e
+        if($agent -and $Area -eq 'acronis'){ $d = ConvertTo-YcMsError -Text ((@($e, (Get-YcAcronisDetail)) | Where-Object { $_ }) -join '; ') -Secrets @($c.erpSecret,$c.extraSecret,$c.ntfyToken) }
+        $did = Get-YcDeployId
+        $kv = ''; if($Tag -match 'payload (\S+)'){ $kv = $Matches[1] }
+        $b = New-YcMsBody -Area $Area -State $State -Err $(if($agent){ $d } else { $e }) -Tag $Tag -Id (Get-YcMsIdentity) -DeployId $did -Seq (Get-YcNextSeq) -Detail $d -KitVersion $kv
+        if($agent -and $final -and -not (Test-YcAgentChanged -Area $Area -State $State)){
+            Write-YcMsJournal -Body $b -Sent 'unchanged'
+            return
+        }
+        $toExtra = [bool]($c.extraUrl -and $c.extraSecret)
+        $toErp   = [bool]($c.erpUrl -and ($c.erpSecret -or $c.erpToken))
+        $mode = $Ntfy; if($agent -and $Ntfy -eq 'auto'){ $mode = $(if($final){ 'always' } else { 'never' }) }
+        $toNtfy  = [bool]($c.ntfyUrl -and (Test-YcMsNtfy -State $State -Mode $mode))
+        $json = ([pscustomobject]$b) | ConvertTo-Json -Compress -Depth 4
         $res = @()
         if($toExtra){ $res += ('extra ' + (Send-YcMsPost -Url $c.extraUrl -Headers @{ 'X-Webhook-Secret' = $c.extraSecret } -Json $json)) }
         if($toErp){
@@ -492,7 +514,12 @@ function Send-YcMilestone{
             if($c.erpToken){ $h['Authorization'] = 'Bearer ' + $c.erpToken }
             $res += ('erp ' + (Send-YcMsPost -Url $c.erpUrl -Headers $h -Json $json))
         }
-        if($toNtfy){ $res += ('ntfy ' + (Send-YcMsNtfy -Url $c.ntfyUrl -Body $b -Log $LogPath -Token $c.ntfyToken)) }
+        $rp = Send-YcMsReport -Json $json; if($rp){ $res += ('portal ' + $rp) }
+        if($toNtfy){
+            $msg = $null
+            if($agent){ $msg = New-YcAgentNtfy -Area $Area -State $State -Detail $d -DeployId $did -Host_ $b.hostname -VmId $b.vmId -Ip $b.ip -When (Get-YcAgentWhen) -Log $LogPath -By $Tag }
+            $res += ('ntfy ' + (Send-YcMsNtfy -Url $c.ntfyUrl -Body $b -Log $LogPath -Token $c.ntfyToken -Message $msg))
+        }
         Write-YcMsJournal -Body $b -Sent ((@($res) | ForEach-Object { ($_ -replace 'no answer','noanswer') -replace ' ',':' }) -join ',')
     }catch{}
 }
@@ -545,6 +572,219 @@ function Save-YcMsConfig{
         & icacls.exe $script:YcMsCfgFile '/inheritance:r' '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' *>$null
         return ('saved to ' + $script:YcMsCfgFile + ': ' + ((@($given.Keys) | Sort-Object) -join ', '))
     }catch{ return ('not saved: ' + $_.Exception.Message) }
+}
+
+# ------------------------------------------------------------------------------------
+# DEPLOYMENT ID, EVENT HEAD AND AGENT STATUS (lib 2.4.0, payload 2.47.7)
+#   One ID per VM deployment in EVERY message (owner, 2026-11-04): the cloud-init portal makes
+#   YCD-YYYYMMDD-NNNNNN at render and the win-builder (v2.18.26) writes it to yc-build.json as
+#   DeployId. Every event starts with the same head, the old keys follow unchanged:
+#     deploymentId, event, stage, status (started|running|ok|failed|waiting), seq, time (UTC),
+#     vm {name, uuid, ip}, kit, kitVersion, detail, progress {step, of, name} | null
+#   seq = one counter per deployment, in the SAME file the builder's yc-notify.ps1 counts in.
+#   ntfy: title ends with " | <id>", the first body line is "deployment : <id>".
+#   Agents (salt, glpi, acronis, wsus): ONE final status on ERP + Tech + ntfy, with the reason,
+#   and only when the result changed - a retry with the same result sends nothing anywhere.
+#   Built without the portal: deploymentId is "-".
+# ------------------------------------------------------------------------------------
+$script:YcBuildFile   = 'C:\ProgramData\YallaCloud\sqltemplate\yc-build.json'
+$script:YcSeqFile     = 'C:\ProgramData\YallaCloud\sqltemplate\yc-event-seq.txt'
+$script:YcAgentDir    = 'C:\ProgramData\YallaCloud\agents'
+$script:YcAgentAreas  = @('salt','glpi','acronis','wsus')
+
+function Get-YcDeployId{
+    param([string]$File = $script:YcBuildFile)
+    try{
+        if(Test-Path -LiteralPath $File){
+            $d = [string](((Get-Content -LiteralPath $File -Raw) | ConvertFrom-Json).DeployId)
+            if($d -match '^YCD-[A-Za-z0-9-]{1,40}$'){ return $d }
+        }
+    }catch{}
+    return '-'
+}
+
+# The next number in the deployment's event sequence. A machine-wide mutex, because the builder
+# tasks (Salt, Acronis, GLPI) and the build itself can report at the same moment.
+function Get-YcNextSeq{
+    param([string]$File = $script:YcSeqFile)
+    if(-not (Test-Path -LiteralPath (Split-Path -Parent $File))){ $File = Join-Path (Split-Path -Parent (Split-Path -Parent $File)) 'yc-event-seq.txt' }
+    $m = $null; $own = $false
+    try{ $m = New-Object System.Threading.Mutex($false, 'Global\YcEventSeq'); $own = $m.WaitOne(5000) }catch [System.Threading.AbandonedMutexException]{ $own = $true }catch{}
+    try{
+        $n = 0
+        try{ $n = [int]([string](Get-Content -LiteralPath $File -ErrorAction Stop | Select-Object -First 1)).Trim() }catch{}
+        $n++
+        Set-Content -LiteralPath $File -Value $n -Encoding ascii -ErrorAction Stop
+        return $n
+    }catch{ return 0 }
+    finally{ if($m){ if($own){ try{ $m.ReleaseMutex() }catch{} }; $m.Dispose() } }
+}
+
+# Pure: the head status for the last word of an event type.
+function Get-YcHeadStatus{
+    param([string]$State)
+    $s = ([string]$State).ToLower()
+    if(@('ok','joined','registered','completed','done','backtogreen','configured') -contains $s){ return 'ok' }
+    if(@('failed','error','cancelled') -contains $s){ return 'failed' }
+    if(@('waiting','waitforhuman') -contains $s){ return 'waiting' }
+    if(@('started','run','start') -contains $s){ return 'started' }
+    return 'running'
+}
+
+# Pure: progress from a step string. "3 sql install" -> step 3; the builder's "NET+ SYNC+ SQL+"
+# -> step 3, name SQL+ (the builder has no fixed step count, so "of" stays null).
+function Get-YcProgress{
+    param([string]$Step)
+    $t = @(([string]$Step).Trim() -split '\s+' | Where-Object { $_ })
+    if(-not $t.Count){ return $null }
+    if($t[0] -match '^\d+$'){ return [ordered]@{ step = [int]$t[0]; of = $null; name = ((@($t) | Select-Object -Skip 1) -join ' ') } }
+    return [ordered]@{ step = $t.Count; of = $null; name = [string]$t[-1] }
+}
+
+# Pure: the event head, first in every ERP and Tech event.
+function New-YcEventHead{
+    param([string]$DeployId,[string]$Type,[int]$Seq,[string]$VmName,[string]$VmUuid,[string]$Ip,
+          [string]$Kit,[string]$KitVersion,[string]$Detail = '',[string]$Step = '',[datetime]$UtcNow = [datetime]::UtcNow)
+    $p = ([string]$Type).Split('.')
+    $d = (([string]$Detail) -replace '\s+',' ').Trim(); if($d.Length -gt 300){ $d = $d.Substring(0,297) + '...' }
+    return [ordered]@{
+        deploymentId = $(if($DeployId){ $DeployId } else { '-' })
+        event        = [string]$Type
+        stage        = $(if($p.Count -ge 3){ $p[1] } else { [string]$Type })
+        status       = (Get-YcHeadStatus $p[-1])
+        seq          = $Seq
+        time         = $UtcNow.ToString('yyyy-MM-dd') + 'T' + $UtcNow.ToString('HH:mm:ss') + 'Z'
+        vm           = [ordered]@{ name = [string]$VmName; uuid = [string]$VmUuid; ip = [string]$Ip }
+        kit          = [string]$Kit
+        kitVersion   = [string]$KitVersion
+        detail       = $d
+        progress     = (Get-YcProgress $Step)
+    }
+}
+
+# Pure: head first, then every key of the body that the head does not already carry.
+function Join-YcEventHead{
+    param($Head,$Body)
+    $o = [ordered]@{}
+    foreach($k in @($Head.Keys)){ $o[$k] = $Head[$k] }
+    foreach($k in @($Body.Keys)){ if(-not $o.Contains($k)){ $o[$k] = $Body[$k] } }
+    return $o
+}
+
+function Test-YcAgentArea{
+    param([string]$Area)
+    return ($script:YcAgentAreas -contains ([string]$Area).ToLower())
+}
+
+# Was this agent result already reported? The result is the head status (ok / failed / waiting),
+# not the wording, so a retry that fails again, or a second reporter (builder task + join.ps1)
+# with the same answer, sends nothing. Records the new result unless -Peek.
+function Test-YcAgentChanged{
+    param([string]$Area,[string]$State,[string]$Dir = $script:YcAgentDir,[switch]$Peek)
+    $r = Get-YcHeadStatus $State
+    if(@('ok','failed','waiting') -notcontains $r){ return $true }
+    $f = Join-Path $Dir (([string]$Area).ToLower() + '.sent')
+    $prev = ''
+    try{ if(Test-Path -LiteralPath $f){ $prev = ([string](Get-Content -LiteralPath $f -Raw)).Trim() } }catch{}
+    if($prev -eq $r){ return $false }
+    if(-not $Peek){
+        try{
+            if(-not (Test-Path -LiteralPath $Dir)){ New-Item -ItemType Directory -Path $Dir -Force | Out-Null }
+            Set-Content -LiteralPath $f -Value $r -Encoding ascii
+        }catch{}
+    }
+    return $true
+}
+
+# During or after the build: the builder writes yc-build.completed at its end.
+function Get-YcAgentWhen{
+    param([string]$BuildFile = $script:YcBuildFile)
+    if(-not (Test-Path -LiteralPath $BuildFile)){ return 'outside a build (day-2 / adopt)' }
+    if(Test-Path -LiteralPath (Join-Path (Split-Path -Parent $BuildFile) 'yc-build.completed')){ return 'after the build (separate message)' }
+    return 'during the build (also in OK BUILD)'
+}
+
+# Acronis: the data-centre address the agent registered to (only <dc>-cloud.acronis.com counts).
+function Get-YcAcronisRegistration{
+    foreach($k in @('HKLM:\SOFTWARE\Acronis','HKLM:\SOFTWARE\WOW6432Node\Acronis')){
+        if(-not (Test-Path $k)){ continue }
+        foreach($key in @(Get-Item $k) + @(Get-ChildItem $k -Recurse -ErrorAction SilentlyContinue)){
+            foreach($v in $key.GetValueNames()){
+                $d = [string]$key.GetValue($v)
+                if($d -match '(?<u>https?://[a-z]{2,4}[0-9]{0,3}-cloud\.acronis\.com)'){ return $Matches.u }
+            }
+        }
+    }
+    return ''
+}
+
+# Acronis reason: the last ERROR line of the LAST acronis-setup run (WARN if there is none), where
+# it registered, and the Managed Machine Service state. Never a token: the kit masks it in its log.
+function Get-YcAcronisDetail{
+    param([string]$LogFile = 'C:\ProgramData\YallaCloud\acronis-setup.log',[string]$RegisteredTo = $null,[string]$Service = $null)
+    $p = @()
+    try{
+        if(Test-Path -LiteralPath $LogFile){
+            $l = @(Get-Content -LiteralPath $LogFile -Tail 500)
+            $s = 0
+            for($i = $l.Count - 1; $i -ge 0; $i--){ if($l[$i] -match '\] acronis-setup v\d'){ $s = $i; break } }
+            $run = @($l[$s..($l.Count - 1)])
+            $e = @($run | Where-Object { $_ -match '\[ERROR\]' }) | Select-Object -Last 1
+            if(-not $e){ $e = @($run | Where-Object { $_ -match '\[(WARN|HUMAN)\]' }) | Select-Object -Last 1 }
+            if($e){ $p += ('last error: ' + ((([string]$e) -replace '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[\w+\] ','').Trim())) }
+        }
+    }catch{}
+    if($null -eq $RegisteredTo){ $RegisteredTo = Get-YcAcronisRegistration }
+    $p += $(if($RegisteredTo){ 'registered to ' + $RegisteredTo } else { 'not registered to a data centre' })
+    if($null -eq $Service){ $sv = Get-Service -Name 'MMS' -ErrorAction SilentlyContinue; $Service = $(if($sv){ [string]$sv.Status } else { 'not installed' }) }
+    $p += ('service Acronis Managed Machine Service ' + $Service)
+    return ($p -join '; ')
+}
+
+# Pure: words for an agent state on a phone.
+function Get-YcAgentWord{
+    param([string]$State)
+    switch(([string]$State).ToLower()){
+        'ok'           { return 'OK' }
+        'joined'       { return 'JOINED' }
+        'registered'   { return 'REGISTERED' }
+        'completed'    { return 'OK' }
+        'backtogreen'  { return 'BACK TO GREEN' }
+        'failed'       { return 'FAILED' }
+        'waiting'      { return 'WAITING' }
+        'waitforhuman' { return 'WAIT FOR HUMAN' }
+    }
+    return ([string]$State).ToUpper()
+}
+
+# Pure: the ntfy message for an agent result - the same lines as linux-base 1.8.2 yc_agent.
+function New-YcAgentNtfy{
+    param([string]$Area,[string]$State,[string]$Detail,[string]$DeployId,[string]$Host_,[string]$VmId,[string]$Ip,[string]$When,[string]$Log = '',[string]$By = '')
+    $hs = Get-YcHeadStatus $State
+    $p = '3'; $tg = 'white_check_mark'
+    if($hs -eq 'failed'){ $p = '4'; $tg = 'x' }
+    elseif(([string]$State).ToLower() -eq 'waitforhuman'){ $p = '4'; $tg = 'raising_hand' }
+    elseif($hs -eq 'waiting'){ $p = '3'; $tg = 'hourglass' }
+    $a = ([string]$Area).ToLower()
+    $lines = @(('deployment : ' + $DeployId), ($a.PadRight(9) + ': ' + ([string]$State).ToLower()))
+    if($Detail){ $lines += ('detail   : ' + $Detail) }
+    $lines += ('when     : ' + $When)
+    $lines += ('vm       : ' + $VmId + '  ip ' + $Ip)
+    if($Log){ $lines += ('log      : ' + $Log) }
+    if($By){ $lines += ('by       : ' + $By) }
+    return @{ title = ($a.ToUpper() + ' ' + (Get-YcAgentWord $State) + ' Windows - ' + $Host_ + ' | ' + $DeployId); priority = $p; tags = ($tg + ',' + $a); text = ($lines -join "`n") }
+}
+
+# Copy of a flat event to the cloud-init portal, for its stage table (GET /api/v1/deployments/<id>).
+# Only on a portal-built VM: the builder writes yc-report.json {url,key}. One try, 10 s, never throws.
+function Send-YcMsReport{
+    param([string]$Json,[string]$File = 'C:\ProgramData\YallaCloud\sqltemplate\yc-report.json')
+    try{
+        if(-not (Test-Path -LiteralPath $File)){ return '' }
+        $rj = (Get-Content -LiteralPath $File -Raw) | ConvertFrom-Json
+        if(-not ([string]$rj.url -match '^https://\S+$') -or -not [string]$rj.key){ return '' }
+        return (Send-YcMsPost -Url ([string]$rj.url) -Headers @{ 'X-YC-Report-Key' = [string]$rj.key; 'X-YC-Channel' = 'win' } -Json $Json)
+    }catch{ return 'no answer' }
 }
 # --- end of the copied block ---------------------------------------------------------------------
 

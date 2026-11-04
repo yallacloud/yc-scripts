@@ -42,6 +42,18 @@ foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
   # as the must-exist list. Definitions only - nothing in the script body runs.
   if ($f.Parent.Parent -eq $ast) { $src += $f.Extent.Text; $found += $f.Name }
 }
+# 2.47.7: the -SelfCheck block also calls house functions from _yc-lib.ps1 (event head, deployment
+# ID, agent status). Load the library's top-level functions too when it is beside the script.
+$libf = Join-Path (Split-Path -Parent $Script) '_yc-lib.ps1'
+if (Test-Path -LiteralPath $libf) {
+  $lerr = $null; $last = [System.Management.Automation.Language.Parser]::ParseFile($libf, [ref]$null, [ref]$lerr)
+  $libcut = $last.Extent.Text.IndexOf('# DEPLOYMENT ID, EVENT HEAD AND AGENT STATUS'); if ($libcut -lt 0) { $libcut = [int]::MaxValue }
+  foreach ($f in $last.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+    # only the 2.47.7 section: the rest of the library (Exit-Yc, the logger) would replace the shims below
+    if ($f.Parent.Parent -eq $last -and $f.Extent.StartOffset -gt $libcut -and $found -notcontains $f.Name) { $src = @($f.Extent.Text) + $src }
+  }
+  foreach ($v in $last.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -match '^\$script:Yc(BuildFile|SeqFile|AgentDir|AgentAreas)$' }, $false)) { $src = @($v.Extent.Text) + $src }
+}
 $missing = @($need | Where-Object { $found -notcontains $_ })
 if ($missing.Count) { throw ('Yc-Event.ps1 no longer defines: ' + ($missing -join ', ')) }
 

@@ -497,12 +497,13 @@ function Send-YcMilestone{
         $did = Get-YcDeployId
         $kv = ''; if($Tag -match 'payload (\S+)'){ $kv = $Matches[1] }
         $b = New-YcMsBody -Area $Area -State $State -Err $(if($agent){ $d } else { $e }) -Tag $Tag -Id (Get-YcMsIdentity) -DeployId $did -Seq (Get-YcNextSeq) -Detail $d -KitVersion $kv
-        if($agent -and $final -and -not (Test-YcAgentChanged -Area $Area -State $State)){
+        $toExtra = [bool]($c.extraUrl -and $c.extraSecret)
+        $toErp   = [bool]($c.erpUrl -and ($c.erpSecret -or $c.erpToken))
+        # an agent result counts as reported only when there is somewhere to report it to
+        if($agent -and $final -and ($toExtra -or $toErp -or $c.ntfyUrl) -and -not (Test-YcAgentChanged -Area $Area -State $State)){
             Write-YcMsJournal -Body $b -Sent 'unchanged'
             return
         }
-        $toExtra = [bool]($c.extraUrl -and $c.extraSecret)
-        $toErp   = [bool]($c.erpUrl -and ($c.erpSecret -or $c.erpToken))
         $mode = $Ntfy; if($agent -and $Ntfy -eq 'auto'){ $mode = $(if($final){ 'always' } else { 'never' }) }
         $toNtfy  = [bool]($c.ntfyUrl -and (Test-YcMsNtfy -State $State -Mode $mode))
         $json = ([pscustomobject]$b) | ConvertTo-Json -Compress -Depth 4
@@ -721,7 +722,8 @@ function Get-YcAcronisRegistration{
 # Acronis reason: the last ERROR line of the LAST acronis-setup run (WARN if there is none), where
 # it registered, and the Managed Machine Service state. Never a token: the kit masks it in its log.
 function Get-YcAcronisDetail{
-    param([string]$LogFile = 'C:\ProgramData\YallaCloud\acronis-setup.log',[string]$RegisteredTo = $null,[string]$Service = $null)
+    # -RegisteredTo / -Service are for tests; NOT [string]$x = $null - a [string] parameter turns $null into ''
+    param([string]$LogFile = 'C:\ProgramData\YallaCloud\acronis-setup.log',$RegisteredTo = $null,$Service = $null)
     $p = @()
     try{
         if(Test-Path -LiteralPath $LogFile){
@@ -736,7 +738,7 @@ function Get-YcAcronisDetail{
     }catch{}
     if($null -eq $RegisteredTo){ $RegisteredTo = Get-YcAcronisRegistration }
     $p += $(if($RegisteredTo){ 'registered to ' + $RegisteredTo } else { 'not registered to a data centre' })
-    if($null -eq $Service){ $sv = Get-Service -Name 'MMS' -ErrorAction SilentlyContinue; $Service = $(if($sv){ [string]$sv.Status } else { 'not installed' }) }
+    if($null -eq $Service){ $sv = $null; try{ $sv = Get-Service -Name 'MMS' -ErrorAction SilentlyContinue }catch{}; $Service = $(if($sv){ [string]$sv.Status } else { 'not installed' }) }
     $p += ('service Acronis Managed Machine Service ' + $Service)
     return ($p -join '; ')
 }

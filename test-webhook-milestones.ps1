@@ -146,9 +146,9 @@ T 'glpi-join is in the catalogue and has a .cmd'        ((Test-Path (Join-Path $
 
 # --- library hooks ------------------------------------------------------------------------------
 T 'Stop-YcLog sends the run milestone, not on the unclean path' ($lib -match 'if\(-not \$Unclean\)\{ try\{ \[void\]\(Send-YcRunMilestone -Code \$Code\) \}catch\{\} \}')
-T 'Start-YcLog records the caller''s parameters'       ($lib -match '\$script:YcBoundNames = @\(\$ii\.BoundParameters\.Keys\)')
+T 'Start-YcLog records the caller''s SWITCHES (2.5.1)'  ($lib -match '\$script:YcBoundNames = @\(\$bp\.Keys \| Where-Object \{ \$bp\[\$_\] -is \[System\.Management\.Automation\.SwitchParameter\]')
 T 'Exit-Yc keeps its message as the reason'             ($lib -match 'if\(\$Code -ne 0 -and \$Message\)\{ \$script:YcLastMessage = \$Message \}')
-T 'library version is 2.5.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.5\.0'")
+T 'library version is 2.5.1'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.5\.1'")
 # --- 2.5.0 (payload 2.47.9): reasons, waiting, last result, safe journal, deployment link ------------
 T 'Write-YcLog keeps the FIRST error of the run (P1)'   ($lib -match 'if\(-not \$script:YcFirstError\)\{ \$script:YcFirstError = \$safe \}')
 T 'Start-YcLog resets the first error'                  ($lib -match "\`$script:YcFirstError  = ''")
@@ -198,9 +198,11 @@ if ($m.Success) {
   $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ycwh-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $tmp | Out-Null
   Set-Content -LiteralPath (Join-Path $tmp '_yc-lib.ps1') -Value ("function Cap{`n" + $m.Value + "`n return ,`$script:YcBoundNames }")
-  Set-Content -LiteralPath (Join-Path $tmp 'cmd.ps1') -Value "param([switch]`$Report,[string]`$Region)`n. (Join-Path `$PSScriptRoot '_yc-lib.ps1')`n(Cap) -join ','"
+  Set-Content -LiteralPath (Join-Path $tmp 'cmd.ps1') -Value "param([switch]`$Report,[string]`$Region,[string]`$Version)`n. (Join-Path `$PSScriptRoot '_yc-lib.ps1')`n(Cap) -join ','"
   $got = & (Join-Path $tmp 'cmd.ps1') -Report -Region AE
-  T 'capture sees the calling script''s parameters'   ((@($got -split ',') | Sort-Object) -join ',' -eq 'Region,Report') ([string]$got)
+  T 'capture sees the calling script''s switches'     ([string]$got -eq 'Report') ([string]$got)
+  $got = & (Join-Path $tmp 'cmd.ps1') -Version 2019
+  T 'a -Version VALUE is not a read-only run (install-sql -Version 2019)' ([string]$got -eq '') ([string]$got)
   Remove-Item -LiteralPath $tmp -Recurse -Force
 }
 

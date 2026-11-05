@@ -437,7 +437,10 @@ function Get-WinState {
   elseif($desc -match 'TIMEBASED|EVAL'){ $chan='Evaluation (time-based)' }
   elseif($desc -match 'RETAIL'){ $chan='Retail' }
   elseif($desc -match 'OEM'){ $chan='OEM' }
-  $isEval = ("$cur" -match 'Eval') -or ($os.Caption -match 'Evaluation') -or ($desc -match 'EVAL|TIMEBASED')
+  # 2.47.9 (P10): the DISM edition is the truth once it is known. Win32_OperatingSystem.Caption keeps
+  # "Evaluation" after an edition change, so a converted ServerStandard on MAK read eval=True.
+  $isEval = $(if ("$cur") { ("$cur" -match 'Eval') -or ($desc -match 'EVAL|TIMEBASED') }
+              else { ($os.Caption -match 'Evaluation') -or ($desc -match 'EVAL|TIMEBASED') })
   [pscustomobject]@{
     OS=$os.Caption; Version=$os.Version; Build=$os.BuildNumber; Edition=$cur; Evaluation=$isEval;
     LicenseStatus=$(if($lic){$st[[int]$lic.LicenseStatus]}else{'Unknown'});
@@ -598,6 +601,8 @@ if("$cur" -match 'Eval'){
   Show-WinState 'AFTER'
   Maybe-Glpi
   Write-YcLog 'Not activated yet by design - reboot required. Exiting 3.' 'WARN'
+  # P8: exit 3 is WAITING (vm.license.waiting), and this is its reason
+  $script:YcLastMessage = ('edition changed to ' + $Edition + ', reboot then activation')
   Stop-YcLog 3; exit 3
 }
 

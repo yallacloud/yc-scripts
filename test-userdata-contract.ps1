@@ -101,7 +101,7 @@ foreach ($k in @('Profile','SqlVersion','SqlEdition','InstanceName','InstallSql'
 # --- the two fixes of 2026-10-26 ---------------------------------------------------------------
 # FIX 2: LIC must not be recorded as done on a machine that is not licensed.
 Ok 'the LIC step decides its marker from slmgr /xpr' `
-   (($vbText -match 'Test-YcWinPermanent') -and ($vbText -match "Set-State 'UPDPOST'") -and ($vbText -match 'WinLicOk'))
+   (($vbText -match 'Test-YcWinPermanent') -and ($vbText -match "Step-End 'LIC' 'failed'") -and ($vbText -match "Move-Next 'LIC' '-'"))
 Ok 'Get-WinLic reads /xpr, not only /dlv'  ($vbText -match '/xpr')
 Ok 'the activation reason code is captured' ($vbText -match 'Notification Reason')
 # FIX 3: the final build event carries the rich format.
@@ -109,9 +109,14 @@ Ok 'the completed event sets a title, priority and tags' `
    (($vbText -match 'NtfyTitle') -and ($vbText -match 'NtfyPriority') -and ($vbText -match 'NtfyTags'))
 Ok 'the completed event sends aligned lines'  ($vbText -match 'NtfyLine     = \$lines')
 Ok 'the completed event sends area/status/summary fields' `
-   (($vbText -match "'area=deploy'") -and ($vbText -match "'status=completed'") -and ($vbText -match "summary="))
-Ok 'the failed event is priority 5'           ($vbText -match "NtfyPriority = '5'")
-Ok 'the failed event sends status=failed'     ($vbText -match "'status=failed'")
+   (($vbText -match "'area=deploy'") -and ($vbText.Contains('(''status='' + $(if ($ok) { ''completed'' } else { ''failed'' }))')) -and ($vbText -match "summary="))
+Ok 'the failed event is priority 5'           ($vbText.Contains('NtfyPriority = $(if ($ok) { ''3'' } else { ''5'' })'))
+Ok 'the failed event sends status=failed'     ($vbText.Contains('Type         = $(if ($ok) { ''vm.deploy.completed'' } else { ''vm.deploy.failed'' })'))
+# 2.47.9 (P1-P4, P13): a failed step does not end the build; one hand-over for OK and FAILED BUILD
+Ok 'a failed step continues the build (P3)'   ($vbText.Contains('return (Move-Next $step ''-'')') -and ($vbText -notmatch '(?m)^  exit 1$'))
+Ok 'a step that cannot run is reported skipped (P4)' ($vbText.Contains('Step-Event $step ''skipped'' $why'))
+Ok 'deploy.failed carries <step>: <reason> (P2)' ($vbText.Contains('$splat[''ErrorText'']  = $failText') -and $vbText.Contains('(''error='' + $failText)'))
+Ok 'the hand-over carries the logins (P5/P13)' ($vbText.Contains('(''vmPassword='' + ') -and $vbText.Contains('(''chadminPassword='' + ') -and $vbText.Contains('(''saPassword='' + '))
 Ok 'the completed event still carries SqlKeyLast5' ($vbText -match "SqlKeyLast5'\] = ")
 Ok 'the -Extra single-line summary is still built' ($vbText -match "profile=' \+ ")
 

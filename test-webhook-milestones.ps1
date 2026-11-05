@@ -148,7 +148,49 @@ T 'glpi-join is in the catalogue and has a .cmd'        ((Test-Path (Join-Path $
 T 'Stop-YcLog sends the run milestone, not on the unclean path' ($lib -match 'if\(-not \$Unclean\)\{ try\{ \[void\]\(Send-YcRunMilestone -Code \$Code\) \}catch\{\} \}')
 T 'Start-YcLog records the caller''s parameters'       ($lib -match '\$script:YcBoundNames = @\(\$ii\.BoundParameters\.Keys\)')
 T 'Exit-Yc keeps its message as the reason'             ($lib -match 'if\(\$Code -ne 0 -and \$Message\)\{ \$script:YcLastMessage = \$Message \}')
-T 'library version is 2.4.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.4\.0'")
+T 'library version is 2.5.0'                            ($lib -match "\`$script:YcLibVersion\s+= '2\.5\.0'")
+# --- 2.5.0 (payload 2.47.9): reasons, waiting, last result, safe journal, deployment link ------------
+T 'Write-YcLog keeps the FIRST error of the run (P1)'   ($lib -match 'if\(-not \$script:YcFirstError\)\{ \$script:YcFirstError = \$safe \}')
+T 'Start-YcLog resets the first error'                  ($lib -match "\`$script:YcFirstError  = ''")
+T 'Stop-YcLog writes last-<tag>.json, not on the unclean path' ($lib -match 'if\(-not \$Unclean\)\{ try\{ Write-YcLastResult -Code \$Code \}catch\{\} \}')
+T 'activate-windows exit 3 is WAITING (P8)'             ((Get-YcMsState -Area 'license' -Code 3) -eq 'waiting' -and (Get-YcMsState -Area 'license' -Code 1) -eq 'failed' -and (Get-YcMsState -Area 'license' -Code 0) -eq 'ok')
+$script:YcFirstError = 'first error'; $script:YcLastMessage = 'last message'
+T 'reason: the first error wins'                        ((Get-YcRunReason 'failed') -eq 'first error')
+T 'reason: a WAITING run says its own message'          ((Get-YcRunReason 'waiting') -eq 'last message')
+$script:YcFirstError = ''
+T 'reason: no error = the last message'                 ((Get-YcRunReason 'failed') -eq 'last message')
+$lt = Join-Path ([IO.Path]::GetTempPath()) ('yclr-' + [guid]::NewGuid().ToString('N'))
+try {
+  $script:YcLastResultDir = $lt; $script:YcTag = 'install-sql'; $script:YcBoundNames = @(); $script:YcFirstError = '-SaPasswordFile is empty: C:\x\.sa-password'
+  $script:Summary = @('Build                 : 15.0.2000.5')
+  Write-YcLastResult -Code 2
+  $lr = Get-Content -LiteralPath (Join-Path $lt 'last-install-sql.json') -Raw | ConvertFrom-Json
+  T 'last result: tag, code, state, reason (P1)'        ($lr.tag -eq 'install-sql' -and $lr.code -eq 2 -and $lr.state -eq 'failed' -and $lr.reason -eq '-SaPasswordFile is empty: C:\x\.sa-password') ($lr | ConvertTo-Json -Compress)
+  T 'last result: the script summary rides along'       (@($lr.summary)[0] -match '^Build\s+: 15\.0\.2000\.5$')
+  $script:YcTag = 'activate-windows'; $script:YcFirstError = ''; $script:YcLastMessage = 'edition changed to ServerStandard, reboot then activation'; $script:Summary = $null
+  Write-YcLastResult -Code 3
+  $lw = Get-Content -LiteralPath (Join-Path $lt 'last-activate-windows.json') -Raw | ConvertFrom-Json
+  T 'last result: activate-windows 3 = waiting + reason' ($lw.state -eq 'waiting' -and $lw.reason -like 'edition changed to ServerStandard*')
+  $script:YcBoundNames = @('Report'); $script:YcTag = 'install-ssms'
+  Write-YcLastResult -Code 0
+  T 'last result: a read-only run writes nothing'       (-not (Test-Path -LiteralPath (Join-Path $lt 'last-install-ssms.json')))
+  $script:YcBoundNames = @()
+  $jf = Join-Path $lt 'yc-milestones.log'
+  T 'journal line: written by the safe writer (P9)'     ((Add-YcLineSafe -Path $jf -Line 'L1') -and ((Get-Content -LiteralPath $jf) -eq 'L1'))
+} finally { Remove-Item -LiteralPath $lt -Recurse -Force -ErrorAction SilentlyContinue; $script:YcTag = 'yallacloud' }
+T 'journal: Add-Content -EA Stop is gone (P9)'          ($block -notmatch 'Add-Content -LiteralPath \$script:YcJournalFile -Value \$line -Encoding ascii -ErrorAction Stop')
+$bl7 = New-YcMsBody -Area 'sql' -State 'failed' -Err 'exit 2: x' -Tag 't' -Id $id -DeployId 'YCD-20261105-000008' -Seq 3
+$n7 = New-YcMsNtfy -Body $bl7
+T 'ntfy: first line links the deployment (P7)'           (($n7.text -split "`n")[0] -eq 'deployment : YCD-20261105-000008  https://cloudinit.mgmt.yallacloud.net/deployments?id=YCD-20261105-000008') (($n7.text -split "`n")[0])
+T 'ntfy: Send-YcMsNtfy sends the Actions header'         ($block -match "if\(\`$act\)\{ \`$h\['Actions'\] = \`$act \}")
+T 'agent ntfy: no "during the build" line (P6)'         ((New-YcAgentNtfy -Area 'glpi' -State 'registered' -DeployId 'YCD-20261105-000008' -Host_ 'H' -When 'during the build (also in OK BUILD)').text -notmatch 'when')
+T 'os name: Evaluation dropped after the change (P11)'  ((ConvertTo-YcOsName -Caption 'Microsoft Windows Server 2022 Standard Evaluation' -EditionId 'ServerStandard') -eq 'Microsoft Windows Server 2022 Standard')
+$isq = [IO.File]::ReadAllText((Join-Path $PayloadDir 'Install-Sql.ps1')) -replace "`r`n", "`n"
+T 'install-sql: its exit no longer sets the library stop flag (no END, no vm.sql.* before 2.47.9)' ($isq -notmatch '\$script:YcStopped = \$true' -and $isq -match 'if \(\$script:YcSqlExiting\) \{ exit \$Code \}')
+T 'install-sql: TLS certificate per instance (P12)'     ($isq -match 'function Set-YcSqlTlsCert' -and $isq -match "Microsoft RSA SChannel Cryptographic Provider" -and $isq -match "Add-YcSummary 'SQL TLS'" -and $isq -notmatch 'ForceEncryption\s*-Value\s*1')
+$aw = [IO.File]::ReadAllText((Join-Path $PayloadDir 'Activate-Windows.ps1')) -replace "`r`n", "`n"
+T 'activate-windows: eval read from the DISM edition (P10)' ($aw -match 'if \("\$cur"\) \{ \("\$cur" -match ''Eval''\)')
+T 'activate-windows: exit 3 carries its reason (P8)'    ($aw -match "\`$script:YcLastMessage = \('edition changed to ' \+ \`$Edition")
 # The call-stack capture, run for real: a script given -Report must be seen as read-only.
 $m = [regex]::Match($lib, '(?s)    \$script:YcBoundNames = @\(\)\r?\n    try\{.*?\n    \}catch\{\}')
 T 'capture code found' $m.Success

@@ -283,6 +283,7 @@ function Get-YcMsState{
         if($Code -eq 7){ return 'waiting' }           # local server did not answer - stays on Microsoft
         return 'failed'
     }
+    if($Area -eq 'license' -and $Code -eq 3){ return 'waiting' }   # edition change staged - reboot, then activation (P8)
     if($Area -eq 'glpi'){
         if($Code -eq 0){ return 'registered' }
         if($Code -eq 8){ return 'waiting' }           # VM not known to CloudStack yet
@@ -317,7 +318,7 @@ function Get-YcMsIdentity{
         $id.ip = [string](@(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop |
                   ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '127.*' -and $_ -notlike '169.254.*' }) | Select-Object -First 1)
     }catch{}
-    try{ $id.os = [string](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption }catch{}
+    try{ $id.os = Get-YcOsName }catch{}
     $script:YcMsId = $id
     return $id
 }
@@ -380,7 +381,7 @@ function Write-YcMsJournal{
             if((Test-Path -LiteralPath $script:YcJournalFile) -and (Get-Item -LiteralPath $script:YcJournalFile).Length -gt 5MB){
                 Move-Item -LiteralPath $script:YcJournalFile -Destination ($script:YcJournalFile + '.1') -Force -ErrorAction SilentlyContinue
             }
-            Add-Content -LiteralPath $script:YcJournalFile -Value $line -Encoding ascii -ErrorAction Stop
+            [void](Add-YcLineSafe -Path $script:YcJournalFile -Line $line)
         }catch{}
     }
     $lv = switch($kw){ 'YC-FAILED' {'ERROR'} 'YC-WAITING' {'WARN'} default {'OK'} }
@@ -444,7 +445,7 @@ function New-YcMsNtfy{
     elseif(@('waiting','waitforhuman') -contains $st){ $p = '4'; $tg = 'warning' }
     $did = $(if($Body.Contains('deploymentId')){ [string]$Body.deploymentId } else { '-' })
     $lines = @(
-        ('deployment : ' + $did),
+        (Get-YcDeployLine $did),
         ('RESULT   ' + (Get-YcMsStateWords $st)),
         ('WHAT     ' + $what),
         ('MACHINE  ' + $Body.hostname + '  ' + $Body.ip),
@@ -467,6 +468,8 @@ function Send-YcMsNtfy{
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $h = @{ Title = $n.title; Priority = $n.priority; Tags = $n.tags }
         if($Token){ $h['Authorization'] = 'Bearer ' + $Token }
+        $act = Get-YcNtfyActions -DeployId $(if($Body -and $Body.Contains('deploymentId')){ [string]$Body.deploymentId } else { '' })
+        if($act){ $h['Actions'] = $act }
         $r = Invoke-WebRequest -Uri $Url -Method Post -Body $n.text -ContentType 'text/plain' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop -Headers $h
         return [string][int]$r.StatusCode
     }catch{
@@ -535,8 +538,58 @@ function Send-YcRunMilestone{
     if(-not $a){ return }
     $st = Get-YcMsState -Area $a -Code $Code
     $e = ''
-    if(@('ok','registered','joined') -notcontains $st){ $e = ('exit ' + $Code + $(if($script:YcLastMessage){ ': ' + $script:YcLastMessage } else { '' })) }
+    if(@('ok','registered','joined') -notcontains $st){ $e = ('exit ' + $Code + $(if(Get-YcRunReason $st){ ': ' + (Get-YcRunReason $st) } else { '' })) }
     Send-YcMilestone -Area $a -State $st -Err $e
+}
+
+# 2.5.0 (P1): the reason of a run - its FIRST error (later ones are mostly consequences), else the
+# last message a script set (Exit-Yc, or a WAITING reason such as activate-windows' edition change).
+function Get-YcRunReason{
+    param([string]$State = '')
+    if(@('waiting','waitforhuman') -contains $State -and $script:YcLastMessage){ return [string]$script:YcLastMessage }
+    if($script:YcFirstError){ return [string]$script:YcFirstError }
+    return [string]$script:YcLastMessage
+}
+
+# 2.5.0 (P1/P13): every finished run leaves last-<tag>.json {tag, code, state, reason, time, summary}
+# so the build (Yc-VmBuild) reports the step's own reason - not "rc=2" - and the versions it added.
+$script:YcLastResultDir = 'C:\ProgramData\YallaCloud\logs'
+function Write-YcLastResult{
+    param([int]$Code)
+    if(-not $script:YcLastResultDir -or -not $script:YcTag -or $script:YcTag -eq 'yallacloud'){ return }
+    if(Test-YcMsReadOnly $script:YcBoundNames){ return }
+    $a = Get-YcMsArea $script:YcTag
+    $st = $(if($a){ Get-YcMsState -Area $a -Code $Code } elseif($Code -eq 0){ 'ok' } else { 'failed' })
+    $sum = @()
+    try{ if($script:Summary){ $sum = @($script:Summary | ForEach-Object { [string]$_ }) } }catch{}
+    $o = [ordered]@{ tag = [string]$script:YcTag; code = $Code; state = $st; reason = $(if($Code -eq 0){ '' } else { Get-YcRunReason $st })
+                     time = (Get-Date -Format s); log = [string]$script:YcLogFile; summary = $sum }
+    try{
+        if(-not (Test-Path -LiteralPath $script:YcLastResultDir)){ New-Item -ItemType Directory -Path $script:YcLastResultDir -Force | Out-Null }
+        $f = Join-Path $script:YcLastResultDir ('last-' + (([string]$script:YcTag).ToLower() -replace '[^a-z0-9-]','') + '.json')
+        ([pscustomobject]$o | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $f -Encoding ascii -ErrorAction SilentlyContinue
+    }catch{}
+}
+
+# 2.5.0 (P9): one log line that can never abort a step. -ErrorAction SilentlyContinue (a caught
+# -EA Stop still prints a TerminatingError into the transcript), three tries for a writer that holds
+# the file, and on "access denied" one repair: clear read-only, give SYSTEM + Administrators Full.
+function Add-YcLineSafe{
+    param([string]$Path,[string]$Line)
+    for($i = 0; $i -lt 3; $i++){
+        $ev = $null
+        Add-Content -LiteralPath $Path -Value $Line -Encoding ascii -ErrorAction SilentlyContinue -ErrorVariable ev
+        if(-not $ev){ return $true }
+        if($i -eq 0 -and ([string]$ev[0]) -match '(?i)denied'){
+            try{
+                $fi = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+                if($fi -and ($fi.Attributes -band [IO.FileAttributes]::ReadOnly)){ $fi.Attributes = $fi.Attributes -bxor [IO.FileAttributes]::ReadOnly }
+                & icacls $Path /grant '*S-1-5-18:F' '*S-1-5-32-544:F' /C /Q 2>&1 | Out-Null
+            }catch{}
+        }
+        Start-Sleep -Milliseconds 400
+    }
+    return $false
 }
 
 # Save-YcMsConfig: copies the webhook settings given to THIS run (variables / environment) into
@@ -588,6 +641,44 @@ function Save-YcMsConfig{
 #   and only when the result changed - a retry with the same result sends nothing anywhere.
 #   Built without the portal: deploymentId is "-".
 # ------------------------------------------------------------------------------------
+# 2.5.0 (P7): the portal page of a deployment - only for a real portal ID (YCD-2...). Self-contained
+# (no script variable): test-event-identity loads the functions of this section on their own.
+function Get-YcDeployLink{
+    param([string]$DeployId)
+    if([string]$DeployId -like 'YCD-2*'){ return ('https://cloudinit.mgmt.yallacloud.net/deployments?id=' + $DeployId) }
+    return ''
+}
+# Pure: the first ntfy line - "deployment : <id>  <link>".
+function Get-YcDeployLine{
+    param([string]$DeployId)
+    $u = Get-YcDeployLink $DeployId
+    return ('deployment : ' + $(if($DeployId){ $DeployId } else { '-' }) + $(if($u){ '  ' + $u } else { '' }))
+}
+# Pure: the ntfy Actions header - the deployment page, then the VM in CloudStack.
+function Get-YcNtfyActions{
+    param([string]$DeployId,[string]$VmUrl = '')
+    $a = @()
+    $u = Get-YcDeployLink $DeployId
+    if($u){ $a += ('view, Deployment status, ' + $u) }
+    if($VmUrl -match '^https?://\S+$'){ $a += ('view, Open in CloudStack, ' + $VmUrl) }
+    return ($a -join '; ')
+}
+
+# 2.5.0 (P10/P11): the OS name read fresh. Win32_OperatingSystem.Caption keeps "Evaluation" after an
+# Evaluation -> Standard edition change; the registry EditionID (ServerStandard) is the truth.
+function ConvertTo-YcOsName{
+    param([string]$Caption,[string]$EditionId)
+    $c = ([string]$Caption).Trim()
+    if($EditionId -and $EditionId -notmatch '(?i)eval' -and $c -match '(?i)\s+Evaluation\b'){ $c = ($c -replace '(?i)\s+Evaluation\b','').Trim() }
+    return $c
+}
+function Get-YcOsName{
+    $cap = ''; $ed = ''
+    try{ $cap = [string](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption }catch{}
+    try{ $ed = [string](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name EditionID -ErrorAction Stop).EditionID }catch{}
+    return (ConvertTo-YcOsName -Caption $cap -EditionId $ed)
+}
+
 $script:YcBuildFile   = 'C:\ProgramData\YallaCloud\sqltemplate\yc-build.json'
 $script:YcSeqFile     = 'C:\ProgramData\YallaCloud\sqltemplate\yc-event-seq.txt'
 $script:YcAgentDir    = 'C:\ProgramData\YallaCloud\agents'
@@ -629,6 +720,7 @@ function Get-YcHeadStatus{
     if(@('failed','error','cancelled') -contains $s){ return 'failed' }
     if(@('waiting','waitforhuman') -contains $s){ return 'waiting' }
     if(@('started','run','start') -contains $s){ return 'started' }
+    if($s -eq 'skipped'){ return 'skipped' }
     return 'running'
 }
 
@@ -768,9 +860,10 @@ function New-YcAgentNtfy{
     elseif(([string]$State).ToLower() -eq 'waitforhuman'){ $p = '4'; $tg = 'raising_hand' }
     elseif($hs -eq 'waiting'){ $p = '3'; $tg = 'hourglass' }
     $a = ([string]$Area).ToLower()
-    $lines = @(('deployment : ' + $DeployId), ($a.PadRight(9) + ': ' + ([string]$State).ToLower()))
+    $lines = @((Get-YcDeployLine $DeployId), ($a.PadRight(9) + ': ' + ([string]$State).ToLower()))
     if($Detail){ $lines += ('detail   : ' + $Detail) }
-    $lines += ('when     : ' + $When)
+    # P6: "during the build" is noise on a build message - the build is what the reader is watching
+    if($When -and $When -notlike 'during the build*'){ $lines += ('when     : ' + $When) }
     $lines += ('vm       : ' + $VmId + '  ip ' + $Ip)
     if($Log){ $lines += ('log      : ' + $Log) }
     if($By){ $lines += ('by       : ' + $By) }

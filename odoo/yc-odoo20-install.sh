@@ -611,7 +611,7 @@ EXTRA_STATES = ('started', 'failed', 'ok', 'joined', 'registered', 'backtogreen'
 
 def send_extra(c, a, fx):
     """second webhook (house contract): FLAT body, strings only, NO secrets, one try 15 s, never raises.
-    Only types vm.<area>.<state> with a contract state are sent (1.6.3: vm.deploy.started too - YCHOOK ntfy STARTED)."""
+    Only types vm.<area>.<state> with a contract state are sent (1.6.3: vm.deploy.started too - extra webhook ntfy STARTED)."""
     url, key = c.get('EXTRA_WEBHOOK_URL', ''), c.get('EXTRA_WEBHOOK_SECRET', '')
     parts = (a.type or '').split('.')
     if len(parts) == 4 and parts[1] == 'odoo':          # vm.odoo.backup.failed -> vm.backup.failed

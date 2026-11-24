@@ -35,6 +35,7 @@
 #   4. downloads the payload zip + its .sha256 sidecar and VERIFIES THE HASH
 #   5. unpacks the two files needed to continue: Adopt-MigratedVm.ps1 and Update-YcScripts.ps1
 #   6. settles the one question that needs an answer - whether Acronis backup is being installed
+#      (not asked when Acronis is already installed and registered on the VM - it is left alone)
 #   7. hands over to  migrated-vm , which does the nineteen phases and pulls the full payload
 #
 # It is deliberately small. Everything it could do twice, it leaves to the script it hands over to.
@@ -513,6 +514,31 @@ function YcExtractNamed {
   return 'shell'
 }
 
+# What is ALREADY on the VM, so step 6 only asks when there is something to decide. A migrated VM
+# very often arrives with Acronis installed and registered; asking for a token then is noise, and
+# migrated-vm would not use it anyway. Same test as migrated-vm's Get-AcronisState: the MMS service
+# means installed, a <dc>-cloud.acronis.com address under HKLM\SOFTWARE\Acronis means registered.
+# PowerShell 2 safe on purpose - this runs before the payload, on whatever the VM has.
+function YcAcronisState {
+  $r = New-Object PSObject -Property @{ installed=$false; running=$false; status='not installed'; registered=$false; dc='' }
+  $svc = $null
+  try { $svc = Get-Service -Name 'MMS' -ErrorAction SilentlyContinue } catch {}
+  if ($svc) { $r.installed = $true; $r.status = [string]$svc.Status; $r.running = ($r.status -eq 'Running') }
+  try {
+    foreach ($k in @('HKLM:\SOFTWARE\Acronis','HKLM:\SOFTWARE\WOW6432Node\Acronis')) {
+      if (-not (Test-Path -LiteralPath $k)) { continue }
+      foreach ($key in @(Get-Item -LiteralPath $k) + @(Get-ChildItem -LiteralPath $k -Recurse -ErrorAction SilentlyContinue)) {
+        foreach ($v in $key.GetValueNames()) {
+          if ([string]$key.GetValue($v) -match '(?<u>https?://[a-z]{2,4}[0-9]{0,3}-cloud\.acronis\.com)') {
+            $r.registered = $true; $r.dc = $Matches.u; return $r
+          }
+        }
+      }
+    }
+  } catch {}
+  return $r
+}
+
 # Only ask a question when there is somebody there to answer it. An automation that blocks on a
 # prompt looks exactly like a hang, and nobody is watching to break it out.
 function YcInteractive {
@@ -659,23 +685,46 @@ YcNote ('sha256 ' + $got.Substring(0,32) + '...   unzipped with the ' + $how + '
 $passthru = @($parsed.args)
 $acronisDecided = ($passthru -contains '-AcronisToken') -or ($passthru -contains '-SkipAcronis')
 $looking = ($passthru -contains '-Report') -or ($passthru -contains '-Status')
+$acr = YcAcronisState
+$acrSeen = $(if ($acr.registered) { 'installed, registered to ' + $acr.dc + ', service MMS ' + $acr.status }
+             elseif ($acr.installed) { 'installed but NOT registered to a data centre, service MMS ' + $acr.status }
+             else { 'NOT installed on this VM' })
 
 if ($looking) {
   YcSkip 6 'confirm what will be installed'
   YcNote 'nothing will be changed on this run, so there is nothing to confirm'
+  YcNote ('Acronis: ' + $acrSeen)
+} elseif ($acr.registered) {
+  # Already protected: no question, no token. migrated-vm records it and leaves it alone.
+  YcOk 6 'confirm what will be installed'
+  YcNote ('Acronis: already ' + $acrSeen)
+  if ($acr.running) {
+    YcNote 'nothing to install and no token needed - it is left exactly as it is.'
+  } else {
+    YcSay ('WARNING: Acronis is registered but its service is ' + $acr.status + ' - no backups run until it is started.') 'Yellow'
+    YcNote 'migrated-vm will flag this. To start it:  Start-Service MMS'
+  }
 } elseif ($acronisDecided) {
   YcOk 6 'confirm what will be installed'
   if ($passthru -contains '-SkipAcronis') { YcNote 'Acronis: skipped, you asked for that' }
   else { YcNote 'Acronis: will be installed and registered' }
 } elseif (-not (YcInteractive)) {
   YcSkip 6 'confirm what will be installed'
+  YcNote ('Acronis: ' + $acrSeen)
   YcNote 'no interactive console, so nothing was asked. Acronis is skipped - pass'
   YcNote '-AcronisToken and -AcronisRegion in $env:YC_ARGS if this customer bought backup.'
 } else {
   # Asked rather than typed into the line: a token pasted at a prompt cannot be mangled by a
   # shell, cannot land in the command history, and cannot be half-quoted.
   Write-Host ''
-  YcSay 'Does this customer have Acronis backup?  [y/N]  ' 'Cyan'
+  if ($acr.installed) {
+    YcSay ('Acronis is ' + $acrSeen + '.') 'Yellow'
+    YcSay 'An unregistered agent backs up nothing.' 'Yellow'
+    YcSay 'Register it now with a token?  [y/N]  ' 'Cyan'
+  } else {
+    YcSay 'Acronis is NOT installed on this VM.' 'Yellow'
+    YcSay 'Does this customer have Acronis backup?  [y/N]  ' 'Cyan'
+  }
   $ans = ''
   try { $ans = (Read-Host '          y or n').Trim().ToLowerInvariant() } catch { $ans = '' }
   if ($ans -eq 'y' -or $ans -eq 'yes') {

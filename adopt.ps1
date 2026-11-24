@@ -432,7 +432,7 @@ function YcHelp {
   YcSay '    $env:EXTRA_WEBHOOK_SECRET = ''<value>'''
   YcSay '    $env:NTFY_TOKEN           = ''<value>''   (our ntfy n.oasisstack.io)'
   YcSay '    $env:NTFY_TOPIC           = ''off''     (optional: no phone push)'
-  YcSay '    $env:GLPI_AGENT_PASSWORD  = ''<value>''   (optional: GLPI phase)'
+  YcSay '    $env:GLPI_AGENT_PASSWORD  = ''<value>''   (optional: not needed - Salt installs GLPI)'
   YcSay '  Every result line is tagged  [YALLACLOUD][YC-MILESTONE][YC-OK]  - or'
   YcSay '  YC-FAILED / YC-WAITING. Search for YC-FAILED to see what went wrong.'
   YcSay '  The adopt keeps them on the VM (SYSTEM and Administrators only), so every'
